@@ -15,7 +15,7 @@ import openpyxl
 class StockMatchApp:
     """
     StockMatch_Miya-v1.0.0
-    注文品管理表（1つのファイル）と注文書フォルダ内の全注文書Excelを照合し、
+    注文品管理表（1つのファイル）と注文書フォルダ内（サブフォルダ含む全階層）の全注文書Excelを照合し、
     今日（判定基準日）時点で「現品確認日」および「請求日」の納期超過を検査・可視化するデスクトップアプリ
     """
 
@@ -204,7 +204,7 @@ class StockMatchApp:
             side=tk.LEFT
         )
 
-        # ② 注文書フォルダ選択行（フォルダ指定・中の注文書を全て確認）
+        # ② 注文書フォルダ選択行（フォルダ指定・サブフォルダ含む全階層を走査）
         row2 = ttk.Frame(file_card, style="Card.TFrame")
         row2.pack(fill=tk.X, pady=(0, 6))
 
@@ -248,7 +248,7 @@ class StockMatchApp:
 
         ttk.Label(
             row3,
-            text="※設定保存先は「C:\\StockMatch\\config.json」専用に厳格固定されています。",
+            text="※サブフォルダ内も自動探索します。設定保存先は「C:\\StockMatch\\config.json」専用に厳格固定されています。",
             style="Card.TLabel",
             foreground="#64748b",
         ).pack(side=tk.LEFT)
@@ -483,8 +483,9 @@ class StockMatchApp:
    - 「ファイルを参照...」から管理表Excel（例: 注文品管理表.xlsx）を選択します。
 
 2. 『② 注文書フォルダパス』の指定:
-   - 「フォルダを参照...」から注文書Excelが保管されているフォルダを選択します。
-   - フォルダ内のすべての注文書を自動的に一括検査します。注文書以外の無関係なファイル（PDF、テキスト、一時ファイル、注文書フォーマットではないExcel等）は自動的にスキップされます。
+   - 「フォルダを参照...」から注文書Excelが保管されている親フォルダを選択します。
+   - 【サブフォルダ対応】指定フォルダ直下だけでなく、配下にあるすべてのサブフォルダ内も再帰的に走査し、すべての注文書Excelを自動検出・一括検査します。
+   - 注文書以外の無関係なファイル（PDF、テキスト、一時ファイル、注文書フォーマットではないExcel等）は自動的にスキップされます。
 
 3. 『パス設定を保存』ボタン:
    - ボタンを押すと、現在の管理表パスと注文書フォルダパスが C:\\StockMatch\\config.json に保存されます。
@@ -583,6 +584,7 @@ class StockMatchApp:
             "StockMatch_Miya-v1.0.0\n"
             "注文品納期 × 管理表（現品確認日・請求日）超過照合システム\n\n"
             "対応形式: Excel (.xlsx, .xlsm) / CSV\n"
+            "探索範囲: 指定フォルダおよび全サブフォルダ\n"
             "設定保存先: C:\\StockMatch\\config.json 専用\n\n"
             "© StockMatch_Miya System All Rights Reserved.",
         )
@@ -737,31 +739,35 @@ class StockMatchApp:
         self, folder_path: str, mgmt_filepath: str, progress_cb=None
     ) -> tuple[list[dict], int, int]:
         """
-        指定された注文書フォルダ内の全ファイルを走査し、注文書以外のファイル
-        （Excel以外のファイル、一時ファイル、注文品管理表自身、注文書フォーマットではないExcel等）を
+        指定された注文書フォルダ内（サブフォルダ含む全階層）を再帰的に走査し、
+        注文書以外のファイル（Excel以外、一時ファイル、管理表自身、フォーマット不一致Excel等）を
         自動的に無視して、有効な注文書の明細のみをすべて抽出する。
         """
         order_items = []
         valid_file_count = 0
         ignored_file_count = 0
 
-        mgmt_abspath = os.path.abspath(mgmt_filepath) if mgmt_filepath else ""
-        all_entries = sorted(os.listdir(folder_path))
-        total_entries = len(all_entries)
+        mgmt_abspath = os.path.normcase(os.path.realpath(os.path.abspath(mgmt_filepath))) if mgmt_filepath else ""
 
-        for idx, entry_name in enumerate(all_entries, start=1):
-            full_path = os.path.join(folder_path, entry_name)
+        # 全階層（サブフォルダ含む）のファイル一覧を収集
+        file_list = []
+        for root_dir, dirs, files in os.walk(folder_path):
+            for file_name in files:
+                file_list.append((root_dir, file_name))
+
+        file_list.sort(key=lambda item: os.path.join(item[0], item[1]))
+        total_entries = len(file_list)
+
+        for idx, (root_dir, entry_name) in enumerate(file_list, start=1):
+            full_path = os.path.join(root_dir, entry_name)
 
             if progress_cb:
                 pct = 35.0 + (40.0 * idx / max(1, total_entries))
+                rel_display = os.path.relpath(full_path, folder_path)
                 progress_cb(
                     pct,
-                    f"[2/3] 注文書フォルダを確認中 ({idx}/{total_entries}): {entry_name}",
+                    f"[2/3] 注文書フォルダを確認中 ({idx}/{total_entries}): {rel_display}",
                 )
-
-            # サブディレクトリはスキップ
-            if not os.path.isfile(full_path):
-                continue
 
             # Excelの一時ファイル（~$）や隠しファイルは無視
             if entry_name.startswith("~$") or entry_name.startswith("."):
@@ -774,8 +780,9 @@ class StockMatchApp:
                 continue
 
             # 注文品管理表と同じファイル、またはファイル名に「管理表」「納期超過チェック結果」を含むファイルは無視
+            full_abspath = os.path.normcase(os.path.realpath(os.path.abspath(full_path)))
             if (
-                os.path.abspath(full_path) == mgmt_abspath
+                full_abspath == mgmt_abspath
                 or "管理表" in entry_name
                 or "納期超過チェック結果" in entry_name
             ):
@@ -1441,6 +1448,7 @@ class StockMatchApp:
                 order_items.append(
                     {
                         "file": filename,
+                        "full_path": filepath,
                         "req_type_code": req_type_code,
                         "req_type_label": req_type_label,
                         "sheet": sheet_name,
@@ -1527,7 +1535,7 @@ class StockMatchApp:
             self._report_progress(5.0, "[1/3] 注文品管理表を開いています...")
             mgmt_rows = self._parse_management_book(mgmt_path, progress_cb=self._report_progress)
 
-            self._report_progress(35.0, "[2/3] 注文書フォルダ内のファイルをスキャンしています...")
+            self._report_progress(35.0, "[2/3] 注文書フォルダ（サブフォルダ含む）を走査中...")
             order_items, valid_order_files, ignored_files = self._collect_valid_order_files(
                 order_dir, mgmt_path, progress_cb=self._report_progress
             )
