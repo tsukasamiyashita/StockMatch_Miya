@@ -246,9 +246,10 @@ class StockMatchApp:
 
         ttk.Label(
             row3,
-            text="※ファイル名先頭8桁の管理Noが管理表と一致しない項目は【不一致】管理表未記載として明示されます。",
+            text="💡 表の行を【ダブルクリック】すると、どこが不一致か（注文書 vs 管理表の比較詳細）を確認できます。",
             style="Card.TLabel",
-            foreground="#64748b",
+            foreground="#4f46e5",
+            font=("Meiryo UI", 9, "bold"),
         ).pack(side=tk.LEFT)
 
         self.export_btn = ttk.Button(
@@ -349,7 +350,7 @@ class StockMatchApp:
             rb.pack(side=tk.LEFT, padx=(0, 10))
 
         ttk.Label(filter_frame, text="キーワード検索:").pack(side=tk.LEFT, padx=(12, 4))
-        search_entry = ttk.Entry(filter_frame, textvariable=self.search_keyword, width=22)
+        search_entry = ttk.Entry(filter_frame, textvariable=self.search_keyword, width=20)
         search_entry.pack(side=tk.LEFT)
         search_entry.bind("<KeyRelease>", lambda e: self._refresh_table())
 
@@ -359,7 +360,15 @@ class StockMatchApp:
             style="Action.TButton",
             command=self._clear_all_column_filters,
         )
-        self.clear_col_filters_btn.pack(side=tk.RIGHT, padx=(8, 0))
+        self.clear_col_filters_btn.pack(side=tk.RIGHT, padx=(6, 0))
+
+        self.inspect_btn = ttk.Button(
+            filter_frame,
+            text="🔍 選択行の不一致・照合詳細を表示",
+            style="Action.TButton",
+            command=self._open_selected_row_detail,
+        )
+        self.inspect_btn.pack(side=tk.RIGHT, padx=(6, 0))
 
         # 5. メイン結果テーブル（Treeview）
         table_container = ttk.Frame(self.root, padding=(16, 0, 16, 12))
@@ -367,6 +376,7 @@ class StockMatchApp:
 
         columns = (
             "status_badge",
+            "mismatch_reason",
             "req_type",
             "order_no",
             "supplier",
@@ -387,22 +397,23 @@ class StockMatchApp:
         self.tree = ttk.Treeview(table_container, columns=columns, show="headings", selectmode="browse")
 
         self.col_configs = [
-            ("status_badge", "総合判定", 165, "center"),
-            ("req_type", "依頼区分", 85, "center"),
-            ("order_no", "管理No(注文番号)", 120, "center"),
-            ("supplier", "発注先", 140, "w"),
-            ("maker", "メーカー", 110, "w"),
-            ("item_name", "品名", 150, "w"),
+            ("status_badge", "総合判定", 155, "center"),
+            ("mismatch_reason", "不一致理由・照合診断", 340, "w"),
+            ("req_type", "依頼区分", 80, "center"),
+            ("order_no", "管理No(注文番号)", 115, "center"),
+            ("supplier", "発注先", 130, "w"),
+            ("maker", "メーカー", 100, "w"),
+            ("item_name", "品名", 145, "w"),
             ("model_spec", "型番・規格(図番)", 165, "w"),
-            ("qty", "数量", 65, "center"),
+            ("qty", "数量", 60, "center"),
             ("due_date", "注文書納期", 95, "center"),
-            ("days_overdue", "基準日超過", 95, "center"),
-            ("actual_date", "現品確認日(物)", 115, "center"),
-            ("actual_status", "現品状況", 140, "center"),
-            ("invoice_date", "請求日(伝票)", 115, "center"),
-            ("invoice_status", "請求状況", 140, "center"),
-            ("person", "担当", 75, "center"),
-            ("source_info", "照合元情報", 180, "w"),
+            ("days_overdue", "基準日超過", 90, "center"),
+            ("actual_date", "現品確認日(物)", 110, "center"),
+            ("actual_status", "現品状況", 135, "center"),
+            ("invoice_date", "請求日(伝票)", 110, "center"),
+            ("invoice_status", "請求状況", 135, "center"),
+            ("person", "担当", 70, "center"),
+            ("source_info", "照合元情報", 190, "w"),
         ]
 
         self.col_titles = {col_id: title for col_id, title, _, _ in self.col_configs}
@@ -412,6 +423,7 @@ class StockMatchApp:
             self.tree.column(col_id, width=width, anchor=anchor)
 
         self.tree.bind("<Button-1>", self._on_tree_click)
+        self.tree.bind("<Double-1>", self._on_tree_double_click)
 
         # 行の背景色タグ設定
         self.tree.tag_configure("UNMATCHED", background="#ede9fe", foreground="#4c1d95")  # 紫系（不一致）
@@ -461,6 +473,115 @@ class StockMatchApp:
         return card
 
     # =========================================================================
+    # 不一致・照合詳細の比較インスペクタ（ダブルクリック / ボタン表示）
+    # =========================================================================
+    def _on_tree_double_click(self, event):
+        """データ行のダブルクリックで詳細比較ウィンドウを表示"""
+        region = self.tree.identify_region(event.x, event.y)
+        if region == "heading":
+            return
+        self._open_selected_row_detail()
+
+    def _open_selected_row_detail(self):
+        """現在選択されている行の不一致理由・項目比較ダイアログを開く"""
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showinfo("行未選択", "一覧テーブルから確認したい行をクリックして選択してください。")
+            return
+
+        item_id = sel[0]
+        rec_idx_str = item_id.replace("rec_", "")
+        if not rec_idx_str.isdigit():
+            return
+        rec_idx = int(rec_idx_str)
+        if not (0 <= rec_idx < len(self.analyzed_records)):
+            return
+
+        rec = self.analyzed_records[rec_idx]
+        diag = rec.get("diagnostic_data", {})
+
+        win = tk.Toplevel(self.root)
+        win.title(f"不一致・照合詳細比較 — 管理No: {rec['order_no']} / 品名: {rec['item_name']}")
+        win.geometry("920x660")
+        win.minsize(760, 520)
+        win.transient(self.root)
+
+        top_banner = tk.Frame(
+            win,
+            bg="#4c1d95" if rec.get("is_unmatched") else "#1e293b",
+            padx=14,
+            pady=10,
+        )
+        top_banner.pack(fill=tk.X)
+
+        tk.Label(
+            top_banner,
+            text=f"判定: {rec['status_badge']}   |   {rec['mismatch_reason']}",
+            bg=top_banner["bg"],
+            fg="#ffffff",
+            font=("Meiryo UI", 10, "bold"),
+            anchor="w",
+        ).pack(fill=tk.X)
+
+        body = ttk.Frame(win, padding=14)
+        body.pack(fill=tk.BOTH, expand=True)
+
+        # 項目別比較テーブル
+        lbl_cmp = ttk.Label(
+            body,
+            text="■ 注文書 と 注文品管理表（最有力候補または照合行）の項目別比較",
+            font=("Meiryo UI", 9, "bold"),
+        )
+        lbl_cmp.pack(anchor="w", pady=(0, 6))
+
+        cmp_cols = ("field", "order_val", "mgmt_val", "judge")
+        cmp_tree = ttk.Treeview(body, columns=cmp_cols, show="headings", height=10)
+        cmp_tree.heading("field", text="比較項目")
+        cmp_tree.heading("order_val", text="注文書の記載内容")
+        cmp_tree.heading("mgmt_val", text="注文品管理表の記載内容 (最有力候補)")
+        cmp_tree.heading("judge", text="一致/不一致判定")
+
+        cmp_tree.column("field", width=150, anchor="w")
+        cmp_tree.column("order_val", width=290, anchor="w")
+        cmp_tree.column("mgmt_val", width=290, anchor="w")
+        cmp_tree.column("judge", width=140, anchor="center")
+
+        cmp_tree.tag_configure("MATCH", background="#dcfce7", foreground="#166534")
+        cmp_tree.tag_configure("PARTIAL", background="#fef9c3", foreground="#854d0e")
+        cmp_tree.tag_configure("DIFF", background="#fee2e2", foreground="#991b1b")
+        cmp_tree.tag_configure("INFO", background="#f1f5f9", foreground="#334155")
+
+        cmp_rows = diag.get("comparison_rows", [])
+        for f_name, o_v, m_v, j_txt, tag in cmp_rows:
+            cmp_tree.insert("", tk.END, values=(f_name, o_v, m_v, j_txt), tags=(tag,))
+
+        cmp_tree.pack(fill=tk.X, pady=(0, 12))
+
+        # 詳細診断レポートテキスト
+        lbl_rep = ttk.Label(
+            body,
+            text="■ 詳細診断レポート（なぜ不一致になったか / 管理表側の検索状況）",
+            font=("Meiryo UI", 9, "bold"),
+        )
+        lbl_rep.pack(anchor="w", pady=(0, 6))
+
+        txt_frame = ttk.Frame(body)
+        txt_frame.pack(fill=tk.BOTH, expand=True)
+
+        txt = tk.Text(txt_frame, wrap="word", font=("Meiryo UI", 9), padx=10, pady=8, relief="solid", borderwidth=1)
+        vsb = ttk.Scrollbar(txt_frame, orient="vertical", command=txt.yview)
+        txt.configure(yscrollcommand=vsb.set)
+        txt.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+
+        txt.insert("1.0", diag.get("detail_text", rec.get("mismatch_reason", "")))
+        txt.configure(state="disabled")
+
+        btn_bar = ttk.Frame(win, padding=(14, 8))
+        btn_bar.pack(fill=tk.X)
+        ttk.Button(btn_bar, text="閉じる", style="Primary.TButton", command=win.destroy).pack(side=tk.RIGHT)
+
+    # =========================================================================
     # ヘルプ・ガイドダイアログ
     # =========================================================================
     def _show_help_guide(self):
@@ -487,37 +608,17 @@ class StockMatchApp:
 2. 『② 注文書フォルダパス』の指定:
    - 「フォルダを参照...」から注文書Excelが保管されている親フォルダを選択します。
    - 【サブフォルダ対応】指定フォルダ直下だけでなく、配下にあるすべてのサブフォルダ内も再帰的に走査し、すべての注文書Excelを自動検出・一括検査します。
-   - 注文書以外の無関係なファイル（PDF、テキスト、一時ファイル、注文書フォーマットではないExcel等）は自動的にスキップされます。
 
-3. 『管理No（8桁）による厳格な一致照合ルール』:
-   - 注文書のファイル名先頭8桁が「管理No（注文番号）」となります（例: 22609030購依〇〇注文.xlsx ⇒ 管理No: 22609030）。
-   - 注文品管理表の中に、この管理Noと一致する項目が存在しない場合は、無条件で「【不一致】管理表未記載」と判定されます。
-   - 管理Noが一致する行の中から、図面番号・品番等によって該当明細を特定します。
+3. 『どこが不一致かを確認する方法（不一致理由・照合診断）』:
+   - 一覧テーブルの2列目「不一致理由・照合診断」に、なぜ不一致になったのか（管理Noが管理表にないのか、図番・品番・品名・仕様のどれが違っているのか、別行で消費済みか）が具体的に表示されます。
+   - さらに【行をダブルクリック】するか「🔍 選択行の不一致・照合詳細を表示」ボタンを押すと、注文書と管理表の項目別比較ウィンドウが開き、どの文字が食い違っているかを一目で確認できます。
 
 4. 『パス設定を保存』ボタン:
    - ボタンを押すと、現在の管理表パスと注文書フォルダパスが C:\\StockMatch\\config.json に保存されます。
    - 【厳重ガード】本アプリの設定ファイルは「C:\\StockMatch\\config.json」専用に厳重に固定されており、これ以外のフォルダへ保存・上書きされることは一切ありません。
-   - 次回起動時に自動復元されるため、毎回の選択が不要になります。
 
-5. 『判定基準日』の確認:
-   - デフォルトで本日の日付が入っています。過去や未来の納期超過を検証したい場合は日付を打ち替えて「照合・遅延チェック実行」を押してください。
-
-6. 『照合・遅延チェック実行』ボタン (F5キー):
+5. 『照合・遅延チェック実行』ボタン (F5キー):
    - 照合計算を開始します。進捗バーで現在の状況がリアルタイムに表示されます。
-
---------------------------------------------------
-【画面の見方と操作】
-■ 不一致の表示（管理表未記載）:
-  - 管理Noが管理表に存在しない場合や明細が見当たらない場合は「【不一致】管理表未記載」として紫色で強調表示されます。
-
-■ 表示フィルタ / キーワード検索:
-  - 「すべての異常(超過・不一致)を表示」や「管理表との不一致のみ」等でワンクリック切り替えが可能です。
-
-■ Excel風列フィルター機能:
-  - 各列のヘッダーをクリックすると、Excelと同じ「昇順・降順ソート」「値の検索」「個別チェックボックス絞り込み」が利用できます。
-
-■ CSV/Excel出力 (Ctrl+Sキー):
-  - 照合・超過判定結果の一覧を .xlsx または .csv 形式で出力・保存できます。
 """
         txt.insert("1.0", help_content)
         txt.configure(state="disabled")
@@ -543,32 +644,22 @@ class StockMatchApp:
         txt.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         vsb.pack(side=tk.RIGHT, fill=tk.Y)
 
-        logic_content = """【照合・遅延判定ロジック】
+        logic_content = """【不一致診断・照合ロジック】
 
-1. 管理No（ファイル名先頭8桁）の厳格判定:
-   - 注文書ファイル名の先頭8桁から管理Noを抽出します（例: 22609030）。
-   - 注文品管理表側の「管理No / 注文番号」列（またはシート名）にこの管理Noと一致するデータが存在しない場合、直ちに「【不一致】管理表未記載」と判定します。
+■ 不一致になる3つのパターン（テーブルの「不一致理由・照合診断」列に表示）:
+  パターン①【管理No不一致】:
+    - 注文書ファイル名先頭8桁の管理No（例: 12610121）が、注文品管理表のどのシートにも1件も存在しない場合。
+    - 管理表で読み取られた管理No一覧や類似番号も診断画面で確認できます。
 
-2. 依頼区分の切り分け（購入依頼 vs 外注依頼）:
-   - ファイル名に「購依」が含まれる場合は【購入依頼】として管理表の「購入品リスト」系シートを照合します。
-   - ファイル名に「外依」が含まれる場合は【外注依頼】として管理表の「外注加工リスト」系シートを照合します。
+  パターン②【明細項目不一致】:
+    - 管理Noは管理表に存在するものの、図面番号・品番・品名・仕様がいずれも基準値に達しなかった場合。
+    - 同じ管理Noの中で最も近い管理表の行を自動抽出し、「図番・品番・品名・仕様・数量」のどれが一致し、どれが不一致かを明示します。
 
-3. 明細行の特定優先ルール:
-   - 管理Noが一致する管理表データの中から、注文書の「図面番号」または「品番」（スペース・記号を除去した英数字）で1対1特定を行います。
-   - 同一型番が複数ある場合は数量の一致度をタイブレークとして判定します。
-   - 該当する行が存在しない場合は「【不一致】管理表未記載」と判定します。
+  パターン③【重複・行数不足（他行で照合済）】:
+    - 管理表に一致する行はあったものの、注文書側に同じ品目の明細が複数行あり、管理表側の行がすでに前の明細行で消費（1対1照合済）されてしまった場合。
 
-4. 現品確認日（物：A列）の判定:
-   - 管理表のA列（1列目）に日付や確認済み文字列が記入されている場合:
-     ⇒ 「確認済 (正常)」と判定（現品超過フラグはOFF）。
-   - 管理表のA列が未記入の場合:
-     ⇒ 判定基準日（今日）が注文書の納期を過ぎていれば「未確認 (超過X日)」と判定。
-
-5. 請求日（伝票：AI列）の判定:
-   - 管理表のAI列（35列目）に日付や確認済み文字列が記入されている場合:
-     ⇒ 「確認済 (正常)」と判定（請求超過フラグはOFF）。
-   - 管理表のAI列が未記入の場合:
-     ⇒ 判定基準日（今日）が注文書の納期を過ぎていれば「未確認 (超過X日)」と判定。
+■ 現品確認日（物：A列）と請求日（伝票：AI列）の判定:
+  - 管理表のA列・AI列に日付や確認文字が入っていれば「確認済 (正常)」、空欄で納期を過ぎていれば「未確認 (超過X日)」と判定します。
 """
         txt.insert("1.0", logic_content)
         txt.configure(state="disabled")
@@ -583,7 +674,7 @@ class StockMatchApp:
             "バージョン情報",
             "StockMatch_Miya-v1.0.0\n"
             "注文品納期 × 管理表（現品確認日・請求日）超過照合システム\n\n"
-            "照合規則: ファイル名先頭8桁の管理No完全照合\n"
+            "照合規則: ファイル名先頭8桁の管理No照合＋不一致箇所診断機能付き\n"
             "対応形式: Excel (.xlsx, .xlsm) / CSV\n"
             "探索範囲: 指定フォルダおよび全サブフォルダ\n"
             "設定保存先: C:\\StockMatch\\config.json 専用\n\n"
@@ -858,16 +949,16 @@ class StockMatchApp:
 
     @staticmethod
     def _normalize_key(text: str) -> str:
-        """照合比較用に文字列を正規化（スペース・中点・記号・法人格を除去）"""
+        """照合比較用に文字列を正規化（スペース・中点・記号・法人格を除去、×やxも統一）"""
         if not text or pd.isna(text):
             return ""
         s = str(text).strip()
-        if s.lower() in ("none", "nan", "nat"):
+        if s.lower() in ("none", "nan", "nat", "-", "ー", "―", "‐"):
             return ""
         s = unicodedata.normalize("NFKC", s)
         for corp in ("株式会社", "有限会社", "(株)", "(有)", "御中", "様"):
             s = s.replace(corp, "")
-
+        s = s.replace("×", "X").replace("＊", "X").replace("*", "X")
         s = re.sub(r"[^0-9A-Za-z一-龥ぁ-んァ-ン]", "", s)
         return s.upper()
 
@@ -897,7 +988,7 @@ class StockMatchApp:
             if inter == 0:
                 return 0.0
             bigram_score = inter / min(len(bg_a), len(bg_b))
-            if bigram_score >= 0.45:
+            if bigram_score >= 0.40:
                 seq_ratio = difflib.SequenceMatcher(None, na, nb).quick_ratio()
                 return max(bigram_score, seq_ratio)
             return bigram_score
@@ -933,6 +1024,24 @@ class StockMatchApp:
             s = s[:-2]
         return s
 
+    @staticmethod
+    def _extract_8digit_no(text: str) -> str:
+        """文字列から8桁の管理Noを抽出（ハイフン区切り等にも対応）"""
+        if not text:
+            return ""
+        s = unicodedata.normalize("NFKC", str(text).strip())
+        if s.endswith(".0"):
+            s = s[:-2]
+        m = re.search(r"(?<!\d)(\d{8})(?!\d)", s)
+        if m:
+            return m.group(1)
+        # ハイフンやスペースが入った8桁数字（例: 22-609-030 や 2260-9030）の検出
+        digits_only = re.sub(r"\D", "", s)
+        if len(digits_only) == 8 and not digits_only.startswith("202"):
+            return digits_only
+        m2 = re.search(r"(\d{8})", s)
+        return m2.group(1) if m2 else ""
+
     # =========================================================================
     # Excel解析ロジック（①注文品管理表 & ②注文書）
     # =========================================================================
@@ -959,9 +1068,7 @@ class StockMatchApp:
             else:
                 sheet_cat = "OTHER"
 
-            # シート名に含まれる数字（例: 22609030）をシートのデフォルト管理No候補とする
-            m_sheet_no = re.search(r"(\d{8})", sheet_name)
-            sheet_default_order_no = m_sheet_no.group(1) if m_sheet_no else ""
+            sheet_default_order_no = self._extract_8digit_no(sheet_name)
 
             ws = wb[sheet_name]
             raw_rows = []
@@ -981,14 +1088,18 @@ class StockMatchApp:
             header_pos_in_list = None
             col_map = {}
 
-            for list_i, (r_idx, row_tuple) in enumerate(raw_rows[:15]):
-                if r_idx > 20:
+            for list_i, (r_idx, row_tuple) in enumerate(raw_rows[:18]):
+                if r_idx > 25:
                     break
                 prev_tuple = raw_rows[list_i - 1][1] if list_i > 0 and raw_rows[list_i - 1][0] == r_idx - 1 else ()
                 row_vals = []
                 for c_idx in range(1, len(row_tuple) + 1):
-                    v_curr = str(row_tuple[c_idx - 1] or "").strip()
-                    v_above = str(prev_tuple[c_idx - 1] or "").strip() if c_idx - 1 < len(prev_tuple) else ""
+                    v_curr = unicodedata.normalize("NFKC", str(row_tuple[c_idx - 1] or "").strip())
+                    v_above = (
+                        unicodedata.normalize("NFKC", str(prev_tuple[c_idx - 1] or "").strip())
+                        if c_idx - 1 < len(prev_tuple)
+                        else ""
+                    )
                     combined = re.sub(r"\s+", "", f"{v_above}{v_curr}")
                     row_vals.append((c_idx, combined, re.sub(r"\s+", "", v_curr)))
 
@@ -1000,11 +1111,15 @@ class StockMatchApp:
                     for c_idx, v_comb, v_curr in row_vals:
                         if not v_comb:
                             continue
+                        v_up = v_comb.upper()
                         if "現品確認" in v_comb or (c_idx == 1 and "現品" in v_comb):
                             col_map.setdefault("actual_date", c_idx)
                         elif "請求日" in v_comb or (c_idx >= 30 and "請求" in v_comb):
                             col_map.setdefault("invoice_date", c_idx)
-                        elif "管理No" in v_comb or "管理番号" in v_comb or "注文番号" in v_comb or "発注番号" in v_comb or "手配番号" in v_comb:
+                        elif any(
+                            k in v_up
+                            for k in ("管理NO", "管理番号", "注文番号", "発注番号", "手配番号", "工事番号", "工事NO", "製番")
+                        ):
                             col_map.setdefault("order_no", c_idx)
                         elif "発注日" in v_comb or "注文日" in v_comb:
                             col_map.setdefault("order_date", c_idx)
@@ -1018,7 +1133,7 @@ class StockMatchApp:
                             col_map.setdefault("maker", c_idx)
                         elif "仕様" in v_comb or "規格" in v_comb or "材質" in v_comb or "寸法" in v_comb:
                             col_map.setdefault("spec", c_idx)
-                        elif "購入数" in v_comb or "発注数" in v_comb or v_curr in ("数量", "数", "購入数"):
+                        elif "購入数" in v_comb or "発注数" in v_comb or v_curr in ("数量", "数", "購入数", "必要数"):
                             col_map.setdefault("qty", c_idx)
                         elif "単価" in v_curr and "金額" not in v_curr and "必要数" not in v_curr:
                             col_map.setdefault("unit_price", c_idx)
@@ -1055,12 +1170,34 @@ class StockMatchApp:
             col_map.setdefault("actual_date", 1)
             col_map.setdefault("invoice_date", 35)
 
+            data_slice = raw_rows[header_pos_in_list + 1 :]
+
+            # 管理No列が未検出の場合、データ行のB列〜M列で8桁数値が入っている列を自動検出
+            if "order_no" not in col_map and data_slice:
+                max_scan_col = min(13, col_map.get("drawing_no", 13))
+                best_c = None
+                best_hits = 0
+                for c_try in range(2, max_scan_col):
+                    hits = 0
+                    for _, rtuple in data_slice[:80]:
+                        if c_try - 1 < len(rtuple):
+                            v_try = self._extract_8digit_no(rtuple[c_try - 1])
+                            if v_try and not v_try.startswith("202"):
+                                hits += 1
+                    if hits > best_hits:
+                        best_hits = hits
+                        best_c = c_try
+                if best_c and best_hits >= 1:
+                    col_map["order_no"] = best_c
+
             def _get_col(rtuple: tuple, col_1based: int | None):
                 if not col_1based or col_1based < 1 or col_1based > len(rtuple):
                     return None
                 return rtuple[col_1based - 1]
 
-            for r_idx, row_tuple in raw_rows[header_pos_in_list + 1 :]:
+            last_seen_order_no_8 = sheet_default_order_no
+
+            for r_idx, row_tuple in data_slice:
                 drawing_val = _get_col(row_tuple, col_map.get("drawing_no"))
                 part_val = _get_col(row_tuple, col_map.get("part_no"))
                 item_val = _get_col(row_tuple, col_map.get("item_name"))
@@ -1068,7 +1205,7 @@ class StockMatchApp:
                 spec_val = _get_col(row_tuple, col_map.get("spec"))
                 order_no_val = _get_col(row_tuple, col_map.get("order_no"))
 
-                if not any([drawing_val, part_val, item_val, spec_val, order_no_val]):
+                if not any([drawing_val, part_val, item_val, spec_val]):
                     continue
 
                 order_date_raw = _get_col(row_tuple, col_map.get("order_date"))
@@ -1103,10 +1240,29 @@ class StockMatchApp:
                 amount_str = self._clean_cell_str(_get_col(row_tuple, col_map.get("amount")))
 
                 raw_order_no_str = self._clean_cell_str(order_no_val)
-                order_no_str = raw_order_no_str or sheet_default_order_no
+                exact_order_no_8 = self._extract_8digit_no(raw_order_no_str)
+
+                if not exact_order_no_8:
+                    max_c = min(13, col_map.get("drawing_no", 13))
+                    for c_scan in range(2, max_c):
+                        if c_scan == col_map.get("order_date"):
+                            continue
+                        cand_8 = self._extract_8digit_no(_get_col(row_tuple, c_scan))
+                        if cand_8 and not cand_8.startswith("202"):
+                            exact_order_no_8 = cand_8
+                            if not raw_order_no_str:
+                                raw_order_no_str = cand_8
+                            break
+
+                if exact_order_no_8:
+                    last_seen_order_no_8 = exact_order_no_8
+                elif last_seen_order_no_8:
+                    exact_order_no_8 = last_seen_order_no_8
+
+                order_no_str = raw_order_no_str or exact_order_no_8 or sheet_default_order_no
                 person_str = self._clean_cell_str(_get_col(row_tuple, col_map.get("person")))
 
-                model_display_parts = [p for p in (drawing_str, part_str, spec_str) if p]
+                model_display_parts = [p for p in (drawing_str, part_str, spec_str) if p and p != "-"]
                 model_spec_display = " / ".join(dict.fromkeys(model_display_parts))
 
                 norm_drawing = self._normalize_key(drawing_str)
@@ -1115,10 +1271,6 @@ class StockMatchApp:
                 norm_spec = self._normalize_key(spec_str)
                 norm_maker = self._normalize_key(maker_str)
                 norm_combined = self._normalize_key(f"{drawing_str} {part_str} {item_str} {spec_str}")
-
-                # 管理No（8桁）の正規化抽出
-                m_ord = re.search(r"(\d{8})", order_no_str)
-                exact_order_no_8 = m_ord.group(1) if m_ord else (order_no_str if len(order_no_str) == 8 and order_no_str.isdigit() else "")
 
                 mgmt_rows.append(
                     {
@@ -1163,6 +1315,7 @@ class StockMatchApp:
                         "norm_combined": norm_combined,
                         "bg_combined": self._make_bigrams(norm_combined),
                         "matched": False,
+                        "matched_by": "",
                     }
                 )
 
@@ -1174,21 +1327,19 @@ class StockMatchApp:
         wb = openpyxl.load_workbook(filepath, data_only=True, read_only=True)
         order_items = []
         filename = os.path.basename(filepath)
+        norm_fname = unicodedata.normalize("NFKC", filename)
 
-        # 注文書ファイル名の頭から8桁を管理Noとして取得
         file_order_no_8 = ""
-        prefix_match = re.match(r"^(\d{8})", filename)
+        prefix_match = re.match(r"^\s*(\d{8})", norm_fname)
         if prefix_match:
             file_order_no_8 = prefix_match.group(1)
         else:
-            m_any_8 = re.search(r"(\d{8})", filename)
-            if m_any_8:
-                file_order_no_8 = m_any_8.group(1)
+            file_order_no_8 = self._extract_8digit_no(norm_fname)
 
-        if "購依" in filename or "購入" in filename:
+        if "購依" in norm_fname or "購入" in norm_fname:
             req_type_code = "PURCHASE"
             req_type_label = "購入依頼"
-        elif "外依" in filename or "外注" in filename:
+        elif "外依" in norm_fname or "外注" in norm_fname:
             req_type_code = "OUTSOURCE"
             req_type_label = "外注依頼"
         else:
@@ -1230,19 +1381,20 @@ class StockMatchApp:
                     if not cell_val:
                         continue
 
-                    if not sheet_order_no and ("注文番号" in cell_val or "発注番号" in cell_val or "管理No" in cell_val or "No." in cell_val):
-                        m_in = re.search(r"(\d{8})", cell_val)
+                    if not sheet_order_no and (
+                        "注文番号" in cell_val or "発注番号" in cell_val or "管理No" in cell_val or "No." in cell_val
+                    ):
+                        m_in = self._extract_8digit_no(cell_val)
                         if m_in:
-                            sheet_order_no = m_in.group(1)
+                            sheet_order_no = m_in
                         else:
                             for offset in range(1, 9):
                                 if c_idx - 1 + offset >= len(row_tuple):
                                     break
                                 right_val = str(row_tuple[c_idx - 1 + offset] or "").strip()
-                                right_val = re.sub(r"\.0$", "", right_val)
-                                m_r8 = re.search(r"(\d{8})", right_val)
+                                m_r8 = self._extract_8digit_no(right_val)
                                 if m_r8:
-                                    sheet_order_no = m_r8.group(1)
+                                    sheet_order_no = m_r8
                                     break
 
                     if "注文日" in cell_val or "発注日" in cell_val:
@@ -1266,7 +1418,14 @@ class StockMatchApp:
                                         break
                             sheet_supplier = cleaned_sup
                     elif (
-                        ("株式会社" in cell_val or "有限会社" in cell_val or "(株)" in cell_val or "（株）" in cell_val or "(有)" in cell_val or "（有）" in cell_val)
+                        (
+                            "株式会社" in cell_val
+                            or "有限会社" in cell_val
+                            or "(株)" in cell_val
+                            or "（株）" in cell_val
+                            or "(有)" in cell_val
+                            or "（有）" in cell_val
+                        )
                         and r_idx <= 10
                         and "丸菱" not in cell_val
                     ):
@@ -1288,7 +1447,7 @@ class StockMatchApp:
                 ):
                     header_pos_in_list = list_i
                     for c_idx, val in enumerate(row_vals, start=1):
-                        v_clean = re.sub(r"\s+", "", val)
+                        v_clean = re.sub(r"\s+", "", unicodedata.normalize("NFKC", val))
                         if not v_clean:
                             continue
                         if "図面番号" in v_clean or "図番" in v_clean:
@@ -1301,7 +1460,7 @@ class StockMatchApp:
                             col_map.setdefault("maker", c_idx)
                         elif "仕様" in v_clean or "規格" in v_clean or "材質" in v_clean or "寸法" in v_clean:
                             col_map.setdefault("spec", c_idx)
-                        elif "購入数" in v_clean or "数量" in v_clean or v_clean == "数":
+                        elif "購入数" in v_clean or "数量" in v_clean or v_clean in ("数", "必要数"):
                             col_map.setdefault("qty", c_idx)
                         elif "単位" in v_clean:
                             col_map.setdefault("unit", c_idx)
@@ -1373,7 +1532,7 @@ class StockMatchApp:
                 joined_check = f"{drawing_str}{part_str}{item_str}{spec_str}"
                 if any(
                     stop_word in joined_check
-                    for stop_word in ("合計", "小計", "消費税", "総合計", "特記事項", "以上")
+                    for stop_word in ("合計", "小計", "消費税", "総合計", "特記事項", "以上", "振込", "備考")
                 ):
                     continue
 
@@ -1388,11 +1547,18 @@ class StockMatchApp:
                 qty_num_str = self._clean_cell_str(qty_val)
                 unit_str = self._clean_cell_str(unit_val)
                 qty_str = f"{qty_num_str}{unit_str}".strip()
+                qty_num = self._extract_Leading_number(qty_str)
 
                 unit_price_str = self._clean_cell_str(unit_price_val)
-                amount_str = self._clean_cell_str(amount_val)
+                price_num = self._extract_Leading_number(unit_price_str)
 
-                model_parts = [p for p in (drawing_str, part_str, spec_str) if p]
+                amount_str = self._clean_cell_str(amount_val)
+                amt_num = self._extract_Leading_number(amount_str)
+
+                if not qty_num and not price_num and not amt_num and due_date is None:
+                    continue
+
+                model_parts = [p for p in (drawing_str, part_str, spec_str) if p and p != "-"]
                 model_spec_display = " / ".join(dict.fromkeys(model_parts))
 
                 norm_drawing = self._normalize_key(drawing_str)
@@ -1411,7 +1577,8 @@ class StockMatchApp:
                         "sheet": sheet_name,
                         "row": r_idx,
                         "order_no": sheet_order_no,
-                        "order_no_8": file_order_no_8 or (sheet_order_no if len(sheet_order_no) == 8 and sheet_order_no.isdigit() else ""),
+                        "order_no_8": file_order_no_8
+                        or (sheet_order_no if len(sheet_order_no) == 8 and sheet_order_no.isdigit() else ""),
                         "norm_order_no": self._normalize_key(sheet_order_no),
                         "order_date": sheet_order_date,
                         "drawing_no": drawing_str,
@@ -1422,11 +1589,11 @@ class StockMatchApp:
                         "spec": spec_str,
                         "model_spec": model_spec_display,
                         "qty": qty_str,
-                        "qty_num": self._extract_Leading_number(qty_str),
+                        "qty_num": qty_num,
                         "unit_price": unit_price_str,
-                        "price_num": self._extract_Leading_number(unit_price_str),
+                        "price_num": price_num,
                         "amount": amount_str,
-                        "amt_num": self._extract_Leading_number(amount_str),
+                        "amt_num": amt_num,
                         "due_date": due_date,
                         "due_raw": self._clean_cell_str(due_raw),
                         "norm_drawing": norm_drawing,
@@ -1448,7 +1615,7 @@ class StockMatchApp:
         return order_items
 
     # =========================================================================
-    # 照合・遅延判定メイン処理
+    # 照合・遅延判定＋不一致理由の診断ロジック
     # =========================================================================
     def run_analysis(self):
         """照合処理をバックグラウンドスレッドで開始"""
@@ -1496,7 +1663,7 @@ class StockMatchApp:
                 order_dir, mgmt_path, progress_cb=self._report_progress
             )
 
-            self._report_progress(75.0, f"[3/3] 明細の照合と超過判定を実行中 ({len(order_items)} 件)...")
+            self._report_progress(75.0, f"[3/3] 明細の照合と不一致診断を実行中 ({len(order_items)} 件)...")
             analyzed_records = self._match_and_evaluate(
                 mgmt_rows, order_items, base_date, progress_cb=self._report_progress
             )
@@ -1535,7 +1702,6 @@ class StockMatchApp:
                     self.analyzed_records = payload["records"]
                     base_date = payload["base_date"]
                     valid_order_files = payload["valid_order_files"]
-                    ignored_files = payload["ignored_files"]
                     order_items_count = payload["order_items_count"]
                     mgmt_rows_count = payload["mgmt_rows_count"]
 
@@ -1553,7 +1719,7 @@ class StockMatchApp:
                     )
                     self.status_var.set(
                         f"照合完了 (基準日: {base_date.strftime('%Y-%m-%d')}) — "
-                        f"注文書明細: {order_items_count}件 / 超過(遅れ): {delay_cnt}件 / 不一致(未記載): {unmatched_cnt}件"
+                        f"注文書明細: {order_items_count}件 / 超過(遅れ): {delay_cnt}件 / 不一致(未記載): {unmatched_cnt}件 (※行をダブルクリックで不一致箇所の詳細比較を表示)"
                     )
                     return
                 elif msg_type == "ERROR":
@@ -1571,6 +1737,417 @@ class StockMatchApp:
         if self.is_running:
             self.root.after(40, self._poll_ui_queue)
 
+    def _score_candidate_pair(self, o_item: dict, m_row: dict) -> float:
+        """
+        同一管理No内の注文書1明細と管理表1行の総合一致スコアを算出する。
+        """
+        o_d = o_item["norm_drawing"]
+        o_p = o_item["norm_part"]
+        o_s = o_item["norm_spec"]
+        o_i = o_item["norm_item"]
+
+        m_d = m_row["norm_drawing"]
+        m_p = m_row["norm_part"]
+        m_s = m_row["norm_spec"]
+        m_i = m_row["norm_item"]
+
+        score = 0.0
+        strong_evidence = False
+
+        o_long_codes = [c for c in (o_d, o_p, o_s) if len(c) >= 4]
+        m_long_codes = [c for c in (m_d, m_p, m_s) if len(c) >= 4]
+
+        for oc in o_long_codes:
+            for mc in m_long_codes:
+                if oc == mc:
+                    score += 600.0
+                    strong_evidence = True
+                elif len(oc) >= 5 and len(mc) >= 5 and (oc in mc or mc in oc):
+                    score += 350.0
+                    strong_evidence = True
+
+        if o_d and m_d and o_d == m_d:
+            score += 300.0
+            if o_p and m_p:
+                if o_p == m_p:
+                    score += 500.0
+                    strong_evidence = True
+                else:
+                    score -= 250.0
+            else:
+                strong_evidence = True
+
+        if o_p and m_p and len(o_p) < 4 and o_p == m_p:
+            score += 180.0
+            if (o_i and m_i and (o_i == m_i or o_i in m_i or m_i in o_i)) or (
+                o_s and m_s and (o_s == m_s or o_s in m_s or m_s in o_s)
+            ):
+                score += 300.0
+                strong_evidence = True
+
+        if o_s and m_p and len(m_p) >= 2 and (o_s == m_p or (len(m_p) >= 4 and m_p in o_s)):
+            score += 350.0
+            strong_evidence = True
+        if o_p and m_s and len(o_p) >= 2 and (o_p == m_s or (len(o_p) >= 4 and o_p in m_s)):
+            score += 350.0
+            strong_evidence = True
+
+        name_sim = 0.0
+        if o_i and m_i:
+            if o_i == m_i:
+                name_sim = 1.0
+                score += 260.0
+            elif o_i in m_i or m_i in o_i:
+                name_sim = 0.92
+                score += 210.0
+            else:
+                name_sim = self._fast_similarity(o_i, o_item["bg_item"], m_i, m_row["bg_item"])
+                if name_sim >= 0.45:
+                    score += 180.0 * name_sim
+
+        spec_sim = 0.0
+        if o_s and m_s:
+            if o_s == m_s:
+                spec_sim = 1.0
+                score += 260.0
+            elif o_s in m_s or m_s in o_s:
+                spec_sim = 0.92
+                score += 210.0
+            else:
+                spec_sim = self._fast_similarity(o_s, o_item["bg_spec"], m_s, m_row["bg_spec"])
+                if spec_sim >= 0.45:
+                    score += 180.0 * spec_sim
+
+        comb_sim = self._fast_similarity(
+            o_item["norm_combined"],
+            o_item["bg_combined"],
+            m_row["norm_combined"],
+            m_row["bg_combined"],
+        )
+        if comb_sim >= 0.55:
+            score += 150.0 * comb_sim
+
+        if name_sim >= 0.70 and spec_sim >= 0.65:
+            strong_evidence = True
+        elif name_sim >= 0.85 and (not o_s or not m_s):
+            strong_evidence = True
+        elif spec_sim >= 0.85 and (not o_i or not m_i):
+            strong_evidence = True
+        elif comb_sim >= 0.78:
+            strong_evidence = True
+
+        qty_matched = False
+        if o_item["qty_num"] and m_row["qty_num"]:
+            if o_item["qty_num"] == m_row["qty_num"]:
+                score += 90.0
+                qty_matched = True
+            else:
+                score -= 25.0
+
+        price_matched = False
+        if o_item["price_num"] and m_row["price_num"] and o_item["price_num"] == m_row["price_num"]:
+            score += 60.0
+            price_matched = True
+
+        if o_item["amt_num"] and m_row["amt_num"] and o_item["amt_num"] == m_row["amt_num"]:
+            score += 60.0
+
+        if (name_sim >= 0.55 or spec_sim >= 0.55 or comb_sim >= 0.60) and (qty_matched or price_matched):
+            strong_evidence = True
+
+        if not strong_evidence:
+            return -1.0
+
+        return score
+
+    def _build_field_comparison_data(
+        self, o_item: dict, m_row: dict | None, reason_summary: str, extra_notes: str = ""
+    ) -> dict:
+        """
+        注文書の項目と管理表（照合行または最有力候補行）を1項目ずつ比較し、
+        どこが一致していてどこが不一致なのかを診断データとして生成する。
+        """
+        rows = []
+
+        def _cmp_field(label: str, o_raw: str, m_raw: str, o_norm: str, m_norm: str):
+            o_disp = o_raw if o_raw else "(空欄)"
+            m_disp = m_raw if m_raw else "(空欄)"
+            if not m_row:
+                return (label, o_disp, "— (該当行なし)", "対象なし", "DIFF")
+            if not o_norm and not m_norm:
+                return (label, o_disp, m_disp, "両方空欄 (-)", "INFO")
+            if o_norm == m_norm:
+                return (label, o_disp, m_disp, "◎ 完全一致", "MATCH")
+            if o_norm and m_norm and (o_norm in m_norm or m_norm in o_norm):
+                return (label, o_disp, m_disp, "△ 部分一致", "PARTIAL")
+            return (label, o_disp, m_disp, "× 不一致", "DIFF")
+
+        o_no = o_item.get("order_no_8") or o_item.get("order_no", "")
+        m_no = (m_row.get("order_no_8") or m_row.get("order_no", "")) if m_row else ""
+        rows.append(_cmp_field("① 管理No (8桁)", o_no, m_no, o_no, m_no))
+
+        rows.append(
+            _cmp_field(
+                "② 図面番号",
+                o_item.get("drawing_no", ""),
+                m_row.get("drawing_no", "") if m_row else "",
+                o_item.get("norm_drawing", ""),
+                m_row.get("norm_drawing", "") if m_row else "",
+            )
+        )
+        rows.append(
+            _cmp_field(
+                "③ 品番",
+                o_item.get("part_no", ""),
+                m_row.get("part_no", "") if m_row else "",
+                o_item.get("norm_part", ""),
+                m_row.get("norm_part", "") if m_row else "",
+            )
+        )
+        rows.append(
+            _cmp_field(
+                "④ 品名",
+                o_item.get("item_name", ""),
+                m_row.get("item_name", "") if m_row else "",
+                o_item.get("norm_item", ""),
+                m_row.get("norm_item", "") if m_row else "",
+            )
+        )
+        rows.append(
+            _cmp_field(
+                "⑤ 仕様・規格",
+                o_item.get("spec", ""),
+                m_row.get("spec", "") if m_row else "",
+                o_item.get("norm_spec", ""),
+                m_row.get("norm_spec", "") if m_row else "",
+            )
+        )
+        rows.append(
+            _cmp_field(
+                "⑥ メーカー",
+                o_item.get("maker", ""),
+                m_row.get("maker", "") if m_row else "",
+                o_item.get("norm_maker", ""),
+                m_row.get("norm_maker", "") if m_row else "",
+            )
+        )
+        rows.append(
+            _cmp_field(
+                "⑦ 購入数 (数量)",
+                o_item.get("qty", ""),
+                m_row.get("qty", "") if m_row else "",
+                o_item.get("qty_num", ""),
+                m_row.get("qty_num", "") if m_row else "",
+            )
+        )
+        rows.append(
+            _cmp_field(
+                "⑧ 単価",
+                o_item.get("unit_price", ""),
+                m_row.get("unit_price", "") if m_row else "",
+                o_item.get("price_num", ""),
+                m_row.get("price_num", "") if m_row else "",
+            )
+        )
+        rows.append(
+            _cmp_field(
+                "⑨ 金額",
+                o_item.get("amount", ""),
+                m_row.get("amount", "") if m_row else "",
+                o_item.get("amt_num", ""),
+                m_row.get("amt_num", "") if m_row else "",
+            )
+        )
+
+        # クロス一致チェック（注文書の仕様 ⇔ 管理表の品番 など）
+        cross_notes = []
+        if m_row:
+            if o_item["norm_spec"] and m_row["norm_part"] and o_item["norm_spec"] == m_row["norm_part"]:
+                cross_notes.append("・注文書の『仕様』と管理表の『品番』が一致しています。")
+            if o_item["norm_part"] and m_row["norm_spec"] and o_item["norm_part"] == m_row["norm_spec"]:
+                cross_notes.append("・注文書の『品番』と管理表の『仕様』が一致しています。")
+
+        detail_lines = [
+            f"【診断結果サマリー】\n  {reason_summary}",
+            "",
+            f"【注文書データ元】\n  ファイル: {o_item['file']} (シート: {o_item['sheet']} / 行: {o_item['row']}) / 依頼区分: {o_item['req_type_label']}",
+        ]
+        if m_row:
+            detail_lines.append(
+                f"【管理表の比較対象行】\n  シート: {m_row['sheet']} (行: {m_row['row']}) / 管理No: {m_row.get('order_no_8') or m_row.get('order_no')}"
+            )
+        if cross_notes:
+            detail_lines.append("\n【列入れ替わり（クロス）検出】\n" + "\n".join(cross_notes))
+        if extra_notes:
+            detail_lines.append("\n【詳細調査ログ】\n" + extra_notes)
+
+        return {
+            "comparison_rows": rows,
+            "detail_text": "\n".join(detail_lines),
+        }
+
+    def _diagnose_unmatched_item(
+        self,
+        o_item: dict,
+        mgmt_rows: list[dict],
+        all_mgmt_order_nos_8: set,
+        mgmt_no_counts: dict,
+    ) -> tuple[str, dict]:
+        """
+        なぜ注文書明細が管理表と一致しなかったのかを徹底調査し、
+        具体的な「不一致箇所・理由テキスト」と「詳細比較データ」を返す。
+        """
+        o_no = o_item.get("order_no_8", "")
+
+        # ケース1: ファイル名先頭8桁の管理Noが取得できなかった場合
+        if not o_no:
+            reason = f"【管理No取得不可】ファイル名『{o_item['file']}』の先頭から8桁の管理Noが検出できません"
+            diag = self._build_field_comparison_data(
+                o_item,
+                None,
+                reason,
+                "注文書ファイル名の先頭8桁が数字（例: 22609030...）になっているか確認してください。",
+            )
+            return reason, diag
+
+        # ケース2: 管理No自体が管理表（全シート）に1件も存在しない場合
+        if o_no not in all_mgmt_order_nos_8:
+            # 同じシート以外も含め、管理表内に図番や品名が一致する「別管理No」の行がないか探す
+            best_other_row = None
+            best_other_sc = -999.0
+            for m in mgmt_rows:
+                sc = self._score_candidate_pair(o_item, m)
+                if sc > best_other_sc:
+                    best_other_sc = sc
+                    best_other_row = m
+
+            # 類似する8桁管理Noを探す
+            similar_nos = difflib.get_close_matches(o_no, sorted(all_mgmt_order_nos_8), n=3, cutoff=0.6)
+            sim_str = f" (管理表内の類似No: {', '.join(similar_nos)})" if similar_nos else ""
+
+            if best_other_row and best_other_sc >= 120.0:
+                other_no = best_other_row.get("order_no_8") or best_other_row.get("order_no") or "空欄"
+                reason = (
+                    f"【管理No不一致】注文書の管理No[{o_no}]が管理表に未登録{sim_str} "
+                    f"※管理表『{best_other_row['sheet']}』行{best_other_row['row']}に同一品がありますが管理Noが[{other_no}]です"
+                )
+                extra = (
+                    f"・注文書ファイル名の管理Noは [{o_no}] ですが、管理表のどのシートにも [{o_no}] が存在しません。\n"
+                    f"・ただし管理表の『{best_other_row['sheet']}』シート 行{best_other_row['row']} に同じ品目のデータが見つかりました（管理表側の管理Noは [{other_no}] となっています）。\n"
+                    f"・管理表で読み取られた全管理No件数: {len(all_mgmt_order_nos_8)} 種類"
+                )
+                diag = self._build_field_comparison_data(o_item, best_other_row, reason, extra)
+            else:
+                sample_nos = ", ".join(sorted(list(all_mgmt_order_nos_8))[:15])
+                reason = f"【管理No未登録】管理No[{o_no}]が管理表(全シート)に1件も存在しません{sim_str}"
+                extra = (
+                    f"・注文書の管理No [{o_no}] を注文品管理表の全シートから検索しましたが、1行も見つかりませんでした。\n"
+                    f"・管理表側で検出された管理No一覧（抜粋）: {sample_nos}\n"
+                    f"・管理表に該当の管理No（{o_no}）が記入されているか確認してください。"
+                )
+                diag = self._build_field_comparison_data(o_item, None, reason, extra)
+            return reason, diag
+
+        # ケース3: 管理Noは管理表に存在するが、明細行が一致しなかった場合
+        same_no_rows = [
+            m
+            for m in mgmt_rows
+            if m.get("order_no_8") == o_no or m.get("norm_order_no") == o_no
+        ]
+
+        # 3-A: 既に別の注文書明細と照合済（matched=True）の行の中に一致するものがあるかチェック
+        best_used_row = None
+        best_used_sc = -999.0
+        for m in same_no_rows:
+            if m.get("matched"):
+                sc = self._score_candidate_pair(o_item, m)
+                if sc > best_used_sc:
+                    best_used_sc = sc
+                    best_used_row = m
+
+        if best_used_row and best_used_sc >= 120.0:
+            reason = (
+                f"【重複・行数不足】管理表『{best_used_row['sheet']}』行{best_used_row['row']}と一致しますが、"
+                f"既に別の明細({best_used_row.get('matched_by')})で使用済です"
+            )
+            extra = (
+                f"・管理No [{o_no}] の管理表『{best_used_row['sheet']}』行{best_used_row['row']} に同じ品目がありますが、\n"
+                f"  すでに『{best_used_row.get('matched_by')}』と1対1照合されて消費されています。\n"
+                f"・注文書に同じ品目が複数行あるのに対し、管理表に行が足りない（または分納行が未記入の）可能性があります。"
+            )
+            diag = self._build_field_comparison_data(o_item, best_used_row, reason, extra)
+            return reason, diag
+
+        # 3-B: 同一管理Noの全行から「最も文字が近い最有力候補行」を探し、どの項目が食い違っているかを特定する
+        best_cand = None
+        best_raw_sim = -1.0
+        for m in same_no_rows:
+            d_sim = self._fast_similarity(
+                o_item["norm_drawing"], o_item["bg_drawing"], m["norm_drawing"], m["bg_drawing"]
+            )
+            p_sim = self._fast_similarity(
+                o_item["norm_part"], o_item["bg_part"], m["norm_part"], m["bg_part"]
+            )
+            i_sim = self._fast_similarity(
+                o_item["norm_item"], o_item["bg_item"], m["norm_item"], m["bg_item"]
+            )
+            s_sim = self._fast_similarity(
+                o_item["norm_spec"], o_item["bg_spec"], m["norm_spec"], m["bg_spec"]
+            )
+            c_sim = self._fast_similarity(
+                o_item["norm_combined"], o_item["bg_combined"], m["norm_combined"], m["bg_combined"]
+            )
+            total_sim = (d_sim * 2.5) + (p_sim * 2.5) + (i_sim * 2.0) + (s_sim * 2.0) + (c_sim * 1.5)
+            if not m.get("matched"):
+                total_sim += 0.2
+            if total_sim > best_raw_sim:
+                best_raw_sim = total_sim
+                best_cand = m
+
+        if best_cand:
+            matched_parts = []
+            diff_parts = []
+
+            def _check_diff(label: str, o_v: str, m_v: str, o_n: str, m_n: str):
+                if not o_n and not m_n:
+                    return
+                if o_n == m_n or (o_n and m_n and (o_n in m_n or m_n in o_n)):
+                    matched_parts.append(label)
+                else:
+                    diff_parts.append(f"{label}[注文:{o_v or '空'}≠管理:{m_v or '空'}]")
+
+            _check_diff("図番", o_item["drawing_no"], best_cand["drawing_no"], o_item["norm_drawing"], best_cand["norm_drawing"])
+            _check_diff("品番", o_item["part_no"], best_cand["part_no"], o_item["norm_part"], best_cand["norm_part"])
+            _check_diff("品名", o_item["item_name"], best_cand["item_name"], o_item["norm_item"], best_cand["norm_item"])
+            _check_diff("仕様", o_item["spec"], best_cand["spec"], o_item["norm_spec"], best_cand["norm_spec"])
+
+            m_str = f"一致:{','.join(matched_parts)} / " if matched_parts else ""
+            d_str = "不一致:" + ", ".join(diff_parts) if diff_parts else "全項目不一致"
+            reason = (
+                f"【項目不一致】管理No[{o_no}]({len(same_no_rows)}行中) 最有力:{best_cand['sheet']}(行{best_cand['row']}) "
+                f"⇒ {m_str}{d_str}"
+            )
+
+            # 同一管理Noの候補一覧も作成
+            cand_list_lines = [
+                f"・管理表内の管理No [{o_no}] の該当行数: 計 {len(same_no_rows)} 行",
+                "・管理Noが同じ管理表データの抜粋:",
+            ]
+            for idx_c, r_c in enumerate(same_no_rows[:15], start=1):
+                used_mark = " (照合済)" if r_c.get("matched") else " (未照合)"
+                cand_list_lines.append(
+                    f"   {idx_c}. {r_c['sheet']}(行{r_c['row']}){used_mark} | 図番:{r_c['drawing_no']} | 品番:{r_c['part_no']} | 品名:{r_c['item_name']} | 仕様:{r_c['spec']} | 数量:{r_c['qty']}"
+                )
+
+            diag = self._build_field_comparison_data(
+                o_item, best_cand, reason, "\n".join(cand_list_lines)
+            )
+            return reason, diag
+
+        reason = f"【明細未記載】管理No[{o_no}]はありますが一致する明細行がありません"
+        diag = self._build_field_comparison_data(o_item, None, reason)
+        return reason, diag
+
     def _match_and_evaluate(
         self,
         mgmt_rows: list[dict],
@@ -1579,37 +2156,35 @@ class StockMatchApp:
         progress_cb=None,
     ) -> list[dict]:
         """
-        注文書の明細と注文品管理表を照合する。
-        【重要規則】注文書のファイル名先頭8桁が管理Noとなる。
-        注文品管理表の中にこの管理Noと一致するデータが存在しない場合は、無条件で不一致判定とする。
+        注文書の明細と注文品管理表を照合し、不一致の場合はどこが不一致かを診断する。
         """
         results = []
         total_orders = len(order_items)
 
-        # 管理表に存在する全管理No（8桁）の集合を事前構築
         all_mgmt_order_nos_8 = set()
+        mgmt_no_counts = {}
         for m in mgmt_rows:
-            if m.get("order_no_8"):
-                all_mgmt_order_nos_8.add(m["order_no_8"])
-            elif m.get("norm_order_no"):
-                all_mgmt_order_nos_8.add(m["norm_order_no"])
+            no8 = m.get("order_no_8") or m.get("norm_order_no")
+            if no8:
+                all_mgmt_order_nos_8.add(no8)
+                mgmt_no_counts[no8] = mgmt_no_counts.get(no8, 0) + 1
 
         for idx, o_item in enumerate(order_items, start=1):
             if progress_cb and (idx == 1 or idx % 5 == 0 or idx == total_orders):
                 pct = 75.0 + (23.0 * idx / max(1, total_orders))
                 progress_cb(
                     pct,
-                    f"[3/3] 注文書明細と管理表を照合中 ({idx}/{total_orders} 件目)...",
+                    f"[3/3] 注文書明細と管理表を照合・診断中 ({idx}/{total_orders} 件目)...",
                 )
 
             req_code = o_item.get("req_type_code", "UNKNOWN")
             o_order_no_8 = o_item.get("order_no_8", "")
 
-            # -----------------------------------------------------------------
-            # 必須条件チェック: ファイル名先頭8桁の管理Noが管理表に存在するか？
-            # 一致する管理Noが管理表に存在しない場合は直ちに不一致判定とする
-            # -----------------------------------------------------------------
+            # 必須条件: ファイル名先頭8桁の管理Noが管理表に存在するか
             if not o_order_no_8 or o_order_no_8 not in all_mgmt_order_nos_8:
+                reason_txt, diag_data = self._diagnose_unmatched_item(
+                    o_item, mgmt_rows, all_mgmt_order_nos_8, mgmt_no_counts
+                )
                 results.append(
                     self._evaluate_single_record(
                         req_type=o_item.get("req_type_label", "注文"),
@@ -1627,17 +2202,20 @@ class StockMatchApp:
                         invoice_raw="",
                         invoice_filled=False,
                         person="【不一致】",
-                        source_info=f"【不一致・管理No未登録】注文書:{o_item['file']}(行{o_item['row']})",
+                        source_info=f"【不一致】注文書:{o_item['file']}(行{o_item['row']})",
                         base_date=base_date,
                         is_unmatched=True,
+                        mismatch_reason=reason_txt,
+                        diagnostic_data=diag_data,
                     )
                 )
                 continue
 
-            # 管理Noが一致する管理表行のみを厳密な照合対象とする
             matched_no_mgmt = [
-                m for m in mgmt_rows
-                if not m["matched"] and (m.get("order_no_8") == o_order_no_8 or m.get("norm_order_no") == o_order_no_8)
+                m
+                for m in mgmt_rows
+                if not m["matched"]
+                and (m.get("order_no_8") == o_order_no_8 or m.get("norm_order_no") == o_order_no_8)
             ]
 
             primary_mgmt = []
@@ -1656,142 +2234,36 @@ class StockMatchApp:
                 else:
                     primary_mgmt.append(m)
 
-            search_targets = primary_mgmt if primary_mgmt else fallback_mgmt
-
-            # 管理No一致行がすべて照合済み、または対象シートに見つからない場合
-            if not search_targets:
-                results.append(
-                    self._evaluate_single_record(
-                        req_type=o_item.get("req_type_label", "注文"),
-                        order_no=o_order_no_8 or o_item.get("order_no", ""),
-                        supplier=o_item.get("supplier", ""),
-                        maker=o_item.get("maker", ""),
-                        item_name=o_item.get("item_name", ""),
-                        model_spec=o_item.get("model_spec", ""),
-                        qty=o_item.get("qty", ""),
-                        due_date=o_item.get("due_date"),
-                        actual_date=None,
-                        actual_raw="",
-                        actual_filled=False,
-                        invoice_date=None,
-                        invoice_raw="",
-                        invoice_filled=False,
-                        person="【不一致】",
-                        source_info=f"【不一致・管理No該当なし】注文書:{o_item['file']}(行{o_item['row']})",
-                        base_date=base_date,
-                        is_unmatched=True,
-                    )
-                )
-                continue
-
-            o_no_norm = o_item["norm_order_no"]
-            o_qty_num = o_item["qty_num"]
-            o_drawing_norm = o_item["norm_drawing"]
-            o_part_norm = o_item["norm_part"]
-
             best_mgmt = None
             best_score = -1.0
 
-            # 1. 管理No一致行内での図面番号・品番による最優先照合
-            has_identifying_code = bool(o_drawing_norm or o_part_norm)
+            for m_row in primary_mgmt:
+                sc = self._score_candidate_pair(o_item, m_row)
+                if sc > best_score:
+                    best_score = sc
+                    best_mgmt = m_row
 
-            if has_identifying_code:
-                candidate_matches = []
-                for m_row in search_targets:
-                    if m_row["matched"]:
-                        continue
-
-                    m_drawing_norm = m_row["norm_drawing"]
-                    m_part_norm = m_row["norm_part"]
-
-                    exact_drawing = bool(o_drawing_norm and m_drawing_norm and o_drawing_norm == m_drawing_norm)
-                    exact_part = bool(o_part_norm and m_part_norm and o_part_norm == m_part_norm)
-                    cross_dp = bool(o_drawing_norm and m_part_norm and o_drawing_norm == m_part_norm)
-                    cross_pd = bool(o_part_norm and m_drawing_norm and o_part_norm == m_drawing_norm)
-
-                    if exact_drawing or exact_part or cross_dp or cross_pd:
-                        code_score = 1000.0
-                        if exact_drawing and exact_part:
-                            code_score += 500.0
-                        if o_no_norm and m_row["norm_order_no"] and o_no_norm == m_row["norm_order_no"]:
-                            code_score += 100.0
-                        if o_qty_num and m_row["qty_num"] and o_qty_num == m_row["qty_num"]:
-                            code_score += 50.0
-                        candidate_matches.append((code_score, m_row))
-                        continue
-
-                    part_match = False
-                    if o_drawing_norm and m_drawing_norm and (o_drawing_norm in m_drawing_norm or m_drawing_norm in o_drawing_norm):
-                        part_match = True
-                    elif o_part_norm and m_part_norm and (o_part_norm in m_part_norm or m_part_norm in o_part_norm):
-                        part_match = True
-                    elif o_drawing_norm and m_part_norm and (o_drawing_norm in m_part_norm or m_part_norm in o_drawing_norm):
-                        part_match = True
-                    elif o_part_norm and m_drawing_norm and (o_part_norm in m_drawing_norm or m_drawing_norm in o_part_norm):
-                        part_match = True
-
-                    if part_match:
-                        code_score = 500.0
-                        if o_no_norm and m_row["norm_order_no"] and o_no_norm == m_row["norm_order_no"]:
-                            code_score += 50.0
-                        if o_qty_num and m_row["qty_num"] and o_qty_num == m_row["qty_num"]:
-                            code_score += 30.0
-                        candidate_matches.append((code_score, m_row))
-
-                if candidate_matches:
-                    candidate_matches.sort(key=lambda x: x[0], reverse=True)
-                    best_mgmt = candidate_matches[0][1]
-
-            # 2. フォールバック照合（図番・品番が未記入の場合）
-            if best_mgmt is None and not has_identifying_code:
-                o_price_num = o_item["price_num"]
-                o_amt_num = o_item["amt_num"]
-
-                for m_row in search_targets:
-                    if m_row["matched"]:
-                        continue
-
-                    score = 0.0
-                    matched_key_count = 0
-
-                    if o_item["norm_item"] and m_row["norm_item"]:
-                        name_sim = self._fast_similarity(
-                            o_item["norm_item"], o_item["bg_item"], m_row["norm_item"], m_row["bg_item"]
-                        )
-                        if o_item["norm_item"] == m_row["norm_item"] or o_item["norm_item"] in m_row["norm_item"] or m_row["norm_item"] in o_item["norm_item"]:
-                            name_sim = max(name_sim, 0.95)
-                        if name_sim >= 0.45:
-                            score += 50.0 * name_sim
-                            matched_key_count += 1
-
-                    if o_item["norm_spec"] and m_row["norm_spec"]:
-                        spec_sim = self._fast_similarity(
-                            o_item["norm_spec"], o_item["bg_spec"], m_row["norm_spec"], m_row["bg_spec"]
-                        )
-                        if o_item["norm_spec"] == m_row["norm_spec"] or o_item["norm_spec"] in m_row["norm_spec"] or m_row["norm_spec"] in o_item["norm_spec"]:
-                            spec_sim = max(spec_sim, 0.95)
-                        if spec_sim >= 0.45:
-                            score += 40.0 * spec_sim
-                            matched_key_count += 1
-
-                    if o_qty_num and m_row["qty_num"] and o_qty_num == m_row["qty_num"]:
-                        score += 20.0
-                    if o_price_num and m_row["price_num"] and o_price_num == m_row["price_num"]:
-                        score += 15.0
-                    if o_amt_num and m_row["amt_num"] and o_amt_num == m_row["amt_num"]:
-                        score += 15.0
-
-                    if matched_key_count >= 1 and score > best_score and score >= 25.0:
-                        best_score = score
+            if best_mgmt is None and fallback_mgmt:
+                for m_row in fallback_mgmt:
+                    sc = self._score_candidate_pair(o_item, m_row)
+                    if sc > best_score:
+                        best_score = sc
                         best_mgmt = m_row
 
-            if best_mgmt:
+            if best_mgmt is not None and best_score >= 120.0:
                 best_mgmt["matched"] = True
+                best_mgmt["matched_by"] = f"{o_item['file']}(行{o_item['row']})"
                 final_supplier = o_item.get("supplier") or best_mgmt.get("supplier", "")
                 final_maker = o_item.get("maker") or best_mgmt.get("maker", "")
+                match_summary = f"◎ 一致 ({best_mgmt['sheet']} 行{best_mgmt['row']} / スコア:{int(best_score)})"
+                diag_data = self._build_field_comparison_data(o_item, best_mgmt, match_summary)
+
                 record = self._evaluate_single_record(
                     req_type=o_item.get("req_type_label", "注文"),
-                    order_no=best_mgmt.get("order_no") or o_order_no_8 or o_item.get("order_no", ""),
+                    order_no=best_mgmt.get("order_no_8")
+                    or best_mgmt.get("order_no")
+                    or o_order_no_8
+                    or o_item.get("order_no", ""),
                     supplier=final_supplier,
                     maker=final_maker,
                     item_name=o_item.get("item_name") or best_mgmt.get("item_name", ""),
@@ -1808,9 +2280,13 @@ class StockMatchApp:
                     source_info=f"[{o_item.get('req_type_label', '')}] 注文書:{o_item['file']} ⇔ 管理表:{best_mgmt['sheet']}(行{best_mgmt['row']})",
                     base_date=base_date,
                     is_unmatched=False,
+                    mismatch_reason=match_summary,
+                    diagnostic_data=diag_data,
                 )
             else:
-                # 管理Noはあるが明細が見当たらない場合（不一致判定）
+                reason_txt, diag_data = self._diagnose_unmatched_item(
+                    o_item, mgmt_rows, all_mgmt_order_nos_8, mgmt_no_counts
+                )
                 record = self._evaluate_single_record(
                     req_type=o_item.get("req_type_label", "注文"),
                     order_no=o_order_no_8 or o_item.get("order_no", ""),
@@ -1827,13 +2303,14 @@ class StockMatchApp:
                     invoice_raw="",
                     invoice_filled=False,
                     person="【不一致】",
-                    source_info=f"【不一致・管理表未記載】注文書:{o_item['file']}(行{o_item['row']})",
+                    source_info=f"【不一致】注文書:{o_item['file']}(行{o_item['row']})",
                     base_date=base_date,
                     is_unmatched=True,
+                    mismatch_reason=reason_txt,
+                    diagnostic_data=diag_data,
                 )
             results.append(record)
 
-        # 並び替え: 不一致および超過を上位に表示
         results.sort(
             key=lambda r: (
                 not (r["is_unmatched"] or r["is_any_delay"]),
@@ -1865,6 +2342,8 @@ class StockMatchApp:
         base_date: datetime.date,
         is_fallback_order_date: bool = False,
         is_unmatched: bool = False,
+        mismatch_reason: str = "",
+        diagnostic_data: dict | None = None,
     ) -> dict:
         """1明細に対する現品・請求の判定処理"""
         actual_overdue = False
@@ -1888,7 +2367,6 @@ class StockMatchApp:
                 overdue_days_num = delta_from_today
                 days_overdue_str = f"残り{-delta_from_today}日"
 
-        # 管理表に一致しない項目（管理No不一致または明細未記載）の場合の判定表示
         if is_unmatched:
             status_badge = "【不一致】管理表未記載"
             row_tag = "UNMATCHED"
@@ -1899,7 +2377,6 @@ class StockMatchApp:
             actual_overdue = True
             invoice_overdue = True
         else:
-            # 1) 現品確認日（A列：物）の超過判定
             if not actual_filled:
                 if due_date and base_date > due_date:
                     actual_overdue = True
@@ -1923,7 +2400,6 @@ class StockMatchApp:
                     actual_display_str = actual_raw
                     actual_status = "確認済 (正常)"
 
-            # 2) 請求日（AI列：伝票）の超過判定
             if not invoice_filled:
                 if due_date and base_date > due_date:
                     invoice_overdue = True
@@ -1950,7 +2426,6 @@ class StockMatchApp:
                     invoice_display_str = invoice_raw
                     invoice_status = "確認済 (正常)"
 
-            # 総合ステータスバッジ
             if actual_overdue and invoice_overdue:
                 status_badge = "【警告】現品・請求 超過"
                 row_tag = "BOTH_DELAY"
@@ -1970,6 +2445,7 @@ class StockMatchApp:
 
         return {
             "status_badge": status_badge,
+            "mismatch_reason": mismatch_reason,
             "req_type": req_type,
             "order_no": order_no,
             "supplier": supplier,
@@ -1995,16 +2471,33 @@ class StockMatchApp:
             "is_unmatched": is_unmatched,
             "is_any_delay": (actual_overdue or invoice_overdue) and not is_unmatched,
             "row_tag": row_tag,
+            "diagnostic_data": diagnostic_data or {},
         }
 
     def _update_kpis(self):
         """上部KPI集計カードの数値更新"""
         total = len(self.analyzed_records)
         unmatched_cnt = sum(1 for r in self.analyzed_records if r.get("is_unmatched"))
-        both_cnt = sum(1 for r in self.analyzed_records if not r.get("is_unmatched") and r["actual_overdue"] and r["invoice_overdue"])
-        actual_cnt = sum(1 for r in self.analyzed_records if not r.get("is_unmatched") and r["actual_overdue"] and not r["invoice_overdue"])
-        invoice_cnt = sum(1 for r in self.analyzed_records if not r.get("is_unmatched") and not r["actual_overdue"] and r["invoice_overdue"])
-        ok_cnt = sum(1 for r in self.analyzed_records if not r.get("is_unmatched") and not r["actual_overdue"] and not r["invoice_overdue"])
+        both_cnt = sum(
+            1
+            for r in self.analyzed_records
+            if not r.get("is_unmatched") and r["actual_overdue"] and r["invoice_overdue"]
+        )
+        actual_cnt = sum(
+            1
+            for r in self.analyzed_records
+            if not r.get("is_unmatched") and r["actual_overdue"] and not r["invoice_overdue"]
+        )
+        invoice_cnt = sum(
+            1
+            for r in self.analyzed_records
+            if not r.get("is_unmatched") and not r["actual_overdue"] and r["invoice_overdue"]
+        )
+        ok_cnt = sum(
+            1
+            for r in self.analyzed_records
+            if not r.get("is_unmatched") and not r["actual_overdue"] and not r["invoice_overdue"]
+        )
 
         self.kpi_vars["total"].set(f"{total} 件")
         self.kpi_vars["unmatched"].set(f"{unmatched_cnt} 件")
@@ -2021,9 +2514,8 @@ class StockMatchApp:
         mode = self.filter_mode.get()
         kw = self.search_keyword.get().strip().lower()
 
-        for rec in self.analyzed_records:
+        for idx, rec in enumerate(self.analyzed_records):
             if mode == "ALL_DELAY":
-                # すべての異常（不一致または超過）
                 if not (rec.get("is_unmatched") or rec.get("is_any_delay")):
                     continue
             elif mode == "UNMATCHED_ONLY":
@@ -2039,7 +2531,6 @@ class StockMatchApp:
                 if rec.get("is_unmatched") or not (rec["actual_overdue"] and rec["invoice_overdue"]):
                     continue
 
-            # 各列の個別フィルター
             skip_by_col = False
             for col_id, allowed_values in self.column_filters.items():
                 val = str(rec.get(col_id, "") or "").strip()
@@ -2055,6 +2546,7 @@ class StockMatchApp:
                 searchable = " ".join(
                     [
                         rec["status_badge"],
+                        rec["mismatch_reason"],
                         rec["req_type"],
                         rec["order_no"],
                         rec["supplier"],
@@ -2072,8 +2564,10 @@ class StockMatchApp:
             self.tree.insert(
                 "",
                 tk.END,
+                iid=f"rec_{idx}",
                 values=(
                     rec["status_badge"],
+                    rec["mismatch_reason"],
                     rec["req_type"],
                     rec["order_no"],
                     rec["supplier"],
@@ -2211,6 +2705,7 @@ class StockMatchApp:
 
         def _on_mousewheel(event):
             canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
         canvas.bind_all("<MouseWheel>", _on_mousewheel)
 
         canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -2378,6 +2873,7 @@ class StockMatchApp:
             export_rows.append(
                 {
                     "総合判定": r["status_badge"],
+                    "不一致理由・照合診断": r["mismatch_reason"],
                     "依頼区分": r["req_type"],
                     "管理No(注文番号)": r["order_no"],
                     "発注先": r["supplier"],
