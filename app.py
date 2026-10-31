@@ -22,8 +22,8 @@ class StockMatchApp:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title("StockMatch-v1.0.0 - 注文品納期・現品/請求照合システム")
-        self.root.geometry("1320x860")
-        self.root.minsize(1040, 700)
+        self.root.geometry("1340x880")
+        self.root.minsize(1060, 720)
 
         # 設定ファイル保存先パス（C:\StockMatch\config.json）
         self.config_dir = r"C:\StockMatch"
@@ -48,6 +48,7 @@ class StockMatchApp:
         self.column_filters = {}
 
         self._setup_styles()
+        self._build_menu()
         self._build_ui()
         self._load_config_and_autoload()
 
@@ -101,6 +102,44 @@ class StockMatchApp:
             padding=(4, 6),
         )
 
+    def _build_menu(self):
+        """上部メニューバー（ファイル / 設定 / ヘルプ）の作成"""
+        menubar = tk.Menu(self.root)
+
+        # 1. ファイルメニュー
+        file_menu = tk.Menu(menubar, tearoff=0)
+        file_menu.add_command(label="注文品管理表ファイルを選択...", command=self._select_mgmt_file, accelerator="Ctrl+O")
+        file_menu.add_command(label="注文書フォルダを選択...", command=self._select_order_dir, accelerator="Ctrl+D")
+        file_menu.add_separator()
+        file_menu.add_command(label="照合・遅延チェックを実行", command=self.run_analysis, accelerator="F5")
+        file_menu.add_command(label="CSV/Excel出力...", command=self._export_results, accelerator="Ctrl+S")
+        file_menu.add_separator()
+        file_menu.add_command(label="終了", command=self.root.quit, accelerator="Alt+F4")
+        menubar.add_cascade(label="ファイル(F)", menu=file_menu)
+
+        # 2. 設定メニュー
+        config_menu = tk.Menu(menubar, tearoff=0)
+        config_menu.add_command(label="現在のパス設定を保存 (C:\\StockMatch)", command=self._save_config_manual)
+        config_menu.add_command(label="保存先フォルダを開く", command=self._open_config_folder)
+        menubar.add_cascade(label="設定(S)", menu=config_menu)
+
+        # 3. ヘルプメニュー
+        help_menu = tk.Menu(menubar, tearoff=0)
+        help_menu.add_command(label="使い方・操作ガイド(H)...", command=self._show_help_guide, accelerator="F1")
+        help_menu.add_command(label="照合判定ロジックについて...", command=self._show_logic_guide)
+        help_menu.add_separator()
+        help_menu.add_command(label="バージョン情報...", command=self._show_about)
+        menubar.add_cascade(label="ヘルプ(H)", menu=help_menu)
+
+        self.root.config(menu=menubar)
+
+        # ショートカットキー割り当て
+        self.root.bind_all("<F1>", lambda e: self._show_help_guide())
+        self.root.bind_all("<F5>", lambda e: self.run_analysis())
+        self.root.bind_all("<Control-o>", lambda e: self._select_mgmt_file())
+        self.root.bind_all("<Control-d>", lambda e: self._select_order_dir())
+        self.root.bind_all("<Control-s>", lambda e: self._export_results())
+
     def _build_ui(self):
         """メイン画面レイアウトの構築"""
         self.root.configure(bg="#f8fafc")
@@ -118,6 +157,21 @@ class StockMatchApp:
             style="SubHeader.TLabel",
         )
         sub_lbl.pack(side=tk.LEFT, padx=(8, 0))
+
+        help_btn_header = tk.Button(
+            header_frame,
+            text="？ ヘルプ / ガイド",
+            bg="#334155",
+            fg="#f8fafc",
+            activebackground="#475569",
+            activeforeground="#ffffff",
+            relief="flat",
+            font=("Meiryo UI", 9),
+            padx=10,
+            pady=3,
+            command=self._show_help_guide,
+        )
+        help_btn_header.pack(side=tk.RIGHT)
 
         # 2. コントロールパネル（管理表パス・注文書フォルダパス・基準日設定・進捗バー）
         ctrl_container = ttk.Frame(self.root, padding=(16, 10))
@@ -187,7 +241,7 @@ class StockMatchApp:
 
         ttk.Label(
             row3,
-            text="※「パス設定を保存」ボタンを押すと C:\\StockMatch に保存されます。",
+            text="※「パス設定を保存」ボタンを押すと C:\\StockMatch\\config.json に保存されます。",
             style="Card.TLabel",
             foreground="#64748b",
         ).pack(side=tk.LEFT)
@@ -398,6 +452,147 @@ class StockMatchApp:
         return card
 
     # =========================================================================
+    # ヘルプ・ガイドダイアログ
+    # =========================================================================
+    def _show_help_guide(self):
+        """使い方・操作ガイドのモーダルウィンドウを表示"""
+        win = tk.Toplevel(self.root)
+        win.title("StockMatch-v1.0.0 - 使い方・操作ガイド")
+        win.geometry("720x600")
+        win.minsize(580, 450)
+        win.transient(self.root)
+
+        txt_frame = ttk.Frame(win, padding=12)
+        txt_frame.pack(fill=tk.BOTH, expand=True)
+
+        txt = tk.Text(txt_frame, wrap="word", font=("Meiryo UI", 9), padx=10, pady=10, relief="solid", borderwidth=1)
+        vsb = ttk.Scrollbar(txt_frame, orient="vertical", command=txt.yview)
+        txt.configure(yscrollcommand=vsb.set)
+        txt.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+
+        help_content = """【基本操作手順】
+1. 『① 注文品管理表ファイル』の指定:
+   - 「ファイルを参照...」から管理表Excel（例: 注文品管理表.xlsx）を選択します。
+
+2. 『② 注文書フォルダパス』の指定:
+   - 「フォルダを参照...」から注文書Excelが保管されているフォルダを選択します。
+   - フォルダ内のすべての注文書を自動的に一括検査します。注文書以外の無関係なファイル（PDF、テキスト、一時ファイル、注文書フォーマットではないExcel等）は自動的にスキップされます。
+
+3. 『パス設定を保存』ボタン:
+   - ボタンを押すと、現在の管理表パスと注文書フォルダパスが C:\\StockMatch\\config.json に保存されます。次回起動時に自動復元されるため、毎回の選択が不要になります。
+
+4. 『判定基準日』の確認:
+   - デフォルトで本日の日付が入っています。過去や未来の納期超過を検証したい場合は日付を打ち替えて「照合・遅延チェック実行」を押してください。
+
+5. 『照合・遅延チェック実行』ボタン (F5キー):
+   - 照合計算を開始します。進捗バーで現在の状況がリアルタイムに表示されます。
+
+--------------------------------------------------
+【画面の見方と操作】
+■ 上部KPIカード:
+  - 照合結果の全体件数、両方超過、現品超過、請求超過、正常件数を色別に集計表示します。
+
+■ 表示フィルタ / キーワード検索:
+  - 超過区分ごとにワンクリックで表示を切り替えられます。
+  - 注文番号、発注先、メーカー、品名、型番、担当者名で瞬時に絞り込めます。
+
+■ Excel風列フィルター機能:
+  - 各列のヘッダーをクリックすると、Excelと同じ「昇順・降順ソート」「値の検索」「個別チェックボックス絞り込み」が利用できます。
+  - 「列フィルター解除 (Excel風)」ボタンで全列の絞り込みを初期状態に戻せます。
+
+■ CSV/Excel出力 (Ctrl+Sキー):
+  - 照合・超過判定結果の一覧を .xlsx または .csv 形式で出力・保存できます。
+
+--------------------------------------------------
+【キーボードショートカット】
+- F1: このヘルプ画面を表示
+- F5: 照合・遅延チェック実行
+- Ctrl+O: 注文品管理表ファイルを選択
+- Ctrl+D: 注文書フォルダを選択
+- Ctrl+S: 結果をExcel/CSVに出力
+"""
+        txt.insert("1.0", help_content)
+        txt.configure(state="disabled")
+
+        btn_box = ttk.Frame(win, padding=(12, 8))
+        btn_box.pack(fill=tk.X)
+        ttk.Button(btn_box, text="閉じる", style="Primary.TButton", command=win.destroy).pack(side=tk.RIGHT)
+
+    def _show_logic_guide(self):
+        """照合判定ロジック詳細ガイドを表示"""
+        win = tk.Toplevel(self.root)
+        win.title("照合・遅延判定ロジックの詳細")
+        win.geometry("700x560")
+        win.minsize(560, 420)
+        win.transient(self.root)
+
+        txt_frame = ttk.Frame(win, padding=12)
+        txt_frame.pack(fill=tk.BOTH, expand=True)
+
+        txt = tk.Text(txt_frame, wrap="word", font=("Meiryo UI", 9), padx=10, pady=10, relief="solid", borderwidth=1)
+        vsb = ttk.Scrollbar(txt_frame, orient="vertical", command=txt.yview)
+        txt.configure(yscrollcommand=vsb.set)
+        txt.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+
+        logic_content = """【照合・遅延判定ロジック】
+
+1. 依頼区分の切り分け（購入依頼 vs 外注依頼）:
+   - 注文書ファイル名に「購依」が含まれる場合は【購入依頼】として管理表の「購入品リスト」系シートを照合します。
+   - ファイル名に「外依」が含まれる場合は【外注依頼】として管理表の「外注加工リスト」系シートを照合します。
+
+2. 明細行の特定優先ルール:
+   - 注文書に「図面番号」または「品番」が記載されている場合、スペース・記号・ハイフンを完全に除去した純粋な文字列同士で管理表の図面番号・品番（テレコ交差含む）と照合し、優先的に1対1で特定します。
+   - 同一型番が複数ある場合は、注文番号や数量の一致度をタイブレークとして判定します。
+   - 図面番号や品番が未記入の明細に限り、品名・仕様・数量によるあいまい照合を行います。
+   - 管理表のどの行にも見当たらない明細は「【管理表未記載】」として表示されます。
+
+3. 現品確認日（物：A列）の判定:
+   - 管理表のA列（1列目）に日付や確認済み文字列が記入されている場合:
+     ⇒ 「確認済 (正常)」と判定（現品超過フラグはOFF）。
+   - 管理表のA列が未記入の場合:
+     ⇒ 判定基準日（今日）が注文書の納期を過ぎていれば「現品確認 遅れ（超過）」と判定。
+
+4. 請求日（伝票：AI列）の判定:
+   - 管理表のAI列（35列目）に日付や確認済み文字列が記入されている場合:
+     ⇒ 「確認済 (正常)」と判定（請求超過フラグはOFF）。
+   - 管理表のAI列が未記入の場合:
+     ⇒ 判定基準日（今日）が注文書の納期を過ぎていれば「伝票(請求) 遅れ（超過）」と判定。
+"""
+        txt.insert("1.0", logic_content)
+        txt.configure(state="disabled")
+
+        btn_box = ttk.Frame(win, padding=(12, 8))
+        btn_box.pack(fill=tk.X)
+        ttk.Button(btn_box, text="閉じる", style="Primary.TButton", command=win.destroy).pack(side=tk.RIGHT)
+
+    def _show_about(self):
+        """バージョン情報ダイアログの表示"""
+        messagebox.showinfo(
+            "バージョン情報",
+            "StockMatch-v1.0.0\n"
+            "注文品納期 × 管理表（現品確認日・請求日）超過照合システム\n\n"
+            "対応形式: Excel (.xlsx, .xlsm) / CSV\n"
+            "設定保存先: C:\\StockMatch\\config.json\n\n"
+            "© StockMatch System All Rights Reserved.",
+        )
+
+    def _open_config_folder(self):
+        """設定ファイル保存先フォルダをエクスプローラーで開く"""
+        target_dir = self.config_dir
+        if not os.path.exists(target_dir):
+            try:
+                os.makedirs(target_dir, exist_ok=True)
+            except Exception:
+                target_dir = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "StockMatch")
+                os.makedirs(target_dir, exist_ok=True)
+        try:
+            os.startfile(target_dir)
+        except Exception as e:
+            messagebox.showinfo("フォルダパス", f"設定ファイル保管場所:\n{target_dir}\n\n({e})")
+
+    # =========================================================================
     # 設定ファイル（C:\StockMatch\config.json）の保存・読み込み機能
     # =========================================================================
     def _save_config(self, show_msg: bool = False):
@@ -418,7 +613,6 @@ class StockMatchApp:
             if not os.path.exists(target_dir):
                 os.makedirs(target_dir, exist_ok=True)
         except Exception:
-            # 万一 C:\ 直下への書き込み権限がない場合は %LOCALAPPDATA%\StockMatch を代替利用
             alt_dir = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "StockMatch")
             os.makedirs(alt_dir, exist_ok=True)
             target_file = os.path.join(alt_dir, "config.json")
@@ -461,8 +655,6 @@ class StockMatchApp:
         # 設定ファイルが無い、またはパスが無効な場合はカレントディレクトリから自動補完
         if not self.mgmt_file_path.get() or not self.order_dir_path.get():
             self._autoload_default_files()
-
-        # ※ 起動時の自動実行（after(..., run_analysis)）は行わず待機状態とします
 
     def _autoload_default_files(self):
         """カレントディレクトリにある管理表ファイルと注文書フォルダを自動補完"""
@@ -602,7 +794,7 @@ class StockMatchApp:
         # 全角英数・記号の安全な半角化
         s = unicodedata.normalize("NFKC", s)
 
-        # 区切り文字（スラッシュ、ハイフン、長音、ピリオド、年月日）を統一
+        # 区切り文字（スラッシュ、ハイフン、ピリオド、年月日）を統一
         for ch in ("/", "-", ".", "年", "月"):
             s = s.replace(ch, "-")
         s = s.replace("日", " ")
@@ -1823,7 +2015,7 @@ class StockMatchApp:
             )
 
     def _update_heading_display(self, col_id: str):
-        """列ヘッダーのテキスト（フィルター適用中は ▼ 記号を付与）を更新"""
+        """列ヘッダーのテキスト（フィルター適用中は [▼] 記号を付与）を更新"""
         orig_title = self.col_titles.get(col_id, col_id)
         if col_id in self.column_filters:
             display_title = f"{orig_title} [▼]"
