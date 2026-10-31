@@ -39,6 +39,8 @@ class StockMatchApp:
 
         # 解析結果データ保持リスト
         self.analyzed_records = []
+        # 各列の個別フィルター保持用辞書 {col_id: set_of_selected_values}
+        self.column_filters = {}
 
         self._setup_styles()
         self._build_ui()
@@ -278,14 +280,25 @@ class StockMatchApp:
         search_entry.pack(side=tk.LEFT)
         search_entry.bind("<KeyRelease>", lambda e: self._refresh_table())
 
+        # 列フィルター一括クリアボタン
+        self.clear_col_filters_btn = ttk.Button(
+            filter_frame,
+            text="列フィルター解除 (Excel風)",
+            style="Action.TButton",
+            command=self._clear_all_column_filters,
+        )
+        self.clear_col_filters_btn.pack(side=tk.RIGHT, padx=(8, 0))
+
         # 5. メイン結果テーブル（Treeview）
         table_container = ttk.Frame(self.root, padding=(16, 0, 16, 12))
         table_container.pack(fill=tk.BOTH, expand=True)
 
         columns = (
             "status_badge",
+            "req_type",
             "order_no",
             "supplier",
+            "maker",
             "item_name",
             "model_spec",
             "qty",
@@ -301,11 +314,13 @@ class StockMatchApp:
 
         self.tree = ttk.Treeview(table_container, columns=columns, show="headings", selectmode="browse")
 
-        col_configs = [
+        self.col_configs = [
             ("status_badge", "総合判定", 155, "center"),
+            ("req_type", "依頼区分", 85, "center"),
             ("order_no", "注文番号", 95, "center"),
-            ("supplier", "発注先(メーカー)", 140, "w"),
-            ("item_name", "品名", 160, "w"),
+            ("supplier", "発注先", 140, "w"),
+            ("maker", "メーカー", 110, "w"),
+            ("item_name", "品名", 150, "w"),
             ("model_spec", "型番・規格(図番)", 165, "w"),
             ("qty", "数量", 65, "center"),
             ("due_date", "注文書納期", 95, "center"),
@@ -318,9 +333,14 @@ class StockMatchApp:
             ("source_info", "照合元情報", 180, "w"),
         ]
 
-        for col_id, heading_text, width, anchor in col_configs:
-            self.tree.heading(col_id, text=heading_text, command=lambda c=col_id: self._sort_tree(c, False))
+        self.col_titles = {col_id: title for col_id, title, _, _ in self.col_configs}
+
+        for col_id, heading_text, width, anchor in self.col_configs:
+            self._update_heading_display(col_id)
             self.tree.column(col_id, width=width, anchor=anchor)
+
+        # 列ヘッダークリックでフィルター＆ソートダイアログを表示
+        self.tree.bind("<Button-1>", self._on_tree_click)
 
         # 行の背景色タグ設定
         self.tree.tag_configure("BOTH_DELAY", background="#fee2e2", foreground="#7f1d1d")
@@ -684,6 +704,15 @@ class StockMatchApp:
                     f"[1/3] 注文品管理表を読み込み中 ({s_idx}/{total_sheets} シート: {sheet_name})...",
                 )
 
+            # シート名から区分（購入品リスト / 外注加工リスト）を判定
+            s_clean = sheet_name.replace(" ", "")
+            if any(k in s_clean for k in ("購入品", "購入", "購入依頼")):
+                sheet_cat = "PURCHASE"
+            elif any(k in s_clean for k in ("外注加工", "外注", "外依")):
+                sheet_cat = "OUTSOURCE"
+            else:
+                sheet_cat = "OTHER"
+
             ws = wb[sheet_name]
             # 先頭60列までに制限して一括イテレート（無駄な右端の数百列を読まない）
             raw_rows = []
@@ -854,6 +883,7 @@ class StockMatchApp:
                 mgmt_rows.append(
                     {
                         "sheet": sheet_name,
+                        "sheet_cat": sheet_cat,
                         "row": r_idx,
                         "order_no": order_no_str,
                         "norm_order_no": self._normalize_key(order_no_str),
@@ -862,7 +892,7 @@ class StockMatchApp:
                         "part_no": part_str,
                         "item_name": item_str,
                         "maker": maker_str,
-                        "supplier": maker_str,
+                        "supplier": "",
                         "spec": spec_str,
                         "model_spec": model_spec_display,
                         "qty": qty_str,
@@ -909,6 +939,23 @@ class StockMatchApp:
         order_items = []
         filename = os.path.basename(filepath)
 
+        # ファイル名から「購入依頼（購依）」か「外注依頼（外依）」かを判定
+        if "購依" in filename or "購入" in filename:
+            req_type_code = "PURCHASE"
+            req_type_label = "購入依頼"
+        elif "外依" in filename or "外注" in filename:
+            req_type_code = "OUTSOURCE"
+            req_type_label = "外注依頼"
+        else:
+            req_type_code = "UNKNOWN"
+            req_type_label = "一般注文"
+
+        # ファイル名から発注先（例: 22609030購依（株）キーエンス注文.xlsx -> （株）キーエンス）の補助抽出
+        file_supplier = ""
+        m_fname_sup = re.search(r"\d+(?:購依|外依)(.+?)注文", filename)
+        if m_fname_sup:
+            file_supplier = m_fname_sup.group(1).strip()
+
         m_fname_no = re.search(r"(\d{6,10})", filename)
         file_order_no = m_fname_no.group(1) if m_fname_no else ""
 
@@ -931,7 +978,7 @@ class StockMatchApp:
                 continue
 
             sheet_order_no = file_order_no
-            sheet_supplier = ""
+            sheet_supplier = file_supplier
             sheet_order_date = None
             default_year = datetime.date.today().year
 
@@ -974,13 +1021,12 @@ class StockMatchApp:
                             for offset in range(1, 6):
                                 if c_idx - 1 - offset >= 0:
                                     left_val = str(row_tuple[c_idx - 1 - offset] or "").strip()
-                                    if left_val:
+                                    if left_val and not any(k in left_val for k in ("注文", "発注", "No")):
                                         cleaned_sup = f"{left_val} {cleaned_sup}".strip()
                                         break
-                            if not sheet_supplier:
-                                sheet_supplier = cleaned_sup
+                            sheet_supplier = cleaned_sup
                     elif (
-                        ("株式会社" in cell_val or "有限会社" in cell_val or "(株)" in cell_val or "（株）" in cell_val)
+                        ("株式会社" in cell_val or "有限会社" in cell_val or "(株)" in cell_val or "（株）" in cell_val or "(有)" in cell_val or "（有）" in cell_val)
                         and r_idx <= 10
                         and "丸菱" not in cell_val
                     ):
@@ -1118,8 +1164,7 @@ class StockMatchApp:
                 norm_part = self._normalize_key(part_str)
                 norm_item = self._normalize_key(item_str)
                 norm_spec = self._normalize_key(spec_str)
-                sup_combined = maker_str or sheet_supplier
-                norm_maker = self._normalize_key(sup_combined)
+                norm_maker = self._normalize_key(maker_str)
                 norm_combined = self._normalize_key(f"{drawing_str} {part_str} {item_str} {spec_str}")
 
                 code_norms = [
@@ -1131,6 +1176,8 @@ class StockMatchApp:
                 order_items.append(
                     {
                         "file": filename,
+                        "req_type_code": req_type_code,
+                        "req_type_label": req_type_label,
                         "sheet": sheet_name,
                         "row": r_idx,
                         "order_no": sheet_order_no,
@@ -1139,8 +1186,8 @@ class StockMatchApp:
                         "drawing_no": drawing_str,
                         "part_no": part_str,
                         "item_name": item_str,
-                        "maker": sup_combined,
-                        "supplier": sheet_supplier or maker_str,
+                        "maker": maker_str,
+                        "supplier": sheet_supplier or file_supplier,
                         "spec": spec_str,
                         "model_spec": model_spec_display,
                         "qty": qty_str,
@@ -1264,6 +1311,10 @@ class StockMatchApp:
                     order_items_count = payload["order_items_count"]
                     mgmt_rows_count = payload["mgmt_rows_count"]
 
+                    # 新規解析時に個別列フィルターを初期化
+                    self.column_filters.clear()
+                    self._update_all_headings()
+
                     self._update_kpis()
                     self._refresh_table()
 
@@ -1301,9 +1352,9 @@ class StockMatchApp:
         progress_cb=None,
     ) -> list[dict]:
         """
-        指定した注文書フォルダ内の「注文書にある明細のみ」をチェック対象とし、
-        記号やスペースを完全無視した純粋な文字のみによる柔軟なあいまい照合を行い、
-        見当たらないものは「【管理表未記載】」として明確に判定する。
+        指定した注文書フォルダ内の「注文書にある明細のみ」をチェック対象とする。
+        【最優先】図面番号または品番が記入されている項目は、それらのみで一致を特定する。
+        図面番号・品番が空欄の項目については、品名や仕様等のあいまい照合で補完する。
         """
         results = []
         total_orders = len(order_items)
@@ -1316,128 +1367,155 @@ class StockMatchApp:
                     f"[3/3] 注文書明細と管理表を照合中 ({idx}/{total_orders} 件目)...",
                 )
 
+            req_code = o_item.get("req_type_code", "UNKNOWN")
+
+            # 依頼区分に応じた管理表対象行のフィルタリング
+            # 購依 -> 購入品シート、外依 -> 外注加工シート を最優先で対象にする
+            primary_mgmt = []
+            fallback_mgmt = []
+            for m in mgmt_rows:
+                if m["matched"]:
+                    continue
+                if req_code == "PURCHASE":
+                    if m.get("sheet_cat") == "PURCHASE":
+                        primary_mgmt.append(m)
+                    else:
+                        fallback_mgmt.append(m)
+                elif req_code == "OUTSOURCE":
+                    if m.get("sheet_cat") == "OUTSOURCE":
+                        primary_mgmt.append(m)
+                    else:
+                        fallback_mgmt.append(m)
+                else:
+                    primary_mgmt.append(m)
+
+            search_targets = primary_mgmt if primary_mgmt else fallback_mgmt
+
             o_no_norm = o_item["norm_order_no"]
             o_qty_num = o_item["qty_num"]
-            o_price_num = o_item["price_num"]
-            o_amt_num = o_item["amt_num"]
-            o_codes = o_item["code_norms"]
+            o_drawing_norm = o_item["norm_drawing"]
+            o_part_norm = o_item["norm_part"]
 
             best_mgmt = None
             best_score = -1.0
 
-            for m_row in mgmt_rows:
-                if m_row["matched"]:
-                    continue
+            # -------------------------------------------------------------
+            # 【優先照合ステップ】図面番号または品番が記入されている場合
+            # -------------------------------------------------------------
+            has_identifying_code = bool(o_drawing_norm or o_part_norm)
 
-                score = 0.0
-                matched_key_count = 0
-
-                # 1) 図面番号 / 品番 / 仕様 の記号無視クロス一致
-                m_codes = m_row["code_norms"]
-                best_code_sim = 0.0
-                for oc_norm, oc_bg in o_codes:
-                    if not oc_norm:
+            if has_identifying_code:
+                candidate_matches = []
+                for m_row in search_targets:
+                    if m_row["matched"]:
                         continue
-                    for mc_norm, mc_bg in m_codes:
-                        if not mc_norm:
-                            continue
-                        sim = self._fast_similarity(oc_norm, oc_bg, mc_norm, mc_bg)
-                        if oc_norm == mc_norm or oc_norm in mc_norm or mc_norm in oc_norm:
-                            sim = max(sim, 0.95)
-                        if sim > best_code_sim:
-                            best_code_sim = sim
-                    if m_row["norm_item"]:
-                        sim_in_item = self._fast_similarity(
-                            oc_norm, oc_bg, m_row["norm_item"], m_row["bg_item"]
-                        )
-                        if oc_norm == m_row["norm_item"] or oc_norm in m_row["norm_item"]:
-                            sim_in_item = max(sim_in_item, 0.90)
-                        if sim_in_item > best_code_sim:
-                            best_code_sim = sim_in_item
 
-                if best_code_sim >= 0.75:
-                    score += 65.0 * best_code_sim
-                    matched_key_count += 1
-                elif best_code_sim >= 0.40:
-                    score += 40.0 * best_code_sim
-                    matched_key_count += 1
+                    m_drawing_norm = m_row["norm_drawing"]
+                    m_part_norm = m_row["norm_part"]
 
-                # 個別ペア（図番、品番、仕様）の一致加点
-                for norm_k, bg_k, weight in (
-                    ("norm_drawing", "bg_drawing", 30.0),
-                    ("norm_part", "bg_part", 30.0),
-                    ("norm_spec", "bg_spec", 25.0),
-                ):
-                    if o_item[norm_k] and m_row[norm_k]:
-                        f_sim = self._fast_similarity(
-                            o_item[norm_k], o_item[bg_k], m_row[norm_k], m_row[bg_k]
+                    # 1) 図面番号同士、または品番同士の完全一致
+                    exact_drawing = bool(o_drawing_norm and m_drawing_norm and o_drawing_norm == m_drawing_norm)
+                    exact_part = bool(o_part_norm and m_part_norm and o_part_norm == m_part_norm)
+
+                    # 2) 注文書と管理表で「図面番号」と「品番」がテレコ（交差）で記載されている場合の完全一致
+                    cross_dp = bool(o_drawing_norm and m_part_norm and o_drawing_norm == m_part_norm)
+                    cross_pd = bool(o_part_norm and m_drawing_norm and o_part_norm == m_drawing_norm)
+
+                    if exact_drawing or exact_part or cross_dp or cross_pd:
+                        code_score = 1000.0
+                        if exact_drawing and exact_part:
+                            code_score += 500.0
+                        # 同一型番が複数ある場合のタイブレーク（注文番号・数量一致）
+                        if o_no_norm and m_row["norm_order_no"] and o_no_norm == m_row["norm_order_no"]:
+                            code_score += 100.0
+                        if o_qty_num and m_row["qty_num"] and o_qty_num == m_row["qty_num"]:
+                            code_score += 50.0
+                        candidate_matches.append((code_score, m_row))
+                        continue
+
+                    # 3) 前後部分一致（プレフィックス・サフィックス一致）
+                    part_match = False
+                    if o_drawing_norm and m_drawing_norm and (o_drawing_norm in m_drawing_norm or m_drawing_norm in o_drawing_norm):
+                        part_match = True
+                    elif o_part_norm and m_part_norm and (o_part_norm in m_part_norm or m_part_norm in o_part_norm):
+                        part_match = True
+                    elif o_drawing_norm and m_part_norm and (o_drawing_norm in m_part_norm or m_part_norm in o_drawing_norm):
+                        part_match = True
+                    elif o_part_norm and m_drawing_norm and (o_part_norm in m_drawing_norm or m_drawing_norm in o_part_norm):
+                        part_match = True
+
+                    if part_match:
+                        code_score = 500.0
+                        if o_no_norm and m_row["norm_order_no"] and o_no_norm == m_row["norm_order_no"]:
+                            code_score += 50.0
+                        if o_qty_num and m_row["qty_num"] and o_qty_num == m_row["qty_num"]:
+                            code_score += 30.0
+                        candidate_matches.append((code_score, m_row))
+
+                if candidate_matches:
+                    candidate_matches.sort(key=lambda x: x[0], reverse=True)
+                    best_mgmt = candidate_matches[0][1]
+
+            # -------------------------------------------------------------
+            # 【フォールバック】図面番号・品番が未記入、または見つからなかった場合
+            # -------------------------------------------------------------
+            if best_mgmt is None and not has_identifying_code:
+                o_price_num = o_item["price_num"]
+                o_amt_num = o_item["amt_num"]
+
+                for m_row in search_targets:
+                    if m_row["matched"]:
+                        continue
+
+                    score = 0.0
+                    matched_key_count = 0
+
+                    # 品名の一致
+                    if o_item["norm_item"] and m_row["norm_item"]:
+                        name_sim = self._fast_similarity(
+                            o_item["norm_item"], o_item["bg_item"], m_row["norm_item"], m_row["bg_item"]
                         )
-                        if o_item[norm_k] == m_row[norm_k] or o_item[norm_k] in m_row[norm_k] or m_row[norm_k] in o_item[norm_k]:
-                            f_sim = max(f_sim, 0.95)
-                        if f_sim >= 0.50:
-                            score += weight * f_sim
+                        if o_item["norm_item"] == m_row["norm_item"] or o_item["norm_item"] in m_row["norm_item"] or m_row["norm_item"] in o_item["norm_item"]:
+                            name_sim = max(name_sim, 0.95)
+                        if name_sim >= 0.45:
+                            score += 50.0 * name_sim
                             matched_key_count += 1
 
-                # 2) 品名 の一致
-                if o_item["norm_item"] and m_row["norm_item"]:
-                    name_sim = self._fast_similarity(
-                        o_item["norm_item"], o_item["bg_item"], m_row["norm_item"], m_row["bg_item"]
-                    )
-                    if o_item["norm_item"] == m_row["norm_item"] or o_item["norm_item"] in m_row["norm_item"] or m_row["norm_item"] in o_item["norm_item"]:
-                        name_sim = max(name_sim, 0.95)
-                    if name_sim >= 0.45:
-                        score += 40.0 * name_sim
-                        matched_key_count += 1
+                    # 仕様の一致
+                    if o_item["norm_spec"] and m_row["norm_spec"]:
+                        spec_sim = self._fast_similarity(
+                            o_item["norm_spec"], o_item["bg_spec"], m_row["norm_spec"], m_row["bg_spec"]
+                        )
+                        if o_item["norm_spec"] == m_row["norm_spec"] or o_item["norm_spec"] in m_row["norm_spec"] or m_row["norm_spec"] in o_item["norm_spec"]:
+                            spec_sim = max(spec_sim, 0.95)
+                        if spec_sim >= 0.45:
+                            score += 40.0 * spec_sim
+                            matched_key_count += 1
 
-                # 統合テキストの横断一致
-                if o_item["norm_combined"] and m_row["norm_combined"]:
-                    comb_sim = self._fast_similarity(
-                        o_item["norm_combined"],
-                        o_item["bg_combined"],
-                        m_row["norm_combined"],
-                        m_row["bg_combined"],
-                    )
-                    if o_item["norm_combined"] in m_row["norm_combined"] or m_row["norm_combined"] in o_item["norm_combined"]:
-                        comb_sim = max(comb_sim, 0.90)
-                    if comb_sim >= 0.45:
-                        score += 35.0 * comb_sim
-                        matched_key_count += 1
+                    # 数量・金額
+                    if o_qty_num and m_row["qty_num"] and o_qty_num == m_row["qty_num"]:
+                        score += 20.0
+                    if o_price_num and m_row["price_num"] and o_price_num == m_row["price_num"]:
+                        score += 15.0
+                    if o_amt_num and m_row["amt_num"] and o_amt_num == m_row["amt_num"]:
+                        score += 15.0
 
-                # 3) 数量・単価・金額の数値一致ボーナス
-                if o_qty_num and m_row["qty_num"] and o_qty_num == m_row["qty_num"]:
-                    score += 15.0
-                if o_price_num and m_row["price_num"] and o_price_num == m_row["price_num"]:
-                    score += 15.0
-                    matched_key_count += 1
-                if o_amt_num and m_row["amt_num"] and o_amt_num == m_row["amt_num"]:
-                    score += 15.0
-                    matched_key_count += 1
-
-                # 4) 注文番号の一致
-                m_no_norm = m_row["norm_order_no"]
-                if o_no_norm and m_no_norm:
-                    if o_no_norm == m_no_norm or o_no_norm in m_no_norm or m_no_norm in o_no_norm:
+                    if o_no_norm and m_row["norm_order_no"] and o_no_norm == m_row["norm_order_no"]:
                         score += 30.0
 
-                if matched_key_count >= 1 and score > best_score and score >= 18.0:
-                    best_score = score
-                    best_mgmt = m_row
-
-            # フォールバック：結合テキストの緩い包含一致
-            if best_mgmt is None and o_item["norm_combined"]:
-                for m_row in mgmt_rows:
-                    if m_row["matched"] or not m_row["norm_combined"]:
-                        continue
-                    if o_item["norm_combined"] in m_row["norm_combined"] or m_row["norm_combined"] in o_item["norm_combined"]:
-                        best_score = 45.0
+                    if matched_key_count >= 1 and score > best_score and score >= 25.0:
+                        best_score = score
                         best_mgmt = m_row
-                        break
 
             if best_mgmt:
                 best_mgmt["matched"] = True
+                final_supplier = o_item.get("supplier") or best_mgmt.get("supplier", "")
+                final_maker = o_item.get("maker") or best_mgmt.get("maker", "")
                 record = self._evaluate_single_record(
+                    req_type=o_item.get("req_type_label", "注文"),
                     order_no=best_mgmt.get("order_no") or o_item.get("order_no", ""),
-                    supplier=o_item.get("supplier") or best_mgmt.get("supplier", ""),
+                    supplier=final_supplier,
+                    maker=final_maker,
                     item_name=o_item.get("item_name") or best_mgmt.get("item_name", ""),
                     model_spec=o_item.get("model_spec") or best_mgmt.get("model_spec", ""),
                     qty=o_item.get("qty") or best_mgmt.get("qty", ""),
@@ -1449,14 +1527,16 @@ class StockMatchApp:
                     invoice_raw=best_mgmt.get("invoice_raw", ""),
                     invoice_filled=best_mgmt.get("invoice_filled", False),
                     person=best_mgmt.get("person", ""),
-                    source_info=f"注文書:{o_item['file']} ⇔ 管理表:{best_mgmt['sheet']}(行{best_mgmt['row']})",
+                    source_info=f"[{o_item.get('req_type_label', '')}] 注文書:{o_item['file']} ⇔ 管理表:{best_mgmt['sheet']}(行{best_mgmt['row']})",
                     base_date=base_date,
                 )
             else:
                 # 注文品管理表に見当たらない場合
                 record = self._evaluate_single_record(
+                    req_type=o_item.get("req_type_label", "注文"),
                     order_no=o_item.get("order_no", ""),
                     supplier=o_item.get("supplier", ""),
+                    maker=o_item.get("maker", ""),
                     item_name=o_item.get("item_name", ""),
                     model_spec=o_item.get("model_spec", ""),
                     qty=o_item.get("qty", ""),
@@ -1468,7 +1548,7 @@ class StockMatchApp:
                     invoice_raw="",
                     invoice_filled=False,
                     person="【管理表未記載】",
-                    source_info=f"【管理表未記載】注文書:{o_item['file']}(行{o_item['row']})",
+                    source_info=f"【管理表未記載】[{o_item.get('req_type_label', '')}] 注文書:{o_item['file']}(行{o_item['row']})",
                     base_date=base_date,
                 )
             results.append(record)
@@ -1478,8 +1558,10 @@ class StockMatchApp:
 
     def _evaluate_single_record(
         self,
+        req_type: str,
         order_no: str,
         supplier: str,
+        maker: str,
         item_name: str,
         model_spec: str,
         qty: str,
@@ -1598,16 +1680,22 @@ class StockMatchApp:
 
         return {
             "status_badge": status_badge,
+            "req_type": req_type,
             "order_no": order_no,
             "supplier": supplier,
+            "maker": maker,
             "item_name": item_name,
             "model_spec": model_spec,
             "qty": qty,
+            "due_date": due_str,
             "due_date_str": due_str,
+            "days_overdue": days_overdue_str,
             "days_overdue_str": days_overdue_str,
             "overdue_days_num": overdue_days_num,
+            "actual_date": actual_display_str,
             "actual_date_str": actual_display_str,
             "actual_status": actual_status,
+            "invoice_date": invoice_display_str,
             "invoice_date_str": invoice_display_str,
             "invoice_status": invoice_status,
             "person": person,
@@ -1650,15 +1738,29 @@ class StockMatchApp:
             elif mode == "BOTH_DELAY" and not (rec["actual_overdue"] and rec["invoice_overdue"]):
                 continue
 
+            # 各列のExcel風フィルター判定
+            skip_by_col = False
+            for col_id, allowed_values in self.column_filters.items():
+                val = str(rec.get(col_id, "") or "").strip()
+                if not val:
+                    val = "(空白)"
+                if val not in allowed_values:
+                    skip_by_col = True
+                    break
+            if skip_by_col:
+                continue
+
             if kw:
                 searchable = " ".join(
                     [
+                        rec["status_badge"],
+                        rec["req_type"],
                         rec["order_no"],
                         rec["supplier"],
+                        rec["maker"],
                         rec["item_name"],
                         rec["model_spec"],
                         rec["person"],
-                        rec["status_badge"],
                     ]
                 ).lower()
                 if kw not in searchable:
@@ -1669,8 +1771,10 @@ class StockMatchApp:
                 tk.END,
                 values=(
                     rec["status_badge"],
+                    rec["req_type"],
                     rec["order_no"],
                     rec["supplier"],
+                    rec["maker"],
                     rec["item_name"],
                     rec["model_spec"],
                     rec["qty"],
@@ -1686,13 +1790,283 @@ class StockMatchApp:
                 tags=(rec["row_tag"],),
             )
 
+    def _update_heading_display(self, col_id: str):
+        """列ヘッダーのテキスト（フィルター適用中は ▼ 記号を付与）を更新"""
+        orig_title = self.col_titles.get(col_id, col_id)
+        if col_id in self.column_filters:
+            display_title = f"{orig_title} [▼]"
+        else:
+            display_title = f"{orig_title} ▾"
+        self.tree.heading(col_id, text=display_title)
+
+    def _update_all_headings(self):
+        """全列のヘッダー表示を更新"""
+        for col_id, _, _, _ in self.col_configs:
+            self._update_heading_display(col_id)
+
+    def _on_tree_click(self, event):
+        """Treeviewクリック時の判定（ヘッダー部分クリックでExcel風フィルターを開く）"""
+        region = self.tree.identify_region(event.x, event.y)
+        if region == "heading":
+            col = self.tree.identify_column(event.x)
+            # col は '#1', '#2' などの文字列
+            col_index = int(col.replace("#", "")) - 1
+            if 0 <= col_index < len(self.col_configs):
+                col_id = self.col_configs[col_index][0]
+                self._open_excel_column_filter(col_id, event.x_root, event.y_root)
+
+    def _open_excel_column_filter(self, col_id: str, x: int, y: int):
+        """指定列に対するExcel風ドロップダウンフィルター・ソートウィンドウを表示"""
+        if not self.analyzed_records:
+            return
+
+        # 該当列のユニークな値を全件走査して収集
+        all_unique_vals = set()
+        for rec in self.analyzed_records:
+            val = str(rec.get(col_id, "") or "").strip()
+            if not val:
+                val = "(空白)"
+            all_unique_vals.add(val)
+
+        sorted_vals = sorted(all_unique_vals, key=lambda s: (s == "(空白)", s))
+        currently_selected = set(self.column_filters.get(col_id, all_unique_vals))
+
+        win = tk.Toplevel(self.root)
+        win.title(f"フィルター: {self.col_titles.get(col_id, col_id)}")
+        
+        # 画面外にはみ出さないよう表示座標を調整
+        win_w, win_h = 320, 440
+        scr_w = win.winfo_screenwidth()
+        scr_h = win.winfo_screenheight()
+        pos_x = min(max(10, x), scr_w - win_w - 20)
+        pos_y = min(max(10, y), scr_h - win_h - 40)
+        win.geometry(f"{win_w}x{win_h}+{pos_x}+{pos_y}")
+        win.resizable(False, False)
+        win.transient(self.root)
+        win.grab_set()
+
+        # 1. ソート操作エリア
+        sort_frame = tk.Frame(win, bg="#f8fafc", padx=10, pady=8)
+        sort_frame.pack(fill=tk.X)
+
+        btn_sort_asc = tk.Button(
+            sort_frame,
+            text="↑ 昇順で並べ替え (A → Z / 0 → 9)",
+            bg="#ffffff",
+            fg="#1e293b",
+            relief="solid",
+            borderwidth=1,
+            font=("Meiryo UI", 9),
+            anchor="w",
+            padx=8,
+            pady=3,
+            command=lambda: [self._sort_tree(col_id, False), win.destroy()],
+        )
+        btn_sort_asc.pack(fill=tk.X, pady=(0, 4))
+
+        btn_sort_desc = tk.Button(
+            sort_frame,
+            text="↓ 降順で並べ替え (Z → A / 9 → 0)",
+            bg="#ffffff",
+            fg="#1e293b",
+            relief="solid",
+            borderwidth=1,
+            font=("Meiryo UI", 9),
+            anchor="w",
+            padx=8,
+            pady=3,
+            command=lambda: [self._sort_tree(col_id, True), win.destroy()],
+        )
+        btn_sort_desc.pack(fill=tk.X)
+
+        tk.Frame(win, height=1, bg="#cbd5e1").pack(fill=tk.X, padx=10, pady=(4, 6))
+
+        # 2. 検索バー
+        search_frame = tk.Frame(win, bg="#f8fafc", padx=10)
+        search_frame.pack(fill=tk.X)
+        tk.Label(search_frame, text="検索:", bg="#f8fafc", font=("Meiryo UI", 8, "bold")).pack(anchor="w")
+        filter_search_var = tk.StringVar()
+        f_entry = ttk.Entry(search_frame, textvariable=filter_search_var)
+        f_entry.pack(fill=tk.X, pady=(2, 6))
+
+        # 3. 下部ボタンバー（先に下部に配置して領域を固定確保）
+        btn_frame = tk.Frame(win, bg="#f1f5f9", padx=10, pady=8, highlightbackground="#cbd5e1", highlightthickness=1)
+        btn_frame.pack(fill=tk.X, side=tk.BOTTOM)
+
+        # 4. スクロールリストエリア
+        chk_outer = tk.Frame(win, bg="#ffffff", highlightbackground="#cbd5e1", highlightthickness=1)
+        chk_outer.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 8))
+
+        canvas = tk.Canvas(chk_outer, bg="#ffffff", highlightthickness=0)
+        vsb = ttk.Scrollbar(chk_outer, orient="vertical", command=canvas.yview)
+        scrollable_frame = tk.Frame(canvas, bg="#ffffff")
+
+        window_id = canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+
+        def _on_canvas_configure(e):
+            # Canvasの横幅に内側フレームの幅を自動追従
+            canvas.itemconfig(window_id, width=e.width)
+
+        def _on_frame_configure(e):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        canvas.bind("<Configure>", _on_canvas_configure)
+        scrollable_frame.bind("<Configure>", _on_frame_configure)
+        canvas.configure(yscrollcommand=vsb.set)
+
+        # マウスホイールでのスクロール対応
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        canvas.bind_all("<MouseWheel>", _on_mousewheel)
+
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+
+        val_vars = {}
+        chk_widgets = []
+        updating_all_var = False
+
+        # 「すべて選択」チェックボックス
+        all_var = tk.BooleanVar(value=(len(currently_selected) == len(sorted_vals)))
+
+        def _toggle_select_all():
+            nonlocal updating_all_var
+            if updating_all_var:
+                return
+            target_val = all_var.get()
+            # 検索で現在表示されているアイテムのみを一括ON/OFF
+            k = filter_search_var.get().strip().lower()
+            for v, var in val_vars.items():
+                if not k or k in v.lower():
+                    var.set(target_val)
+
+        chk_all = tk.Checkbutton(
+            scrollable_frame,
+            text="(すべて選択)",
+            variable=all_var,
+            command=_toggle_select_all,
+            bg="#ffffff",
+            activebackground="#ffffff",
+            font=("Meiryo UI", 9, "bold"),
+            anchor="w",
+            padx=4,
+            pady=2,
+        )
+        chk_all.pack(fill=tk.X, padx=4, pady=(2, 2))
+
+        def _on_single_check_changed():
+            nonlocal updating_all_var
+            updating_all_var = True
+            all_checked = all(var.get() for var in val_vars.values())
+            all_var.set(all_checked)
+            updating_all_var = False
+
+        for val in sorted_vals:
+            var = tk.BooleanVar(value=(val in currently_selected))
+            val_vars[val] = var
+            chk = tk.Checkbutton(
+                scrollable_frame,
+                text=val,
+                variable=var,
+                command=_on_single_check_changed,
+                bg="#ffffff",
+                activebackground="#ffffff",
+                font=("Meiryo UI", 9),
+                anchor="w",
+                padx=16,
+                pady=1,
+            )
+            chk.pack(fill=tk.X, pady=1)
+            chk_widgets.append((val, chk))
+
+        # 検索インクリメンタルフィルタ
+        def _on_filter_search(*_):
+            k = filter_search_var.get().strip().lower()
+            for val, w in chk_widgets:
+                if not k or k in val.lower():
+                    w.pack(fill=tk.X, pady=1)
+                else:
+                    w.pack_forget()
+            canvas.yview_moveto(0)
+
+        filter_search_var.trace_add("write", _on_filter_search)
+
+        def _cleanup_and_destroy():
+            canvas.unbind_all("<MouseWheel>")
+            win.destroy()
+
+        win.protocol("WM_DELETE_WINDOW", _cleanup_and_destroy)
+
+        # 確定・解除・キャンセル処理
+        def _apply_filter():
+            selected = {v for v, var in val_vars.items() if var.get()}
+            if len(selected) == len(sorted_vals):
+                self.column_filters.pop(col_id, None)
+            else:
+                self.column_filters[col_id] = selected
+            self._update_heading_display(col_id)
+            self._refresh_table()
+            _cleanup_and_destroy()
+
+        def _clear_filter():
+            self.column_filters.pop(col_id, None)
+            self._update_heading_display(col_id)
+            self._refresh_table()
+            _cleanup_and_destroy()
+
+        btn_ok = tk.Button(
+            btn_frame,
+            text="適用 (OK)",
+            bg="#2563eb",
+            fg="#ffffff",
+            font=("Meiryo UI", 9, "bold"),
+            relief="flat",
+            padx=12,
+            pady=4,
+            command=_apply_filter,
+        )
+        btn_ok.pack(side=tk.RIGHT, padx=(6, 0))
+
+        btn_cancel = tk.Button(
+            btn_frame,
+            text="キャンセル",
+            bg="#ffffff",
+            fg="#475569",
+            font=("Meiryo UI", 9),
+            relief="solid",
+            borderwidth=1,
+            padx=8,
+            pady=4,
+            command=_cleanup_and_destroy,
+        )
+        btn_cancel.pack(side=tk.RIGHT)
+
+        btn_clear = tk.Button(
+            btn_frame,
+            text="フィルター解除",
+            bg="#ffffff",
+            fg="#b91c1c",
+            font=("Meiryo UI", 9),
+            relief="solid",
+            borderwidth=1,
+            padx=8,
+            pady=4,
+            command=_clear_filter,
+        )
+        btn_clear.pack(side=tk.LEFT)
+
+    def _clear_all_column_filters(self):
+        """すべての列フィルターを一括解除"""
+        self.column_filters.clear()
+        self._update_all_headings()
+        self._refresh_table()
+
     def _sort_tree(self, col: str, reverse: bool):
         """Treeview列ヘッダークリック時のソート処理"""
         items = [(self.tree.set(k, col), k) for k in self.tree.get_children("")]
         items.sort(reverse=reverse)
         for index, (_, k) in enumerate(items):
             self.tree.move(k, "", index)
-        self.tree.heading(col, command=lambda: self._sort_tree(col, not reverse))
 
     def _export_results(self):
         """検査結果をExcelまたはCSVに出力する"""
@@ -1714,8 +2088,10 @@ class StockMatchApp:
             export_rows.append(
                 {
                     "総合判定": r["status_badge"],
+                    "依頼区分": r["req_type"],
                     "注文番号": r["order_no"],
                     "発注先": r["supplier"],
+                    "メーカー": r["maker"],
                     "品名": r["item_name"],
                     "型番・規格": r["model_spec"],
                     "数量": r["qty"],
