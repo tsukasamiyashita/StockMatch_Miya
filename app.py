@@ -503,8 +503,8 @@ class StockMatchApp:
         if not s or s in ("-", "ー", "未", "未定", "None", "nan", "NaT"):
             return None
 
-        # 全角数字・記号を半角へ変換（16文字 → 16文字で1対1対応）
-        s = s.translate(str.maketrans("０１２３４５６７８９／－．年日月", "0123456789/-./ /"))
+        # 全角数字・記号を半角へ変換（変換元14文字、変換先14文字で完全一致）
+        s = s.translate(str.maketrans("０１２３４５６７８９／－．年月", "0123456789/-.  "))
         s = re.sub(r"\(.*?\)", "", s).strip()
 
         # YYYY/MM/DD or YYYY-MM-DD or YYYY.MM.DD
@@ -560,24 +560,25 @@ class StockMatchApp:
 
     @staticmethod
     def _normalize_key(text: str) -> str:
-        """照合比較用に文字列を正規化（空白・記号除去・半角化・大文字化・法人格除去）"""
+        """照合比較用に文字列を正規化（スペース、中点、記号、法人格などを完全除去し純粋な文字のみにする）"""
         if not text or pd.isna(text):
             return ""
         s = str(text).strip()
         if s.lower() in ("none", "nan", "nat"):
             return ""
-        # 全角英数・カナ記号を半角・統一形式へ変換
+        # 全角英数・カナ・記号を半角・統一形式へ変換
         s = s.translate(
             str.maketrans(
-                "０１２３４５６７８９ＡＢＣＤＥＦＧＨＩＪＫＬＭＮＯＰＱＲＳＴＵＶＷＸＹＺａｂｃｄｅｆｇｈｉｊｋｌｍｎｏｐｑｒｓｔｕｖｗｘｙｚ－ー―‐　（）()",
-                "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz---- ()()",
+                "０１２３４５６７８９ＡＢＣＤＥＦＧＨＩＪＫＬＭＮOPQRSTUVWXYZａｂｃｄｅｆｇｈｉｊｋｌｍｎｏｐｑｒｓｔｕｖｗｘｙｚ－ー―‐　（）()・.・,，/／\\＼",
+                "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz---------------------------",
             )
         )
-        # 法人格などの表記ゆれを除去
+        # 法人格や一般的な不要語句を除去
         for corp in ("株式会社", "有限会社", "(株)", "(有)", "御中", "様"):
             s = s.replace(corp, "")
-        # 空白やハイフン・記号の微細な違いを吸収するため英数字・日本語文字のみ抽出
-        s = re.sub(r"[\s\-\_/\.\,・:：;；\(\)\[\]【】「」『』×✕＊\*]+", "", s)
+        
+        # 記号、スペース、中点、句読点などを完全に削除し、純粋な英数字・日本語文字のみを抽出
+        s = re.sub(r"[^0-9A-Za-z一-龥ぁ-んァ-ン]", "", s)
         return s.upper()
 
     @classmethod
@@ -1282,8 +1283,8 @@ class StockMatchApp:
     ) -> list[dict]:
         """
         指定した注文書フォルダ内の「注文書にある明細のみ」をチェック対象とし、
-        事前計算した正規化キャッシュ＆2-gram集合を用いて高速にあいまい照合を行い、
-        現品確認日(A列)・請求日(AI列)を評価する。
+        記号やスペースを完全無視した純粋な文字のみによる柔軟なあいまい照合を行い、
+        見当たらないものは「【管理表未記載】」として明確に判定する。
         """
         results = []
         total_orders = len(order_items)
@@ -1312,52 +1313,64 @@ class StockMatchApp:
                 score = 0.0
                 matched_key_count = 0
 
-                # 1) 図面番号 / 品番 / 仕様 の横断あいまい一致（最重要）
+                # 1) 図面番号 / 品番 / 仕様 の記号無視クロス一致
                 m_codes = m_row["code_norms"]
                 best_code_sim = 0.0
                 for oc_norm, oc_bg in o_codes:
+                    if not oc_norm:
+                        continue
                     for mc_norm, mc_bg in m_codes:
+                        if not mc_norm:
+                            continue
                         sim = self._fast_similarity(oc_norm, oc_bg, mc_norm, mc_bg)
+                        if oc_norm == mc_norm or oc_norm in mc_norm or mc_norm in oc_norm:
+                            sim = max(sim, 0.95)
                         if sim > best_code_sim:
                             best_code_sim = sim
                     if m_row["norm_item"]:
                         sim_in_item = self._fast_similarity(
                             oc_norm, oc_bg, m_row["norm_item"], m_row["bg_item"]
                         )
+                        if oc_norm == m_row["norm_item"] or oc_norm in m_row["norm_item"]:
+                            sim_in_item = max(sim_in_item, 0.90)
                         if sim_in_item > best_code_sim:
                             best_code_sim = sim_in_item
 
-                if best_code_sim >= 0.85:
-                    score += 55.0 * best_code_sim
+                if best_code_sim >= 0.75:
+                    score += 65.0 * best_code_sim
                     matched_key_count += 1
-                elif best_code_sim >= 0.55:
-                    score += 35.0 * best_code_sim
+                elif best_code_sim >= 0.40:
+                    score += 40.0 * best_code_sim
                     matched_key_count += 1
 
-                # 個別ペア（図面番号同士、品番同士、仕様同士）の一致加点
+                # 個別ペア（図番、品番、仕様）の一致加点
                 for norm_k, bg_k, weight in (
-                    ("norm_drawing", "bg_drawing", 25.0),
-                    ("norm_part", "bg_part", 25.0),
-                    ("norm_spec", "bg_spec", 20.0),
+                    ("norm_drawing", "bg_drawing", 30.0),
+                    ("norm_part", "bg_part", 30.0),
+                    ("norm_spec", "bg_spec", 25.0),
                 ):
                     if o_item[norm_k] and m_row[norm_k]:
                         f_sim = self._fast_similarity(
                             o_item[norm_k], o_item[bg_k], m_row[norm_k], m_row[bg_k]
                         )
-                        if f_sim >= 0.65:
+                        if o_item[norm_k] == m_row[norm_k] or o_item[norm_k] in m_row[norm_k] or m_row[norm_k] in o_item[norm_k]:
+                            f_sim = max(f_sim, 0.95)
+                        if f_sim >= 0.50:
                             score += weight * f_sim
                             matched_key_count += 1
 
-                # 2) 品名 のあいまい一致
+                # 2) 品名 の一致
                 if o_item["norm_item"] and m_row["norm_item"]:
                     name_sim = self._fast_similarity(
                         o_item["norm_item"], o_item["bg_item"], m_row["norm_item"], m_row["bg_item"]
                     )
-                    if name_sim >= 0.5:
-                        score += 35.0 * name_sim
+                    if o_item["norm_item"] == m_row["norm_item"] or o_item["norm_item"] in m_row["norm_item"] or m_row["norm_item"] in o_item["norm_item"]:
+                        name_sim = max(name_sim, 0.95)
+                    if name_sim >= 0.45:
+                        score += 40.0 * name_sim
                         matched_key_count += 1
 
-                # 統合テキスト（図番＋品番＋品名＋仕様）の横断一致
+                # 統合テキストの横断一致
                 if o_item["norm_combined"] and m_row["norm_combined"]:
                     comb_sim = self._fast_similarity(
                         o_item["norm_combined"],
@@ -1365,19 +1378,13 @@ class StockMatchApp:
                         m_row["norm_combined"],
                         m_row["bg_combined"],
                     )
-                    if comb_sim >= 0.55:
-                        score += 30.0 * comb_sim
+                    if o_item["norm_combined"] in m_row["norm_combined"] or m_row["norm_combined"] in o_item["norm_combined"]:
+                        comb_sim = max(comb_sim, 0.90)
+                    if comb_sim >= 0.45:
+                        score += 35.0 * comb_sim
                         matched_key_count += 1
 
-                # 3) メーカー / 発注先 のあいまい一致
-                if o_item["norm_maker"] and m_row["norm_maker"]:
-                    sup_sim = self._fast_similarity(
-                        o_item["norm_maker"], o_item["bg_maker"], m_row["norm_maker"], m_row["bg_maker"]
-                    )
-                    if sup_sim >= 0.5:
-                        score += 15.0 * sup_sim
-
-                # 4) 購入数 / 単価 / 金額(単価X必要数) の数値一致
+                # 3) 数量・単価・金額の数値一致ボーナス
                 if o_qty_num and m_row["qty_num"] and o_qty_num == m_row["qty_num"]:
                     score += 15.0
                 if o_price_num and m_row["price_num"] and o_price_num == m_row["price_num"]:
@@ -1387,36 +1394,25 @@ class StockMatchApp:
                     score += 15.0
                     matched_key_count += 1
 
-                # 5) 注文番号の一致
+                # 4) 注文番号の一致
                 m_no_norm = m_row["norm_order_no"]
                 if o_no_norm and m_no_norm:
                     if o_no_norm == m_no_norm or o_no_norm in m_no_norm or m_no_norm in o_no_norm:
-                        score += 25.0
+                        score += 30.0
 
-                # 6) 現品確認日(A列)・請求日(AI列)が記入済みの行を優先するボーナス
-                if m_row["actual_filled"]:
-                    score += 4.0
-                if m_row["invoice_filled"]:
-                    score += 4.0
-
-                if matched_key_count >= 1 and score > best_score and score >= 22.0:
+                if matched_key_count >= 1 and score > best_score and score >= 18.0:
                     best_score = score
                     best_mgmt = m_row
 
-            # もし未使用行で見つからなかった場合、既に別明細とマッチした行も含めて再検索
+            # フォールバック：結合テキストの緩い包含一致
             if best_mgmt is None and o_item["norm_combined"]:
                 for m_row in mgmt_rows:
                     if not m_row["norm_combined"]:
                         continue
-                    sim = self._fast_similarity(
-                        o_item["norm_combined"],
-                        o_item["bg_combined"],
-                        m_row["norm_combined"],
-                        m_row["bg_combined"],
-                    )
-                    if sim >= 0.65 and sim * 50.0 > best_score:
-                        best_score = sim * 50.0
+                    if o_item["norm_combined"] in m_row["norm_combined"] or m_row["norm_combined"] in o_item["norm_combined"]:
+                        best_score = 45.0
                         best_mgmt = m_row
+                        break
 
             if best_mgmt:
                 best_mgmt["matched"] = True
@@ -1426,7 +1422,7 @@ class StockMatchApp:
                     item_name=o_item["item_name"] or best_mgmt["item_name"],
                     model_spec=o_item["model_spec"] or best_mgmt["model_spec"],
                     qty=o_item["qty"] or best_mgmt["qty"],
-                    due_date=o_item["due_date"] or best_mgmt["mgmt_due_date"],
+                    due_date=best_mgmt["due_date"] or o_item["due_date"],
                     actual_date=best_mgmt["actual_date"],
                     actual_raw=best_mgmt["actual_raw"],
                     actual_filled=best_mgmt["actual_filled"],
@@ -1438,6 +1434,7 @@ class StockMatchApp:
                     base_date=base_date,
                 )
             else:
+                # 注文品管理表に見当たらない場合
                 record = self._evaluate_single_record(
                     order_no=o_item["order_no"],
                     supplier=o_item["supplier"],
@@ -1451,8 +1448,8 @@ class StockMatchApp:
                     invoice_date=None,
                     invoice_raw="",
                     invoice_filled=False,
-                    person="管理表未一致",
-                    source_info=f"注文書のみ:{o_item['file']}(行{o_item['row']})",
+                    person="【管理表未記載】",
+                    source_info=f"【管理表未記載】注文書:{o_item['file']}(行{o_item['row']})",
                     base_date=base_date,
                 )
             results.append(record)
