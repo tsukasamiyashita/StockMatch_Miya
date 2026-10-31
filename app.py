@@ -1,5 +1,6 @@
 import os
 import re
+import unicodedata
 import datetime
 import difflib
 import threading
@@ -503,8 +504,20 @@ class StockMatchApp:
         if not s or s in ("-", "ー", "未", "未定", "None", "nan", "NaT"):
             return None
 
-        # 全角数字・記号を半角へ変換（変換元14文字、変換先14文字で完全一致）
-        s = s.translate(str.maketrans("０１２３４５６７８９／－．年月", "0123456789/-.  "))
+        # 全角数字を半角数字へ変換
+        zen_nums = "０１２３４５６７８９"
+        han_nums = "0123456789"
+        for z, h in zip(zen_nums, han_nums):
+            s = s.replace(z, h)
+
+        # 区切り文字（全角スラッシュ、ハイフン、長音、ピリオド、年月日）を統一
+        for ch in ("／", "－", "―", "‐", "ー"):
+            s = s.replace(ch, "-")
+        for ch in ("．", "・"):
+            s = s.replace(ch, ".")
+        for ch in ("年", "月"):
+            s = s.replace(ch, "-")
+        s = s.replace("日", " ")
         s = re.sub(r"\(.*?\)", "", s).strip()
 
         # YYYY/MM/DD or YYYY-MM-DD or YYYY.MM.DD
@@ -566,17 +579,12 @@ class StockMatchApp:
         s = str(text).strip()
         if s.lower() in ("none", "nan", "nat"):
             return ""
-        # 全角英数・カナ・記号を半角・統一形式へ変換
-        s = s.translate(
-            str.maketrans(
-                "０１２３４５６７８９ＡＢＣＤＥＦＧＨＩＪＫＬＭＮOPQRSTUVWXYZａｂｃｄｅｆｇｈｉｊｋｌｍｎｏｐｑｒｓｔｕｖｗｘｙｚ－ー―‐　（）()・.・,，/／\\＼",
-                "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz---------------------------",
-            )
-        )
+        # NFKC正規化で全角英数・全角カナ・全角記号をすべて安全に半角へ統一（maketrans不使用）
+        s = unicodedata.normalize("NFKC", s)
         # 法人格や一般的な不要語句を除去
         for corp in ("株式会社", "有限会社", "(株)", "(有)", "御中", "様"):
             s = s.replace(corp, "")
-        
+
         # 記号、スペース、中点、句読点などを完全に削除し、純粋な英数字・日本語文字のみを抽出
         s = re.sub(r"[^0-9A-Za-z一-龥ぁ-んァ-ン]", "", s)
         return s.upper()
@@ -633,7 +641,7 @@ class StockMatchApp:
         s = str(text).strip()
         if s.lower() in ("none", "nan", "nat"):
             return ""
-        s = s.translate(str.maketrans("０１２３４５６７８９．，", "0123456789.,")).replace(",", "")
+        s = unicodedata.normalize("NFKC", s).replace(",", "")
         m = re.search(r"(\d+(?:\.\d+)?)", s)
         if not m:
             return ""
@@ -1025,6 +1033,17 @@ class StockMatchApp:
             if header_pos_in_list is None:
                 continue
 
+            # 注文書が「図面番号、品番、品名、メーカー、仕様、購入数、単価、金額、納期」の連続列になっている場合の補完
+            if "drawing_no" in col_map and "part_no" in col_map and col_map["part_no"] == col_map["drawing_no"] + 1:
+                base_c = col_map["drawing_no"]
+                col_map.setdefault("item_name", base_c + 2)
+                col_map.setdefault("maker", base_c + 3)
+                col_map.setdefault("spec", base_c + 4)
+                col_map.setdefault("qty", base_c + 5)
+                col_map.setdefault("unit_price", base_c + 6)
+                col_map.setdefault("amount", base_c + 7)
+                col_map.setdefault("due_date", base_c + 8)
+
             data_rows = raw_rows[header_pos_in_list + 1 :]
 
             # 結合セルで「品名・図番・型番」が1つのヘッダーにまとまっている注文書フォーマットへの対応
@@ -1407,7 +1426,7 @@ class StockMatchApp:
             # フォールバック：結合テキストの緩い包含一致
             if best_mgmt is None and o_item["norm_combined"]:
                 for m_row in mgmt_rows:
-                    if not m_row["norm_combined"]:
+                    if m_row["matched"] or not m_row["norm_combined"]:
                         continue
                     if o_item["norm_combined"] in m_row["norm_combined"] or m_row["norm_combined"] in o_item["norm_combined"]:
                         best_score = 45.0
@@ -1417,31 +1436,31 @@ class StockMatchApp:
             if best_mgmt:
                 best_mgmt["matched"] = True
                 record = self._evaluate_single_record(
-                    order_no=best_mgmt["order_no"] or o_item["order_no"],
-                    supplier=best_mgmt["supplier"] or o_item["supplier"],
-                    item_name=o_item["item_name"] or best_mgmt["item_name"],
-                    model_spec=o_item["model_spec"] or best_mgmt["model_spec"],
-                    qty=o_item["qty"] or best_mgmt["qty"],
-                    due_date=best_mgmt["due_date"] or o_item["due_date"],
-                    actual_date=best_mgmt["actual_date"],
-                    actual_raw=best_mgmt["actual_raw"],
-                    actual_filled=best_mgmt["actual_filled"],
-                    invoice_date=best_mgmt["invoice_date"],
-                    invoice_raw=best_mgmt["invoice_raw"],
-                    invoice_filled=best_mgmt["invoice_filled"],
-                    person=best_mgmt["person"],
+                    order_no=best_mgmt.get("order_no") or o_item.get("order_no", ""),
+                    supplier=o_item.get("supplier") or best_mgmt.get("supplier", ""),
+                    item_name=o_item.get("item_name") or best_mgmt.get("item_name", ""),
+                    model_spec=o_item.get("model_spec") or best_mgmt.get("model_spec", ""),
+                    qty=o_item.get("qty") or best_mgmt.get("qty", ""),
+                    due_date=o_item.get("due_date") or best_mgmt.get("mgmt_due_date"),
+                    actual_date=best_mgmt.get("actual_date"),
+                    actual_raw=best_mgmt.get("actual_raw", ""),
+                    actual_filled=best_mgmt.get("actual_filled", False),
+                    invoice_date=best_mgmt.get("invoice_date"),
+                    invoice_raw=best_mgmt.get("invoice_raw", ""),
+                    invoice_filled=best_mgmt.get("invoice_filled", False),
+                    person=best_mgmt.get("person", ""),
                     source_info=f"注文書:{o_item['file']} ⇔ 管理表:{best_mgmt['sheet']}(行{best_mgmt['row']})",
                     base_date=base_date,
                 )
             else:
                 # 注文品管理表に見当たらない場合
                 record = self._evaluate_single_record(
-                    order_no=o_item["order_no"],
-                    supplier=o_item["supplier"],
-                    item_name=o_item["item_name"],
-                    model_spec=o_item["model_spec"],
-                    qty=o_item["qty"],
-                    due_date=o_item["due_date"],
+                    order_no=o_item.get("order_no", ""),
+                    supplier=o_item.get("supplier", ""),
+                    item_name=o_item.get("item_name", ""),
+                    model_spec=o_item.get("model_spec", ""),
+                    qty=o_item.get("qty", ""),
+                    due_date=o_item.get("due_date"),
                     actual_date=None,
                     actual_raw="",
                     actual_filled=False,
