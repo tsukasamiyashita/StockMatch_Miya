@@ -14,20 +14,27 @@ import openpyxl
 
 class StockMatchApp:
     """
-    StockMatch-v1.0.0
+    StockMatch_Miya-v1.0.0
     注文品管理表（1つのファイル）と注文書フォルダ内の全注文書Excelを照合し、
     今日（判定基準日）時点で「現品確認日」および「請求日」の納期超過を検査・可視化するデスクトップアプリ
     """
 
+    # 厳格な固定保存先定義（ここ以外への保存・上書きは一切遮断・不許可）
+    ALLOWED_CONFIG_DIR = os.path.abspath(r"C:\StockMatch")
+    CONFIG_FILE_PATH = os.path.abspath(r"C:\StockMatch\config.json")
+
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("StockMatch-v1.0.0 - 注文品納期・現品/請求照合システム")
-        self.root.geometry("1340x880")
+        self.root.title("StockMatch_Miya-v1.0.0 - 注文品納期・現品/請求照合システム")
+        
+        # 起動時にウィンドウを最大化表示
+        try:
+            self.root.state("zoomed")
+        except Exception:
+            # 他OSまたは対応していない環境向けフォールバック
+            self.root.geometry(f"{self.root.winfo_screenwidth()}x{self.root.winfo_screenheight()}+0+0")
+            
         self.root.minsize(1060, 720)
-
-        # 設定ファイル保存先パス（C:\StockMatch\config.json）
-        self.config_dir = r"C:\StockMatch"
-        self.config_file = os.path.join(self.config_dir, "config.json")
 
         # 状態保持用変数
         self.mgmt_file_path = tk.StringVar()
@@ -119,8 +126,8 @@ class StockMatchApp:
 
         # 2. 設定メニュー
         config_menu = tk.Menu(menubar, tearoff=0)
-        config_menu.add_command(label="現在のパス設定を保存 (C:\\StockMatch)", command=self._save_config_manual)
-        config_menu.add_command(label="保存先フォルダを開く", command=self._open_config_folder)
+        config_menu.add_command(label="現在のパス設定を保存 (C:\\StockMatch専用)", command=self._save_config_manual)
+        config_menu.add_command(label="保存先フォルダを開く (C:\\StockMatch)", command=self._open_config_folder)
         menubar.add_cascade(label="設定(S)", menu=config_menu)
 
         # 3. ヘルプメニュー
@@ -148,7 +155,7 @@ class StockMatchApp:
         header_frame = tk.Frame(self.root, bg="#1e293b", height=56, padx=16, pady=10)
         header_frame.pack(fill=tk.X)
 
-        title_lbl = ttk.Label(header_frame, text="StockMatch-v1.0.0", style="Header.TLabel")
+        title_lbl = ttk.Label(header_frame, text="StockMatch_Miya-v1.0.0", style="Header.TLabel")
         title_lbl.pack(side=tk.LEFT)
 
         sub_lbl = ttk.Label(
@@ -241,7 +248,7 @@ class StockMatchApp:
 
         ttk.Label(
             row3,
-            text="※「パス設定を保存」ボタンを押すと C:\\StockMatch\\config.json に保存されます。",
+            text="※設定保存先は「C:\\StockMatch\\config.json」専用に厳格固定されています。",
             style="Card.TLabel",
             foreground="#64748b",
         ).pack(side=tk.LEFT)
@@ -457,7 +464,7 @@ class StockMatchApp:
     def _show_help_guide(self):
         """使い方・操作ガイドのモーダルウィンドウを表示"""
         win = tk.Toplevel(self.root)
-        win.title("StockMatch-v1.0.0 - 使い方・操作ガイド")
+        win.title("StockMatch_Miya-v1.0.0 - 使い方・操作ガイド")
         win.geometry("720x600")
         win.minsize(580, 450)
         win.transient(self.root)
@@ -480,7 +487,9 @@ class StockMatchApp:
    - フォルダ内のすべての注文書を自動的に一括検査します。注文書以外の無関係なファイル（PDF、テキスト、一時ファイル、注文書フォーマットではないExcel等）は自動的にスキップされます。
 
 3. 『パス設定を保存』ボタン:
-   - ボタンを押すと、現在の管理表パスと注文書フォルダパスが C:\\StockMatch\\config.json に保存されます。次回起動時に自動復元されるため、毎回の選択が不要になります。
+   - ボタンを押すと、現在の管理表パスと注文書フォルダパスが C:\\StockMatch\\config.json に保存されます。
+   - 【厳重ガード】本アプリの設定ファイルは「C:\\StockMatch\\config.json」専用に厳重に固定されており、これ以外のフォルダへ保存・上書きされることは一切ありません。
+   - 次回起動時に自動復元されるため、毎回の選択が不要になります。
 
 4. 『判定基準日』の確認:
    - デフォルトで本日の日付が入っています。過去や未来の納期超過を検証したい場合は日付を打ち替えて「照合・遅延チェック実行」を押してください。
@@ -571,32 +580,47 @@ class StockMatchApp:
         """バージョン情報ダイアログの表示"""
         messagebox.showinfo(
             "バージョン情報",
-            "StockMatch-v1.0.0\n"
+            "StockMatch_Miya-v1.0.0\n"
             "注文品納期 × 管理表（現品確認日・請求日）超過照合システム\n\n"
             "対応形式: Excel (.xlsx, .xlsm) / CSV\n"
-            "設定保存先: C:\\StockMatch\\config.json\n\n"
-            "© StockMatch System All Rights Reserved.",
+            "設定保存先: C:\\StockMatch\\config.json 専用\n\n"
+            "© StockMatch_Miya System All Rights Reserved.",
         )
 
     def _open_config_folder(self):
-        """設定ファイル保存先フォルダをエクスプローラーで開く"""
-        target_dir = self.config_dir
+        """設定ファイル保存先フォルダ（C:\StockMatch）をエクスプローラーで開く"""
+        target_dir = self.ALLOWED_CONFIG_DIR
         if not os.path.exists(target_dir):
             try:
                 os.makedirs(target_dir, exist_ok=True)
-            except Exception:
-                target_dir = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "StockMatch")
-                os.makedirs(target_dir, exist_ok=True)
+            except Exception as e:
+                messagebox.showerror("フォルダ参照エラー", f"C:\\StockMatch フォルダを作成できませんでした:\n{e}")
+                return
         try:
             os.startfile(target_dir)
         except Exception as e:
             messagebox.showinfo("フォルダパス", f"設定ファイル保管場所:\n{target_dir}\n\n({e})")
 
     # =========================================================================
-    # 設定ファイル（C:\StockMatch\config.json）の保存・読み込み機能
+    # 設定ファイル（C:\StockMatch\config.json 専用・他フォルダ保存厳重遮断ガード）
     # =========================================================================
+    def _is_strictly_allowed_path(self, target_filepath: str) -> bool:
+        """
+        対象パスが厳密に 'C:\\StockMatch\\config.json' であるかを検証。
+        相対パス、シンボリックリンク、ディレクトリトラバーサル等を完全に防ぐ。
+        """
+        try:
+            norm_target = os.path.normcase(os.path.realpath(os.path.abspath(target_filepath)))
+            norm_allowed = os.path.normcase(os.path.realpath(os.path.abspath(self.CONFIG_FILE_PATH)))
+            return norm_target == norm_allowed
+        except Exception:
+            return False
+
     def _save_config(self, show_msg: bool = False):
-        """指定された管理表ファイルパスと注文書フォルダパスを C:\\StockMatch\\config.json に保存"""
+        """
+        指定された管理表ファイルパスと注文書フォルダパスを C:\\StockMatch\\config.json に保存。
+        【厳格ガード】C:\\StockMatch 以外のパスへの保存・上書きは例外を発生させて完全にブロックする。
+        """
         mgmt = self.mgmt_file_path.get().strip().strip('"')
         order = self.order_dir_path.get().strip().strip('"')
 
@@ -606,17 +630,29 @@ class StockMatchApp:
             "last_updated": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
 
-        # C:\StockMatch ディレクトリの作成を試行（権限がない場合はユーザーディレクトリに退避）
-        target_dir = self.config_dir
-        target_file = self.config_file
+        target_dir = self.ALLOWED_CONFIG_DIR
+        target_file = self.CONFIG_FILE_PATH
+
+        # 1. 厳重セキュリティチェック: パスが C:\StockMatch\config.json 以外でないか徹底検証
+        if not self._is_strictly_allowed_path(target_file):
+            err_msg = f"セキュリティ違反: 許可されていない保存先への書き込みが要求されました。\n対象: {target_file}"
+            if show_msg:
+                messagebox.showerror("厳重ブロック", err_msg)
+            return
+
+        # 2. C:\StockMatch フォルダの作成（存在しない場合のみ）
         try:
             if not os.path.exists(target_dir):
                 os.makedirs(target_dir, exist_ok=True)
-        except Exception:
-            alt_dir = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "StockMatch")
-            os.makedirs(alt_dir, exist_ok=True)
-            target_file = os.path.join(alt_dir, "config.json")
+        except Exception as e:
+            if show_msg:
+                messagebox.showerror(
+                    "保存エラー",
+                    f"C:\\StockMatch フォルダを作成できませんでした。\n管理者権限で実行するか、C:\\Driveの書き込み権限を確認してください。\n\n詳細: {e}",
+                )
+            return
 
+        # 3. ファイル書き込み（他ディレクトリへのフォールバックは絶対に行わない）
         try:
             with open(target_file, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
@@ -624,33 +660,30 @@ class StockMatchApp:
                 messagebox.showinfo("設定保存完了", f"パス設定を保存しました:\n{target_file}")
         except Exception as e:
             if show_msg:
-                messagebox.showerror("保存エラー", f"設定の保存に失敗しました:\n{e}")
+                messagebox.showerror("保存エラー", f"C:\\StockMatch\\config.json への保存に失敗しました:\n{e}")
 
     def _save_config_manual(self):
         """「パス設定を保存」ボタン押下時の処理"""
         self._save_config(show_msg=True)
 
     def _load_config_and_autoload(self):
-        """起動時に C:\\StockMatch\\config.json から設定を復元。無ければカレントディレクトリを走査"""
-        candidates = [
-            self.config_file,
-            os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "StockMatch", "config.json"),
-        ]
-
-        for cfg_path in candidates:
-            if os.path.exists(cfg_path):
-                try:
-                    with open(cfg_path, "r", encoding="utf-8") as f:
-                        data = json.load(f)
-                    mgmt = data.get("mgmt_file_path", "")
-                    order = data.get("order_dir_path", "")
-                    if mgmt and os.path.isfile(mgmt):
-                        self.mgmt_file_path.set(mgmt)
-                    if order and os.path.isdir(order):
-                        self.order_dir_path.set(order)
-                    break
-                except Exception:
-                    pass
+        """
+        起動時に C:\\StockMatch\\config.json のみを読み込み。
+        他ディレクトリの設定ファイルは一切読み込まない。
+        """
+        cfg_path = self.CONFIG_FILE_PATH
+        if os.path.exists(cfg_path) and self._is_strictly_allowed_path(cfg_path):
+            try:
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                mgmt = data.get("mgmt_file_path", "")
+                order = data.get("order_dir_path", "")
+                if mgmt and os.path.isfile(mgmt):
+                    self.mgmt_file_path.set(mgmt)
+                if order and os.path.isdir(order):
+                    self.order_dir_path.set(order)
+            except Exception:
+                pass
 
         # 設定ファイルが無い、またはパスが無効な場合はカレントディレクトリから自動補完
         if not self.mgmt_file_path.get() or not self.order_dir_path.get():
