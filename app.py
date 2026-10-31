@@ -1,5 +1,6 @@
 import os
 import re
+import json
 import unicodedata
 import datetime
 import difflib
@@ -24,6 +25,10 @@ class StockMatchApp:
         self.root.geometry("1320x860")
         self.root.minsize(1040, 700)
 
+        # 設定ファイル保存先パス（C:\StockMatch\config.json）
+        self.config_dir = r"C:\StockMatch"
+        self.config_file = os.path.join(self.config_dir, "config.json")
+
         # 状態保持用変数
         self.mgmt_file_path = tk.StringVar()
         self.order_dir_path = tk.StringVar()
@@ -44,7 +49,7 @@ class StockMatchApp:
 
         self._setup_styles()
         self._build_ui()
-        self._autoload_default_files()
+        self._load_config_and_autoload()
 
     def _setup_styles(self):
         """UIテーマ・スタイルの設定"""
@@ -152,6 +157,10 @@ class StockMatchApp:
         order_entry = ttk.Entry(row2, textvariable=self.order_dir_path, width=65)
         order_entry.pack(side=tk.LEFT, padx=(4, 8), fill=tk.X, expand=True)
         ttk.Button(row2, text="フォルダを参照...", style="Action.TButton", command=self._select_order_dir).pack(
+            side=tk.LEFT, padx=(0, 8)
+        )
+        # 手動保存用ボタン
+        ttk.Button(row2, text="パス設定を保存", style="Action.TButton", command=self._save_config_manual).pack(
             side=tk.LEFT
         )
 
@@ -178,7 +187,7 @@ class StockMatchApp:
 
         ttk.Label(
             row3,
-            text="※フォルダ内の注文書にある明細のみチェックします（注文書以外のファイルは自動で無視）。",
+            text="※「パス設定を保存」ボタンを押すと C:\\StockMatch に保存されます。",
             style="Card.TLabel",
             foreground="#64748b",
         ).pack(side=tk.LEFT)
@@ -388,29 +397,99 @@ class StockMatchApp:
         lbl_val.pack(fill=tk.X, pady=(4, 0))
         return card
 
+    # =========================================================================
+    # 設定ファイル（C:\StockMatch\config.json）の保存・読み込み機能
+    # =========================================================================
+    def _save_config(self, show_msg: bool = False):
+        """指定された管理表ファイルパスと注文書フォルダパスを C:\\StockMatch\\config.json に保存"""
+        mgmt = self.mgmt_file_path.get().strip().strip('"')
+        order = self.order_dir_path.get().strip().strip('"')
+
+        data = {
+            "mgmt_file_path": mgmt,
+            "order_dir_path": order,
+            "last_updated": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+
+        # C:\StockMatch ディレクトリの作成を試行（権限がない場合はユーザーディレクトリに退避）
+        target_dir = self.config_dir
+        target_file = self.config_file
+        try:
+            if not os.path.exists(target_dir):
+                os.makedirs(target_dir, exist_ok=True)
+        except Exception:
+            # 万一 C:\ 直下への書き込み権限がない場合は %LOCALAPPDATA%\StockMatch を代替利用
+            alt_dir = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "StockMatch")
+            os.makedirs(alt_dir, exist_ok=True)
+            target_file = os.path.join(alt_dir, "config.json")
+
+        try:
+            with open(target_file, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            if show_msg:
+                messagebox.showinfo("設定保存完了", f"パス設定を保存しました:\n{target_file}")
+        except Exception as e:
+            if show_msg:
+                messagebox.showerror("保存エラー", f"設定の保存に失敗しました:\n{e}")
+
+    def _save_config_manual(self):
+        """「パス設定を保存」ボタン押下時の処理"""
+        self._save_config(show_msg=True)
+
+    def _load_config_and_autoload(self):
+        """起動時に C:\\StockMatch\\config.json から設定を復元。無ければカレントディレクトリを走査"""
+        candidates = [
+            self.config_file,
+            os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "StockMatch", "config.json"),
+        ]
+
+        for cfg_path in candidates:
+            if os.path.exists(cfg_path):
+                try:
+                    with open(cfg_path, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    mgmt = data.get("mgmt_file_path", "")
+                    order = data.get("order_dir_path", "")
+                    if mgmt and os.path.isfile(mgmt):
+                        self.mgmt_file_path.set(mgmt)
+                    if order and os.path.isdir(order):
+                        self.order_dir_path.set(order)
+                    break
+                except Exception:
+                    pass
+
+        # 設定ファイルが無い、またはパスが無効な場合はカレントディレクトリから自動補完
+        if not self.mgmt_file_path.get() or not self.order_dir_path.get():
+            self._autoload_default_files()
+
+        # ※ 起動時の自動実行（after(..., run_analysis)）は行わず待機状態とします
+
     def _autoload_default_files(self):
-        """カレントディレクトリにある管理表ファイルと注文書フォルダを自動設定"""
+        """カレントディレクトリにある管理表ファイルと注文書フォルダを自動補完"""
         cwd = os.getcwd()
         xlsx_files = [
             f for f in os.listdir(cwd) if f.lower().endswith((".xlsx", ".xlsm")) and not f.startswith("~$")
         ]
 
-        mgmt_candidates = [f for f in xlsx_files if "管理表" in f]
-        if mgmt_candidates:
-            self.mgmt_file_path.set(os.path.join(cwd, sorted(mgmt_candidates)[0]))
+        if not self.mgmt_file_path.get():
+            mgmt_candidates = [f for f in xlsx_files if "管理表" in f]
+            if mgmt_candidates:
+                self.mgmt_file_path.set(os.path.join(cwd, sorted(mgmt_candidates)[0]))
 
-        order_candidates = [f for f in xlsx_files if "管理表" not in f and "納期超過チェック結果" not in f]
-        if order_candidates:
-            self.order_dir_path.set(cwd)
-
-        # 起動時にファイルとフォルダが見つかれば300ms後に非同期で初回解析を開始
-        if self.mgmt_file_path.get() and self.order_dir_path.get():
-            self.root.after(300, self.run_analysis)
+        if not self.order_dir_path.get():
+            order_candidates = [f for f in xlsx_files if "管理表" not in f and "納期超過チェック結果" not in f]
+            if order_candidates:
+                self.order_dir_path.set(cwd)
 
     def _select_mgmt_file(self):
         """① 注文品管理表ファイル（単一ファイル）の選択ダイアログ"""
+        initial_dir = os.path.dirname(self.mgmt_file_path.get().strip().strip('"'))
+        if not initial_dir or not os.path.isdir(initial_dir):
+            initial_dir = os.getcwd()
+
         path = filedialog.askopenfilename(
             title="注文品管理表のExcelファイルを選択",
+            initialdir=initial_dir,
             filetypes=[("Excel Files", "*.xlsx *.xlsm *.xls"), ("All Files", "*.*")],
         )
         if path:
@@ -436,8 +515,6 @@ class StockMatchApp:
         指定された注文書フォルダ内の全ファイルを走査し、注文書以外のファイル
         （Excel以外のファイル、一時ファイル、注文品管理表自身、注文書フォーマットではないExcel等）を
         自動的に無視して、有効な注文書の明細のみをすべて抽出する。
-
-        戻り値: (抽出した注文書明細リスト, 有効な注文書ファイル数, 無視したファイル数)
         """
         order_items = []
         valid_file_count = 0
@@ -494,8 +571,6 @@ class StockMatchApp:
         return order_items, valid_file_count, ignored_file_count
 
     # =========================================================================
-    # 日付・文字列正規化・高速類似度ユーティリティ
-    # =========================================================================
     # 日付・文字列正規化ユーティリティ
     # =========================================================================
     @staticmethod
@@ -524,32 +599,25 @@ class StockMatchApp:
         if not s or s in ("-", "ー", "未", "未定", "None", "nan", "NaT"):
             return None
 
-        # 全角数字を半角数字へ変換
-        zen_nums = "０１２３４５６７８９"
-        han_nums = "0123456789"
-        for z, h in zip(zen_nums, han_nums):
-            s = s.replace(z, h)
+        # 全角英数・記号の安全な半角化
+        s = unicodedata.normalize("NFKC", s)
 
-        # 区切り文字（全角スラッシュ、ハイフン、長音、ピリオド、年月日）を統一
-        for ch in ("／", "－", "―", "‐", "ー"):
-            s = s.replace(ch, "-")
-        for ch in ("．", "・"):
-            s = s.replace(ch, ".")
-        for ch in ("年", "月"):
+        # 区切り文字（スラッシュ、ハイフン、長音、ピリオド、年月日）を統一
+        for ch in ("/", "-", ".", "年", "月"):
             s = s.replace(ch, "-")
         s = s.replace("日", " ")
         s = re.sub(r"\(.*?\)", "", s).strip()
 
-        # YYYY/MM/DD or YYYY-MM-DD or YYYY.MM.DD
-        m_full = re.search(r"(\d{4})\s*[/\-\.]\s*(\d{1,2})\s*[/\-\.]\s*(\d{1,2})", s)
+        # YYYY-MM-DD
+        m_full = re.search(r"(\d{4})\s*-\s*(\d{1,2})\s*-\s*(\d{1,2})", s)
         if m_full:
             try:
                 return datetime.date(int(m_full.group(1)), int(m_full.group(2)), int(m_full.group(3)))
             except ValueError:
                 return None
 
-        # YY/MM/DD (例: 26/09/17, 26.9.17)
-        m_short_yr = re.search(r"^(\d{2})\s*[/\-\.]\s*(\d{1,2})\s*[/\-\.]\s*(\d{1,2})$", s)
+        # YY-MM-DD (例: 26-09-17)
+        m_short_yr = re.search(r"^(\d{2})\s*-\s*(\d{1,2})\s*-\s*(\d{1,2})$", s)
         if m_short_yr:
             try:
                 year = 2000 + int(m_short_yr.group(1))
@@ -557,8 +625,8 @@ class StockMatchApp:
             except ValueError:
                 return None
 
-        # MM/DD or MM.DD (年省略時は default_year または現在の年を補完)
-        m_md = re.search(r"^(\d{1,2})\s*[/\-\.]\s*(\d{1,2})", s)
+        # MM-DD (年省略時は default_year または現在の年を補完)
+        m_md = re.search(r"^(\d{1,2})\s*-\s*(\d{1,2})", s)
         if m_md:
             year = default_year or datetime.date.today().year
             try:
@@ -599,7 +667,7 @@ class StockMatchApp:
         s = str(text).strip()
         if s.lower() in ("none", "nan", "nat"):
             return ""
-        # NFKC正規化で全角英数・全角カナ・全角記号をすべて安全に半角へ統一（maketrans不使用）
+        # NFKC正規化で全角英数・全角カナ・全角記号をすべて安全に半角へ統一
         s = unicodedata.normalize("NFKC", s)
         # 法人格や一般的な不要語句を除去
         for corp in ("株式会社", "有限会社", "(株)", "(有)", "御中", "様"):
@@ -638,20 +706,12 @@ class StockMatchApp:
             if inter == 0:
                 return 0.0
             bigram_score = inter / min(len(bg_a), len(bg_b))
-            # 2-gramスコアがある程度高い場合のみSequenceMatcherも補助計算
             if bigram_score >= 0.45:
                 seq_ratio = difflib.SequenceMatcher(None, na, nb).quick_ratio()
                 return max(bigram_score, seq_ratio)
             return bigram_score
 
         return difflib.SequenceMatcher(None, na, nb).quick_ratio()
-
-    @classmethod
-    def _fuzzy_similarity(cls, str_a: str, str_b: str) -> float:
-        """2つの文字列の大まかな一致度（0.0 〜 1.0）を計算する"""
-        na = cls._normalize_key(str_a)
-        nb = cls._normalize_key(str_b)
-        return cls._fast_similarity(na, cls._make_bigrams(na), nb, cls._make_bigrams(nb))
 
     @staticmethod
     def _extract_Leading_number(text: str) -> str:
@@ -714,13 +774,11 @@ class StockMatchApp:
                 sheet_cat = "OTHER"
 
             ws = wb[sheet_name]
-            # 先頭60列までに制限して一括イテレート（無駄な右端の数百列を読まない）
             raw_rows = []
             empty_streak = 0
             for r_idx, row_tuple in enumerate(ws.iter_rows(max_col=60, values_only=True), start=1):
                 if not row_tuple or not any(v is not None and str(v).strip() != "" for v in row_tuple):
                     empty_streak += 1
-                    # 連続100行空行が続いたらシート末尾とみなして打ち切り（数万行の空罫線対策）
                     if r_idx > 20 and empty_streak >= 100:
                         break
                     continue
@@ -731,10 +789,9 @@ class StockMatchApp:
                 continue
 
             header_pos_in_list = None
-            header_row_idx = None
             col_map = {}
 
-            # ヘッダー行の自動検出（先頭15行以内、上下結合セルも考慮）
+            # ヘッダー行の自動検出
             for list_i, (r_idx, row_tuple) in enumerate(raw_rows[:15]):
                 if r_idx > 20:
                     break
@@ -751,7 +808,6 @@ class StockMatchApp:
                     "図面" in joined or "品番" in joined or "仕様" in joined or "現品" in joined or "メーカー" in joined
                 ):
                     header_pos_in_list = list_i
-                    header_row_idx = r_idx
                     for c_idx, v_comb, v_curr in row_vals:
                         if not v_comb:
                             continue
@@ -866,19 +922,12 @@ class StockMatchApp:
                 model_display_parts = [p for p in (drawing_str, part_str, spec_str) if p]
                 model_spec_display = " / ".join(dict.fromkeys(model_display_parts))
 
-                # 高速照合用の事前計算キャッシュを作成
                 norm_drawing = self._normalize_key(drawing_str)
                 norm_part = self._normalize_key(part_str)
                 norm_item = self._normalize_key(item_str)
                 norm_spec = self._normalize_key(spec_str)
                 norm_maker = self._normalize_key(maker_str)
                 norm_combined = self._normalize_key(f"{drawing_str} {part_str} {item_str} {spec_str}")
-
-                code_norms = [
-                    (n, self._make_bigrams(n))
-                    for n in dict.fromkeys([norm_drawing, norm_part, norm_spec])
-                    if n
-                ]
 
                 mgmt_rows.append(
                     {
@@ -922,7 +971,6 @@ class StockMatchApp:
                         "bg_maker": self._make_bigrams(norm_maker),
                         "norm_combined": norm_combined,
                         "bg_combined": self._make_bigrams(norm_combined),
-                        "code_norms": code_norms,
                         "matched": False,
                     }
                 )
@@ -962,7 +1010,6 @@ class StockMatchApp:
         for sheet_name in wb.sheetnames:
             ws = wb[sheet_name]
 
-            # 注文書は通常100行・35列以内なので、空行連続30行または最大300行で打ち切って高速読み込み
             raw_rows = []
             empty_streak = 0
             for r_idx, row_tuple in enumerate(ws.iter_rows(max_row=300, max_col=35, values_only=True), start=1):
@@ -1159,19 +1206,12 @@ class StockMatchApp:
                 model_parts = [p for p in (drawing_str, part_str, spec_str) if p]
                 model_spec_display = " / ".join(dict.fromkeys(model_parts))
 
-                # 事前正規化キャッシュ
                 norm_drawing = self._normalize_key(drawing_str)
                 norm_part = self._normalize_key(part_str)
                 norm_item = self._normalize_key(item_str)
                 norm_spec = self._normalize_key(spec_str)
                 norm_maker = self._normalize_key(maker_str)
                 norm_combined = self._normalize_key(f"{drawing_str} {part_str} {item_str} {spec_str}")
-
-                code_norms = [
-                    (n, self._make_bigrams(n))
-                    for n in dict.fromkeys([norm_drawing, norm_part, norm_spec])
-                    if n
-                ]
 
                 order_items.append(
                     {
@@ -1211,7 +1251,6 @@ class StockMatchApp:
                         "bg_maker": self._make_bigrams(norm_maker),
                         "norm_combined": norm_combined,
                         "bg_combined": self._make_bigrams(norm_combined),
-                        "code_norms": code_norms,
                     }
                 )
 
@@ -1370,7 +1409,6 @@ class StockMatchApp:
             req_code = o_item.get("req_type_code", "UNKNOWN")
 
             # 依頼区分に応じた管理表対象行のフィルタリング
-            # 購依 -> 購入品シート、外依 -> 外注加工シート を最優先で対象にする
             primary_mgmt = []
             fallback_mgmt = []
             for m in mgmt_rows:
@@ -1433,7 +1471,7 @@ class StockMatchApp:
                         candidate_matches.append((code_score, m_row))
                         continue
 
-                    # 3) 前後部分一致（プレフィックス・サフィックス一致）
+                    # 3) 前後部分一致
                     part_match = False
                     if o_drawing_norm and m_drawing_norm and (o_drawing_norm in m_drawing_norm or m_drawing_norm in o_drawing_norm):
                         part_match = True
@@ -1586,7 +1624,7 @@ class StockMatchApp:
         overdue_days_num = None
         days_overdue_str = "-"
 
-        # 納期（または発注日）と今日（基準日）の比較
+        # 納期と今日（基準日）の比較
         if due_date:
             delta_from_today = (base_date - due_date).days
             if delta_from_today > 0:
@@ -1603,10 +1641,7 @@ class StockMatchApp:
                 overdue_days_num = delta_from_today
                 days_overdue_str = f"残り{-delta_from_today}日"
 
-        # ---------------------------------------------------------
-        # 1) 現品確認日（A列：実際の物を確認した日）の超過判定
-        #    ※A列が記入されていれば（actual_filled=True）超過としない
-        # ---------------------------------------------------------
+        # 1) 現品確認日（A列：物）の超過判定
         if not actual_filled:
             if due_date and base_date > due_date:
                 actual_overdue = True
@@ -1630,10 +1665,7 @@ class StockMatchApp:
                 actual_display_str = actual_raw
                 actual_status = "確認済 (正常)"
 
-        # ---------------------------------------------------------
-        # 2) 請求日（AI列：伝票を確認した日）の超過判定
-        #    ※AI列が記入されていれば（invoice_filled=True）超過としない
-        # ---------------------------------------------------------
+        # 2) 請求日（AI列：伝票）の超過判定
         if not invoice_filled:
             if due_date and base_date > due_date:
                 invoice_overdue = True
@@ -1809,7 +1841,6 @@ class StockMatchApp:
         region = self.tree.identify_region(event.x, event.y)
         if region == "heading":
             col = self.tree.identify_column(event.x)
-            # col は '#1', '#2' などの文字列
             col_index = int(col.replace("#", "")) - 1
             if 0 <= col_index < len(self.col_configs):
                 col_id = self.col_configs[col_index][0]
@@ -1820,7 +1851,6 @@ class StockMatchApp:
         if not self.analyzed_records:
             return
 
-        # 該当列のユニークな値を全件走査して収集
         all_unique_vals = set()
         for rec in self.analyzed_records:
             val = str(rec.get(col_id, "") or "").strip()
@@ -1833,8 +1863,7 @@ class StockMatchApp:
 
         win = tk.Toplevel(self.root)
         win.title(f"フィルター: {self.col_titles.get(col_id, col_id)}")
-        
-        # 画面外にはみ出さないよう表示座標を調整
+
         win_w, win_h = 320, 440
         scr_w = win.winfo_screenwidth()
         scr_h = win.winfo_screenheight()
@@ -1889,7 +1918,7 @@ class StockMatchApp:
         f_entry = ttk.Entry(search_frame, textvariable=filter_search_var)
         f_entry.pack(fill=tk.X, pady=(2, 6))
 
-        # 3. 下部ボタンバー（先に下部に配置して領域を固定確保）
+        # 3. 下部ボタンバー
         btn_frame = tk.Frame(win, bg="#f1f5f9", padx=10, pady=8, highlightbackground="#cbd5e1", highlightthickness=1)
         btn_frame.pack(fill=tk.X, side=tk.BOTTOM)
 
@@ -1904,7 +1933,6 @@ class StockMatchApp:
         window_id = canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
 
         def _on_canvas_configure(e):
-            # Canvasの横幅に内側フレームの幅を自動追従
             canvas.itemconfig(window_id, width=e.width)
 
         def _on_frame_configure(e):
@@ -1914,7 +1942,6 @@ class StockMatchApp:
         scrollable_frame.bind("<Configure>", _on_frame_configure)
         canvas.configure(yscrollcommand=vsb.set)
 
-        # マウスホイールでのスクロール対応
         def _on_mousewheel(event):
             canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
         canvas.bind_all("<MouseWheel>", _on_mousewheel)
@@ -1926,7 +1953,6 @@ class StockMatchApp:
         chk_widgets = []
         updating_all_var = False
 
-        # 「すべて選択」チェックボックス
         all_var = tk.BooleanVar(value=(len(currently_selected) == len(sorted_vals)))
 
         def _toggle_select_all():
@@ -1934,7 +1960,6 @@ class StockMatchApp:
             if updating_all_var:
                 return
             target_val = all_var.get()
-            # 検索で現在表示されているアイテムのみを一括ON/OFF
             k = filter_search_var.get().strip().lower()
             for v, var in val_vars.items():
                 if not k or k in v.lower():
@@ -1979,7 +2004,6 @@ class StockMatchApp:
             chk.pack(fill=tk.X, pady=1)
             chk_widgets.append((val, chk))
 
-        # 検索インクリメンタルフィルタ
         def _on_filter_search(*_):
             k = filter_search_var.get().strip().lower()
             for val, w in chk_widgets:
@@ -1997,7 +2021,6 @@ class StockMatchApp:
 
         win.protocol("WM_DELETE_WINDOW", _cleanup_and_destroy)
 
-        # 確定・解除・キャンセル処理
         def _apply_filter():
             selected = {v for v, var in val_vars.items() if var.get()}
             if len(selected) == len(sorted_vals):
