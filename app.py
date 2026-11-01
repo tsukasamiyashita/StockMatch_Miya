@@ -1,6 +1,8 @@
 import os
+import sys
 import re
 import json
+import ctypes
 import unicodedata
 import datetime
 import difflib
@@ -24,17 +26,28 @@ class StockMatchApp:
     注文品管理表（1つのファイル）と注文書フォルダ内（サブフォルダ含む全階層）の全注文書Excelを照合し、
     今日（判定基準日）時点で「現品確認日」および「請求日」の納期超過を検査・可視化するデスクトップアプリ
     ※設定ファイルはアプリが存在するフォルダ内の config.json に保存・読込されます。
+    ※アイコンはアプリが存在するフォルダ内の icon.ico を全ウィンドウに適用します。
     ※管理Noが指定の数字（デフォルト: 2、カンマ区切りで複数指定可）から始まる明細のみを対象とし、設定を保存できます。
     ※2行目に「見積」の記載がある見積依頼書は自動除外し、「注文」の記載がある注文書のみを照合します。
     """
 
-    # アプリ配置フォルダおよび設定ファイルパスの定義
-    APP_DIR = os.path.dirname(os.path.abspath(__file__))
+    # アプリ配置フォルダおよび設定ファイル・アイコンファイルパスの定義
+    if getattr(sys, "frozen", False):
+        APP_DIR = os.path.dirname(os.path.abspath(sys.executable))
+        RESOURCE_DIR = getattr(sys, "_MEIPASS", APP_DIR)
+    else:
+        APP_DIR = os.path.dirname(os.path.abspath(__file__))
+        RESOURCE_DIR = APP_DIR
+
     CONFIG_FILE_PATH = os.path.join(APP_DIR, "config.json")
+    ICON_FILE_PATH = os.path.join(APP_DIR, "icon.ico")
 
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title("StockMatch_Miya-v1.0.0 - 注文品納期・現品/請求照合システム")
+
+        # メインウィンドウおよび全Toplevelウィンドウに icon.ico を適用
+        self._apply_window_icon(self.root, is_main=True)
 
         # 起動時にウィンドウを最大化表示
         try:
@@ -68,6 +81,31 @@ class StockMatchApp:
         self._build_menu()
         self._build_ui()
         self._load_config_and_autoload()
+
+    def _resolve_icon_path(self) -> str | None:
+        """icon.ico の実在パスを探索して返す"""
+        candidates = [
+            self.ICON_FILE_PATH,
+            os.path.join(self.RESOURCE_DIR, "icon.ico"),
+            os.path.abspath("icon.ico"),
+        ]
+        for path in candidates:
+            if path and os.path.isfile(path):
+                return path
+        return None
+
+    def _apply_window_icon(self, window: tk.Wm, is_main: bool = False):
+        """指定ウィンドウ（ルートまたはToplevel）に icon.ico を設定する"""
+        icon_path = self._resolve_icon_path()
+        if not icon_path:
+            return
+        try:
+            if is_main:
+                # default指定により、以降生成されるToplevelやダイアログにもアイコンが引き継がれる
+                window.iconbitmap(default=icon_path)
+            window.iconbitmap(icon_path)
+        except Exception:
+            pass
 
     def _setup_styles(self):
         """UIテーマ・スタイルの設定"""
@@ -257,7 +295,7 @@ class StockMatchApp:
             command=lambda: self.base_date_str.set(datetime.date.today().strftime("%Y-%m-%d")),
         ).pack(side=tk.LEFT, padx=(0, 16))
 
-        # 管理No頭文字フィルター設定入力欄（説明書きをわかりやすく改善）
+        # 管理No頭文字フィルター設定入力欄
         ttk.Label(
             row3,
             text="照合管理No頭文字:",
@@ -457,7 +495,7 @@ class StockMatchApp:
 
         vsb = ttk.Scrollbar(table_container, orient="vertical", command=self.tree.yview)
         hsb = ttk.Scrollbar(table_container, orient="horizontal", command=self.tree.xview)
-        self.tree.configure(yscrollcommand=vsb.set)
+        self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
 
         self.tree.grid(row=0, column=0, sticky="nsew")
         vsb.grid(row=0, column=1, sticky="ns")
@@ -525,6 +563,7 @@ class StockMatchApp:
 
         win = tk.Toplevel(self.root)
         win.title(f"不一致・照合詳細比較 — 管理No: {rec['order_no']} / 品名: {rec['item_name']}")
+        self._apply_window_icon(win)
         win.geometry("920x660")
         win.minsize(760, 520)
         win.transient(self.root)
@@ -684,6 +723,7 @@ class StockMatchApp:
         """タブ形式で整理された見やすいヘルプ・操作ガイドウィンドウを表示"""
         win = tk.Toplevel(self.root)
         win.title("StockMatch_Miya-v1.0.0 - ヘルプ＆操作ガイド")
+        self._apply_window_icon(win)
         win.geometry("880x680")
         win.minsize(720, 520)
         win.transient(self.root)
@@ -847,7 +887,8 @@ class StockMatchApp:
             "・自動分別: 2行目の記載により「見積依頼書」を除外し「注文書」のみ照合\n"
             "・品名参照: 管理表の個別「品名」列（O列）を正確に参照\n"
             "・探索範囲: 指定フォルダおよび配下の全サブフォルダを一括検査\n"
-            f"・設定保存先: {self.CONFIG_FILE_PATH}\n\n"
+            f"・設定保存先: {self.CONFIG_FILE_PATH}\n"
+            f"・アイコン設定: {self.ICON_FILE_PATH}\n\n"
             "© StockMatch_Miya System All Rights Reserved.",
         )
 
@@ -2869,6 +2910,7 @@ class StockMatchApp:
 
         win = tk.Toplevel(self.root)
         win.title(f"フィルター: {self.col_titles.get(col_id, col_id)}")
+        self._apply_window_icon(win)
 
         win_w, win_h = 320, 440
         scr_w = win.winfo_screenwidth()
@@ -3148,6 +3190,12 @@ class StockMatchApp:
 
 
 def main():
+    # WindowsタスクバーのアイコンをPython標準ではなく本アプリの icon.ico として独立認識させる設定
+    try:
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("StockMatch.Miya.v1.0.0")
+    except Exception:
+        pass
+
     root = tk.Tk()
     app = StockMatchApp(root)
     root.mainloop()
