@@ -493,9 +493,9 @@ class StockMatchApp:
 
         modes = [
             ("すべての異常(超過・不一致)", "ALL_DELAY"),
-            ("管理表との不一致のみ", "UNMATCHED_ONLY"),
-            ("現品確認日の超過のみ", "ACTUAL_DELAY"),
-            ("請求日(伝票)の超過のみ", "INVOICE_DELAY"),
+            ("管理表との不一致", "UNMATCHED_ONLY"),
+            ("現品確認日の超過", "ACTUAL_DELAY"),
+            ("請求日(伝票)の超過", "INVOICE_DELAY"),
             ("現品・請求の両方超過", "BOTH_DELAY"),
             ("全件表示（正常含む）", "ALL"),
         ]
