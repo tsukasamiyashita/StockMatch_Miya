@@ -450,12 +450,25 @@ class StockMatchApp:
         )
         self.progress_lbl.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
-        # 3. サマリーKPIカードエリア
-        kpi_frame = ttk.Frame(self.root, padding=(16, 0, 16, 8))
+        # 3. サマリーKPIカード 兼 ワンクリック表示フィルタエリア
+        kpi_section = ttk.Frame(self.root, padding=(16, 0, 16, 8))
+        kpi_section.pack(fill=tk.X)
+
+        kpi_header_row = ttk.Frame(kpi_section)
+        kpi_header_row.pack(fill=tk.X, pady=(0, 3))
+        ttk.Label(
+            kpi_header_row,
+            text="■ 照合件数サマリー ＆ 表示フィルタ切替 （各カードのボタンを押すと一覧を即座に絞り込みます）",
+            font=("Meiryo UI", 8, "bold"),
+            foreground="#334155",
+        ).pack(side=tk.LEFT)
+
+        kpi_frame = ttk.Frame(kpi_section)
         kpi_frame.pack(fill=tk.X)
 
         self.kpi_vars = {
             "order_total": tk.StringVar(value="0 件"),
+            "all_delay": tk.StringVar(value="0 件"),
             "both_delay": tk.StringVar(value="0 件"),
             "actual_delay": tk.StringVar(value="0 件"),
             "invoice_delay": tk.StringVar(value="0 件"),
@@ -464,27 +477,104 @@ class StockMatchApp:
             "missing_order": tk.StringVar(value="0 件"),
         }
 
-        self._create_kpi_card(kpi_frame, "注文書明細 総数", self.kpi_vars["order_total"], "#334155", "#f1f5f9").pack(
-            side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6)
-        )
-        self._create_kpi_card(
-            kpi_frame, "【不一致】管理表未記載", self.kpi_vars["unmatched"], "#4c1d95", "#ede9fe"
-        ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
-        self._create_kpi_card(
-            kpi_frame, "【警告】現品・請求 超過", self.kpi_vars["both_delay"], "#991b1b", "#fee2e2"
-        ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
-        self._create_kpi_card(
-            kpi_frame, "【現品超過】現品確認 遅れ", self.kpi_vars["actual_delay"], "#9a3412", "#ffedd5"
-        ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
-        self._create_kpi_card(
-            kpi_frame, "【請求超過】伝票(請求) 遅れ", self.kpi_vars["invoice_delay"], "#854d0e", "#fef9c3"
-        ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
-        self._create_kpi_card(kpi_frame, "正常・納期前・確認済", self.kpi_vars["ok"], "#166534", "#dcfce7").pack(
-            side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6)
-        )
-        self._create_kpi_card(
-            kpi_frame, "【別タブ】注文書未検出", self.kpi_vars["missing_order"], "#92400e", "#fef3c7"
-        ).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.kpi_cards = {}
+
+        kpi_specs = [
+            (
+                "ALL",
+                "注文書明細 総数",
+                self.kpi_vars["order_total"],
+                "#1e293b",
+                "#f1f5f9",
+                "#2563eb",
+                "#e2e8f0",
+                "▼ 全件を表示",
+                "✔ 全件を表示中",
+            ),
+            (
+                "ALL_DELAY",
+                "すべての異常(超過・不一致)",
+                self.kpi_vars["all_delay"],
+                "#881337",
+                "#ffe4e6",
+                "#e11d48",
+                "#fecdd3",
+                "▼ 異常をすべて表示",
+                "✔ フィルター表示中",
+            ),
+            (
+                "BOTH_DELAY",
+                "【警告】現品・請求の両方超過",
+                self.kpi_vars["both_delay"],
+                "#991b1b",
+                "#fee2e2",
+                "#dc2626",
+                "#fecaca",
+                "▼ この条件で表示",
+                "✔ フィルター表示中",
+            ),
+            (
+                "ACTUAL_DELAY",
+                "【現品超過】現品確認日の超過",
+                self.kpi_vars["actual_delay"],
+                "#9a3412",
+                "#ffedd5",
+                "#ea580c",
+                "#fed7aa",
+                "▼ この条件で表示",
+                "✔ フィルター表示中",
+            ),
+            (
+                "INVOICE_DELAY",
+                "【請求超過】請求日(伝票)超過",
+                self.kpi_vars["invoice_delay"],
+                "#854d0e",
+                "#fef9c3",
+                "#ca8a04",
+                "#fef08a",
+                "▼ この条件で表示",
+                "✔ フィルター表示中",
+            ),
+            (
+                "UNMATCHED_ONLY",
+                "【不一致】管理表との不一致",
+                self.kpi_vars["unmatched"],
+                "#4c1d95",
+                "#ede9fe",
+                "#7c3aed",
+                "#ddd6fe",
+                "▼ この条件で表示",
+                "✔ フィルター表示中",
+            ),
+            (
+                "OK_ONLY",
+                "正常・納期前・確認済",
+                self.kpi_vars["ok"],
+                "#166534",
+                "#dcfce7",
+                "#16a34a",
+                "#bbf7d0",
+                "▼ この条件で表示",
+                "✔ フィルター表示中",
+            ),
+            (
+                "MISSING_TAB",
+                "【別タブ】注文書未検出",
+                self.kpi_vars["missing_order"],
+                "#92400e",
+                "#fef3c7",
+                "#d97706",
+                "#fde68a",
+                "▷ 未発注タブを表示",
+                "✔ 未発注タブ表示中",
+            ),
+        ]
+
+        for idx_k, spec in enumerate(kpi_specs):
+            kpi_frame.grid_columnconfigure(idx_k, weight=1, uniform="kpi_col")
+            card_w = self._create_kpi_card(kpi_frame, *spec)
+            pad_r = 0 if idx_k == len(kpi_specs) - 1 else 5
+            card_w.grid(row=0, column=idx_k, sticky="nsew", padx=(0, pad_r))
 
         # 4. タブ切り替えコンテナ（Notebook）
         self.notebook = ttk.Notebook(self.root)
@@ -503,6 +593,9 @@ class StockMatchApp:
         # タブ切り替えイベント
         self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
 
+        # 初期選択状態のスタイル反映
+        self._update_kpi_card_styles()
+
         # 5. ステータスバー
         self.status_var = tk.StringVar(
             value="準備完了: ①注文品管理表ファイル と ②注文書フォルダパス を指定して「照合・遅延チェック実行」を押してください。"
@@ -520,7 +613,7 @@ class StockMatchApp:
         status_bar.pack(fill=tk.X, side=tk.BOTTOM)
 
     def _on_tab_changed(self, _event=None):
-        """タブが切り替わったときにタイトル文言を更新し、選択中を強調表示する"""
+        """タブが切り替わったときにタイトル文言とKPIカードのアクティブ表示を更新する"""
         try:
             curr_tab_idx = self.notebook.index("current")
             total_main = len(self.analyzed_records)
@@ -532,6 +625,7 @@ class StockMatchApp:
             else:
                 self.notebook.tab(0, text=f"  ▷ ① 納期超過・照合結果 一覧 ({total_main}件)  ")
                 self.notebook.tab(1, text=f"  【選択中】▶ ② 【未発注・注文書なし】管理表のみ記載 一覧 ({total_missing}件)  ")
+            self._update_kpi_card_styles()
         except Exception:
             pass
 
@@ -540,30 +634,43 @@ class StockMatchApp:
         filter_frame = ttk.Frame(parent, padding=(4, 6, 4, 6))
         filter_frame.pack(fill=tk.X)
 
-        ttk.Label(filter_frame, text="表示フィルタ:", font=("Meiryo UI", 9, "bold")).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Label(filter_frame, text="現在の表示フィルタ:", font=("Meiryo UI", 9, "bold")).pack(
+            side=tk.LEFT, padx=(0, 6)
+        )
 
-        modes = [
-            ("すべての異常(超過・不一致)", "ALL_DELAY"),
-            ("管理表との不一致", "UNMATCHED_ONLY"),
-            ("現品確認日の超過", "ACTUAL_DELAY"),
-            ("請求日(伝票)の超過", "INVOICE_DELAY"),
-            ("現品・請求の両方超過", "BOTH_DELAY"),
-            ("全件表示（正常含む）", "ALL"),
-        ]
-        for text, mode_val in modes:
-            rb = ttk.Radiobutton(
-                filter_frame,
-                text=text,
-                variable=self.filter_mode,
-                value=mode_val,
-                command=self._refresh_main_table,
-            )
-            rb.pack(side=tk.LEFT, padx=(0, 8))
+        self.active_filter_badge = tk.Label(
+            filter_frame,
+            text="  ✔ 【警告】現品・請求の両方超過 (0 件)  ",
+            bg="#fee2e2",
+            fg="#991b1b",
+            font=("Meiryo UI", 9, "bold"),
+            padx=8,
+            pady=3,
+            relief="solid",
+            borderwidth=1,
+        )
+        self.active_filter_badge.pack(side=tk.LEFT, padx=(0, 6))
 
-        ttk.Label(filter_frame, text="キーワード:").pack(side=tk.LEFT, padx=(10, 4))
-        search_entry = ttk.Entry(filter_frame, textvariable=self.search_keyword, width=18)
+        ttk.Button(
+            filter_frame,
+            text="全件表示に切替",
+            style="Action.TButton",
+            command=lambda: self._apply_kpi_filter("ALL"),
+        ).pack(side=tk.LEFT, padx=(0, 12))
+
+        ttk.Label(filter_frame, text="キーワード検索:", font=("Meiryo UI", 9, "bold")).pack(
+            side=tk.LEFT, padx=(4, 4)
+        )
+        search_entry = ttk.Entry(filter_frame, textvariable=self.search_keyword, width=22)
         search_entry.pack(side=tk.LEFT)
         search_entry.bind("<KeyRelease>", lambda _e: self._refresh_main_table())
+
+        ttk.Button(
+            filter_frame,
+            text="クリア",
+            style="Action.TButton",
+            command=lambda: [self.search_keyword.set(""), self._refresh_main_table()],
+        ).pack(side=tk.LEFT, padx=(4, 0))
 
         clear_col_btn = ttk.Button(
             filter_frame,
@@ -773,17 +880,198 @@ class StockMatchApp:
         table_container.grid_columnconfigure(0, weight=1)
 
     def _create_kpi_card(
-        self, parent, title: str, value_var: tk.StringVar, fg_color: str, bg_color: str
+        self,
+        parent,
+        filter_key: str,
+        title: str,
+        value_var: tk.StringVar,
+        fg_color: str,
+        bg_color: str,
+        accent_color: str,
+        hover_bg: str,
+        inactive_btn_text: str,
+        active_btn_text: str,
     ) -> tk.Frame:
-        """KPIサマリー表示用カードの生成"""
-        card = tk.Frame(parent, bg=bg_color, highlightbackground="#cbd5e1", highlightthickness=1, padx=8, pady=8)
-        lbl_title = tk.Label(card, text=title, bg=bg_color, fg=fg_color, font=("Meiryo UI", 8, "bold"), anchor="w")
-        lbl_title.pack(fill=tk.X)
-        lbl_val = tk.Label(
-            card, textvariable=value_var, bg=bg_color, fg=fg_color, font=("Meiryo UI", 15, "bold"), anchor="e"
+        """KPIサマリー表示 兼 ワンクリックフィルター切替カードの生成"""
+        card_outer = tk.Frame(
+            parent,
+            bg=bg_color,
+            highlightbackground="#cbd5e1",
+            highlightthickness=2,
+            cursor="hand2",
         )
-        lbl_val.pack(fill=tk.X, pady=(4, 0))
-        return card
+
+        top_strip = tk.Frame(card_outer, bg=hover_bg, height=4, cursor="hand2")
+        top_strip.pack(fill=tk.X, side=tk.TOP)
+
+        body = tk.Frame(card_outer, bg=bg_color, padx=7, pady=5, cursor="hand2")
+        body.pack(fill=tk.BOTH, expand=True)
+
+        lbl_title = tk.Label(
+            body,
+            text=title,
+            bg=bg_color,
+            fg=fg_color,
+            font=("Meiryo UI", 8, "bold"),
+            anchor="w",
+            cursor="hand2",
+        )
+        lbl_title.pack(fill=tk.X)
+
+        lbl_val = tk.Label(
+            body,
+            textvariable=value_var,
+            bg=bg_color,
+            fg=fg_color,
+            font=("Meiryo UI", 14, "bold"),
+            anchor="e",
+            cursor="hand2",
+        )
+        lbl_val.pack(fill=tk.X, pady=(1, 4))
+
+        btn_filter = tk.Button(
+            body,
+            text=inactive_btn_text,
+            bg="#ffffff",
+            fg=fg_color,
+            activebackground=accent_color,
+            activeforeground="#ffffff",
+            font=("Meiryo UI", 8, "bold"),
+            relief="solid",
+            bd=1,
+            pady=2,
+            cursor="hand2",
+            command=lambda k=filter_key: self._apply_kpi_filter(k),
+        )
+        btn_filter.pack(fill=tk.X)
+
+        self.kpi_cards[filter_key] = {
+            "card_outer": card_outer,
+            "top_strip": top_strip,
+            "body": body,
+            "lbl_title": lbl_title,
+            "lbl_val": lbl_val,
+            "btn_filter": btn_filter,
+            "title": title,
+            "value_var": value_var,
+            "fg_color": fg_color,
+            "bg_color": bg_color,
+            "accent_color": accent_color,
+            "hover_bg": hover_bg,
+            "inactive_btn_text": inactive_btn_text,
+            "active_btn_text": active_btn_text,
+        }
+
+        def _on_card_click(_e=None):
+            self._apply_kpi_filter(filter_key)
+
+        def _on_enter(_e=None):
+            card_outer.configure(highlightbackground=accent_color)
+            if not self._is_kpi_card_active(filter_key):
+                btn_filter.configure(bg=hover_bg)
+
+        def _on_leave(_e=None):
+            self._update_kpi_card_styles()
+
+        for w in (card_outer, top_strip, body, lbl_title, lbl_val):
+            w.bind("<Button-1>", _on_card_click)
+            w.bind("<Enter>", _on_enter)
+            w.bind("<Leave>", _on_leave)
+
+        btn_filter.bind("<Enter>", _on_enter)
+        btn_filter.bind("<Leave>", _on_leave)
+
+        return card_outer
+
+    def _is_kpi_card_active(self, filter_key: str) -> bool:
+        """指定されたKPIカードが現在アクティブなフィルター（または表示中タブ）かどうかを判定"""
+        try:
+            curr_tab = self.notebook.index("current")
+        except Exception:
+            curr_tab = 0
+        if filter_key == "MISSING_TAB":
+            return curr_tab == 1
+        return curr_tab == 0 and self.filter_mode.get() == filter_key
+
+    def _apply_kpi_filter(self, filter_key: str):
+        """KPIカードのボタン（またはカード本体）が押されたときにフィルターとタブを切り替える"""
+        if filter_key == "MISSING_TAB":
+            try:
+                self.notebook.select(1)
+            except Exception:
+                pass
+            self._update_kpi_card_styles()
+            return
+
+        self.filter_mode.set(filter_key)
+        try:
+            if self.notebook.index("current") != 0:
+                self.notebook.select(0)
+        except Exception:
+            pass
+        self._refresh_main_table()
+        self._update_kpi_card_styles()
+
+    def _update_kpi_card_styles(self):
+        """現在の選択フィルターおよび選択タブに応じて、全KPIカードとフィルターバッジの見た目を更新する"""
+        if not hasattr(self, "kpi_cards"):
+            return
+
+        for f_key, info in self.kpi_cards.items():
+            is_act = self._is_kpi_card_active(f_key)
+            card_outer = info["card_outer"]
+            top_strip = info["top_strip"]
+            btn_filter = info["btn_filter"]
+            fg_color = info["fg_color"]
+            bg_color = info["bg_color"]
+            accent_color = info["accent_color"]
+            hover_bg = info["hover_bg"]
+
+            if is_act:
+                card_outer.configure(highlightbackground=accent_color, highlightthickness=2, bg=bg_color)
+                top_strip.configure(bg=accent_color)
+                btn_filter.configure(
+                    text=info["active_btn_text"],
+                    bg=accent_color,
+                    fg="#ffffff",
+                    activebackground=accent_color,
+                    activeforeground="#ffffff",
+                    relief="flat",
+                    bd=0,
+                )
+            else:
+                card_outer.configure(highlightbackground="#cbd5e1", highlightthickness=1, bg=bg_color)
+                top_strip.configure(bg=hover_bg)
+                btn_filter.configure(
+                    text=info["inactive_btn_text"],
+                    bg="#ffffff",
+                    fg=fg_color,
+                    activebackground=hover_bg,
+                    activeforeground=fg_color,
+                    relief="solid",
+                    bd=1,
+                )
+
+        if hasattr(self, "active_filter_badge"):
+            curr_mode = self.filter_mode.get()
+            act_info = self.kpi_cards.get(curr_mode)
+            if act_info:
+                shown_cnt = len(self.tree_main.get_children()) if hasattr(self, "tree_main") else 0
+                total_cnt = len(self.analyzed_records)
+                extra_tags = []
+                if self.search_keyword.get().strip():
+                    extra_tags.append("キーワード絞込中")
+                if self.column_filters_main:
+                    extra_tags.append(f"列フィルタ{len(self.column_filters_main)}列")
+                extra_str = f" / {'・'.join(extra_tags)}" if extra_tags else ""
+                badge_text = (
+                    f"  ✔ {act_info['title']}  （表示: {shown_cnt} 件 / 全 {total_cnt} 件{extra_str}）  "
+                )
+                self.active_filter_badge.configure(
+                    text=badge_text,
+                    bg=act_info["bg_color"],
+                    fg=act_info["fg_color"],
+                )
 
     # =========================================================================
     # 注文品管理表・注文書の直接参照＆プレビュー機能
@@ -1685,10 +1973,11 @@ class StockMatchApp:
         txt1.insert(tk.END, "■ 納期未記載時の注文日基準判定\n", "h2")
         txt1.insert(tk.END, "・注文書明細の納期が空欄の場合、注文書4行目に記載されている「注文日」から指定日数（初期値: 7日）を経過した時点で超過とみなします。\n", "point")
 
-        txt1.insert(tk.END, "\n  STEP 3 : 2つの独立タブによる確認  \n", "h1")
-        txt1.insert(tk.END, "■ 照合実行後の2系統タブ表示\n", "h2")
-        txt1.insert(tk.END, "・『① 納期超過・照合結果 一覧』タブ: 注文書由来の納期遅延・確認状況、管理表未記載案件を確認できます（※初期表示フィルタは最も確認優先度の高い『現品・請求の両方超過』がデフォルト選択されます）。\n", "point")
-        txt1.insert(tk.END, "・『② 【未発注・注文書なし】管理表のみ記載 一覧』タブ: 管理表に記載があるのに注文書が未手配の明細を独立して一覧確認できます。\n", "point")
+        txt1.insert(tk.END, "\n  STEP 3 : 件数サマリーカード一体型フィルタと2つの独立タブによる確認  \n", "h1")
+        txt1.insert(tk.END, "■ 件数サマリー ＆ ワンクリック表示フィルタカード\n", "h2")
+        txt1.insert(tk.END, "・画面中段の各件数カードには絞り込みボタン（『▼ この条件で表示』等）が搭載されており、カードまたはボタンを押すだけで該当する明細一覧へ即座に切り替わります（選択中のカードは太枠と『✔ フィルター表示中』バッジで強調表示されます）。\n", "point")
+        txt1.insert(tk.END, "・『① 納期超過・照合結果 一覧』タブ: 注文書由来の納期遅延・確認状況、管理表未記載案件を確認できます（※初期表示フィルタは最も確認優先度の高い『【警告】現品・請求の両方超過』がデフォルト選択されます）。\n", "point")
+        txt1.insert(tk.END, "・『② 【未発注・注文書なし】管理表のみ記載 一覧』タブ: 右端の『【別タブ】注文書未検出』カードのボタンを押すかタブを切り替えることで、管理表に記載があるのに注文書が未手配の明細を独立して一覧確認できます。\n", "point")
         txt1.insert(tk.END, "★【購入数0の自動除外】管理表AB列の購入数が『0』の項目（在庫充当品等）は未発注一覧から自動除外されます。\n", "point")
         txt1.insert(tk.END, "・一覧の行を【ダブルクリック】すると項目別比較ウィンドウが開きます。\n", "body")
         txt1.configure(state="disabled")
@@ -3759,6 +4048,7 @@ class StockMatchApp:
             for r in self.analyzed_records
             if not r.get("is_unmatched") and not r["actual_overdue"] and r["invoice_overdue"]
         )
+        all_delay_cnt = unmatched_cnt + both_cnt + actual_cnt + invoice_cnt
         ok_cnt = sum(
             1
             for r in self.analyzed_records
@@ -3767,6 +4057,7 @@ class StockMatchApp:
         missing_cnt = len(self.missing_order_records)
 
         self.kpi_vars["order_total"].set(f"{total} 件")
+        self.kpi_vars["all_delay"].set(f"{all_delay_cnt} 件")
         self.kpi_vars["unmatched"].set(f"{unmatched_cnt} 件")
         self.kpi_vars["both_delay"].set(f"{both_cnt} 件")
         self.kpi_vars["actual_delay"].set(f"{actual_cnt} 件")
@@ -3793,14 +4084,17 @@ class StockMatchApp:
             elif mode == "UNMATCHED_ONLY":
                 if not rec.get("is_unmatched"):
                     continue
-            elif mode == "ACTUAL_DELAY":
-                if rec.get("is_unmatched") or not rec["actual_overdue"]:
-                    continue
-            elif mode == "INVOICE_DELAY":
-                if rec.get("is_unmatched") or not rec["invoice_overdue"]:
-                    continue
             elif mode == "BOTH_DELAY":
                 if rec.get("is_unmatched") or not (rec["actual_overdue"] and rec["invoice_overdue"]):
+                    continue
+            elif mode == "ACTUAL_DELAY":
+                if rec.get("is_unmatched") or not (rec["actual_overdue"] and not rec["invoice_overdue"]):
+                    continue
+            elif mode == "INVOICE_DELAY":
+                if rec.get("is_unmatched") or not (not rec["actual_overdue"] and rec["invoice_overdue"]):
+                    continue
+            elif mode == "OK_ONLY":
+                if rec.get("is_unmatched") or rec["actual_overdue"] or rec["invoice_overdue"]:
                     continue
 
             skip_by_col = False
@@ -3858,6 +4152,8 @@ class StockMatchApp:
                 ),
                 tags=(rec["row_tag"],),
             )
+
+        self._update_kpi_card_styles()
 
     def _update_heading_display_main(self, col_id: str):
         orig_title = self.col_titles_main.get(col_id, col_id)
