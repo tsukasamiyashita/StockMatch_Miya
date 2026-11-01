@@ -142,14 +142,14 @@ class StockMatchApp:
 
         style.configure(
             "Primary.TButton",
-            font=("Meiryo UI", 9, "bold"),
-            background="#2563eb",
+            font=("Meiryo UI", 10, "bold"),
+            background="#1d4ed8",
             foreground="#ffffff",
-            padding=(12, 6),
+            padding=(16, 7),
         )
         style.map(
             "Primary.TButton",
-            background=[("active", "#1d4ed8"), ("disabled", "#94a3b8")],
+            background=[("active", "#1e40af"), ("disabled", "#94a3b8")],
             foreground=[("disabled", "#e2e8f0")],
         )
 
@@ -158,7 +158,7 @@ class StockMatchApp:
             font=("Meiryo UI", 9, "bold"),
             background="#166534",
             foreground="#ffffff",
-            padding=(10, 6),
+            padding=(12, 6),
         )
         style.map(
             "Excel.TButton",
@@ -166,7 +166,7 @@ class StockMatchApp:
             foreground=[("disabled", "#e2e8f0")],
         )
 
-        style.configure("Action.TButton", font=("Meiryo UI", 9), padding=(8, 4))
+        style.configure("Action.TButton", font=("Meiryo UI", 9), padding=(10, 5))
         style.configure(
             "Horizontal.TProgressbar",
             troughcolor="#e2e8f0",
@@ -356,13 +356,10 @@ class StockMatchApp:
             side=tk.LEFT, padx=(0, 8)
         )
         ttk.Button(row2, text="📂 フォルダを開く", style="Action.TButton", command=self._open_order_dir_direct).pack(
-            side=tk.LEFT, padx=(0, 8)
-        )
-        ttk.Button(row2, text="設定を保存", style="Action.TButton", command=self._save_config_manual).pack(
             side=tk.LEFT
         )
 
-        # ③ 基準日・超過設定・実行ボタン行
+        # ③ 基準日・超過設定行（設定入力項目と「設定を保存」ボタンを集約）
         row3 = ttk.Frame(file_card, style="Card.TFrame")
         row3.pack(fill=tk.X, pady=(2, 6))
 
@@ -381,7 +378,7 @@ class StockMatchApp:
             text="今日に戻す",
             style="Action.TButton",
             command=lambda: self.base_date_str.set(datetime.date.today().strftime("%Y-%m-%d")),
-        ).pack(side=tk.LEFT, padx=(0, 14))
+        ).pack(side=tk.LEFT, padx=(0, 16))
 
         ttk.Label(
             row3,
@@ -406,22 +403,17 @@ class StockMatchApp:
             font=("Meiryo UI", 9),
         ).pack(side=tk.LEFT, padx=(2, 14))
 
-        self.excel_open_btn = ttk.Button(
+        self.save_cfg_btn = ttk.Button(
             row3,
-            text="📊 Excelで直接開く",
-            style="Excel.TButton",
-            command=self._open_in_excel_direct,
+            text="💾 設定を保存",
+            style="Action.TButton",
+            command=self._save_config_manual,
         )
-        self.excel_open_btn.pack(side=tk.RIGHT, padx=(8, 0))
+        self.save_cfg_btn.pack(side=tk.RIGHT)
 
-        self.run_btn = ttk.Button(
-            row3, text="照合・遅延チェック実行", style="Primary.TButton", command=self.run_analysis
-        )
-        self.run_btn.pack(side=tk.RIGHT)
-
-        # ④ 進捗バー
+        # ④ 進捗状況 ＆ 照合実行ボタン行（メインの実行ボタンを進捗行に大きく配置）
         row4 = ttk.Frame(file_card, style="Card.TFrame")
-        row4.pack(fill=tk.X, pady=(4, 0))
+        row4.pack(fill=tk.X, pady=(6, 0))
 
         ttk.Label(
             row4,
@@ -439,7 +431,7 @@ class StockMatchApp:
             style="Horizontal.TProgressbar",
             length=260,
         )
-        self.progress_bar.pack(side=tk.LEFT, padx=(4, 12))
+        self.progress_bar.pack(side=tk.LEFT, padx=(4, 10))
 
         self.progress_lbl = ttk.Label(
             row4,
@@ -449,6 +441,14 @@ class StockMatchApp:
             font=("Meiryo UI", 9, "bold"),
         )
         self.progress_lbl.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        self.run_btn = ttk.Button(
+            row4,
+            text="▶ 照合・遅延チェック実行 (F5)",
+            style="Primary.TButton",
+            command=self.run_analysis,
+        )
+        self.run_btn.pack(side=tk.RIGHT)
 
         # 3. サマリーKPIカード 兼 ワンクリック表示フィルタエリア
         kpi_section = ttk.Frame(self.root, padding=(16, 0, 16, 8))
@@ -656,12 +656,12 @@ class StockMatchApp:
             text="全件表示に切替",
             style="Action.TButton",
             command=lambda: self._apply_kpi_filter("ALL"),
-        ).pack(side=tk.LEFT, padx=(0, 12))
+        ).pack(side=tk.LEFT, padx=(0, 10))
 
         ttk.Label(filter_frame, text="キーワード検索:", font=("Meiryo UI", 9, "bold")).pack(
             side=tk.LEFT, padx=(4, 4)
         )
-        search_entry = ttk.Entry(filter_frame, textvariable=self.search_keyword, width=22)
+        search_entry = ttk.Entry(filter_frame, textvariable=self.search_keyword, width=18)
         search_entry.pack(side=tk.LEFT)
         search_entry.bind("<KeyRelease>", lambda _e: self._refresh_main_table())
 
@@ -671,6 +671,15 @@ class StockMatchApp:
             style="Action.TButton",
             command=lambda: [self.search_keyword.set(""), self._refresh_main_table()],
         ).pack(side=tk.LEFT, padx=(4, 0))
+
+        # 右側アクションボタン群（右端に「Excelで直接開く」ボタンを配置）
+        self.excel_open_btn = ttk.Button(
+            filter_frame,
+            text="📊 Excelで直接開く",
+            style="Excel.TButton",
+            command=self._open_in_excel_direct,
+        )
+        self.excel_open_btn.pack(side=tk.RIGHT, padx=(6, 0))
 
         clear_col_btn = ttk.Button(
             filter_frame,
@@ -1969,9 +1978,12 @@ class StockMatchApp:
         txt1.insert(tk.END, "\n  STEP 2 : 判定基準日・超過日数の設定と保存  \n", "h1")
         txt1.insert(tk.END, "■ 判定基準日（今日）と設定の保存\n", "h2")
         txt1.insert(tk.END, "・納期超過の判定基準日（初期値は今日）を YYYY-MM-DD 形式で指定します。\n", "body")
-        txt1.insert(tk.END, "・『設定を保存』ボタンを押すと、管理表パス・注文書フォルダパスおよび納期未記載時の超過日数が config.json に保存されます。\n", "body")
+        txt1.insert(tk.END, "・判定基準日行の右側にある『💾 設定を保存』ボタンを押すと、管理表パス・注文書フォルダパスおよび納期未記載時の超過日数が config.json に保存されます。\n", "body")
         txt1.insert(tk.END, "■ 納期未記載時の注文日基準判定\n", "h2")
         txt1.insert(tk.END, "・注文書明細の納期が空欄の場合、注文書4行目に記載されている「注文日」から指定日数（初期値: 7日）を経過した時点で超過とみなします。\n", "point")
+        txt1.insert(tk.END, "■ 照合・遅延チェックの実行とExcel展開\n", "h2")
+        txt1.insert(tk.END, "・進捗状況行の右端にあるひときわ目立つ青色ボタン『▶ 照合・遅延チェック実行 (F5)』を押す（または F5 キー）と、照合処理が開始されます。\n", "point")
+        txt1.insert(tk.END, "・結果をExcelで確認したい場合は、一覧上部の現在の表示フィルタ行（右端）にある緑色ボタン『📊 Excelで直接開く』を押すと新規ブックで即座に展開されます。\n", "body")
 
         txt1.insert(tk.END, "\n  STEP 3 : 件数サマリーカード一体型フィルタと2つの独立タブによる確認  \n", "h1")
         txt1.insert(tk.END, "■ 件数サマリー ＆ ワンクリック表示フィルタカード\n", "h2")
@@ -3272,7 +3284,7 @@ class StockMatchApp:
                     self.status_var.set(f"実行中: {text}")
                 elif msg_type == "DONE":
                     self.is_running = False
-                    self.run_btn.configure(state=tk.NORMAL, text="照合・遅延チェック実行")
+                    self.run_btn.configure(state=tk.NORMAL, text="▶ 照合・遅延チェック実行 (F5)")
                     self.excel_open_btn.configure(state=tk.NORMAL)
 
                     self.analyzed_records = payload["main_records"]
@@ -3308,7 +3320,7 @@ class StockMatchApp:
                     return
                 elif msg_type == "ERROR":
                     self.is_running = False
-                    self.run_btn.configure(state=tk.NORMAL, text="照合・遅延チェック実行")
+                    self.run_btn.configure(state=tk.NORMAL, text="▶ 照合・遅延チェック実行 (F5)")
                     self.excel_open_btn.configure(state=tk.NORMAL)
                     self.progress_var.set(0.0)
                     self.progress_text_var.set("エラーが発生しました")
