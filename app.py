@@ -23,13 +23,14 @@ class StockMatchApp:
     StockMatch_Miya-v1.0.0
     注文品管理表（1つのファイル）と注文書フォルダ内（サブフォルダ含む全階層）の全注文書Excelを照合し、
     今日（判定基準日）時点で「現品確認日」および「請求日」の納期超過を検査・可視化するデスクトップアプリ
+    ※設定ファイルはアプリが存在するフォルダ内の config.json に保存・読込されます。
     ※管理Noが指定の数字（デフォルト: 2）から始まる明細のみを対象とし、設定を保存できます。
     ※2行目に「見積」の記載がある見積依頼書は自動除外し、「注文」の記載がある注文書のみを照合します。
     """
 
-    # 厳格な固定保存先定義（ここ以外への保存・上書きは一切遮断・不許可）
-    ALLOWED_CONFIG_DIR = os.path.abspath(r"C:\StockMatch")
-    CONFIG_FILE_PATH = os.path.abspath(r"C:\StockMatch\config.json")
+    # アプリ配置フォルダおよび設定ファイルパスの定義
+    APP_DIR = os.path.dirname(os.path.abspath(__file__))
+    CONFIG_FILE_PATH = os.path.join(APP_DIR, "config.json")
 
     def __init__(self, root: tk.Tk):
         self.root = root
@@ -135,8 +136,8 @@ class StockMatchApp:
 
         # 2. 設定メニュー
         config_menu = tk.Menu(menubar, tearoff=0)
-        config_menu.add_command(label=r"現在の設定を保存 (C:\StockMatch専用)", command=self._save_config_manual)
-        config_menu.add_command(label=r"保存先フォルダを開く (C:\StockMatch)", command=self._open_config_folder)
+        config_menu.add_command(label="現在の設定を保存 (アプリフォルダ直下)", command=self._save_config_manual)
+        config_menu.add_command(label="アプリ配置フォルダを開く", command=self._open_config_folder)
         menubar.add_cascade(label="設定(S)", menu=config_menu)
 
         # 3. ヘルプメニュー
@@ -622,7 +623,7 @@ class StockMatchApp:
         txt.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         vsb.pack(side=tk.RIGHT, fill=tk.Y)
 
-        help_content = r"""【基本操作手順】
+        help_content = f"""【基本操作手順】
 1. 『① 注文品管理表ファイル』の指定:
    - 「ファイルを参照...」から管理表Excel（例: 注文品管理表.xlsx）を選択します。
    - 管理表の15列目付近にある個別の「品名」列を正確に参照します（D列の「品名、ライン名等」と混同しません）。
@@ -646,8 +647,8 @@ class StockMatchApp:
    - さらに【行をダブルクリック】するか「🔍 選択行の不一致・照合詳細を表示」ボタンを押すと、注文書と管理表の項目別比較ウィンドウが開き、どの文字が食い違っているかを一目で確認できます。
 
 6. 『パス・設定を保存』ボタン:
-   - ボタンを押すと、現在の管理表パス、注文書フォルダパス、および管理No頭文字設定が C:\StockMatch\config.json に保存されます。
-   - 【厳重ガード】本アプリの設定ファイルは「C:\StockMatch\config.json」専用に厳重に固定されており、これ以外のフォルダへ保存・上書きされることは一切ありません。
+   - ボタンを押すと、現在の管理表パス、注文書フォルダパス、および管理No頭文字設定がアプリ配置フォルダ内の config.json に保存されます。
+   - 設定保存先: {self.CONFIG_FILE_PATH}
 
 7. 『照合・遅延チェック実行』ボタン (F5キー):
    - 照合計算を開始します。進捗バーで現在の状況がリアルタイムに表示されます。
@@ -719,7 +720,7 @@ class StockMatchApp:
         """バージョン情報ダイアログの表示"""
         messagebox.showinfo(
             "バージョン情報",
-            r"StockMatch_Miya-v1.0.0" "\n"
+            "StockMatch_Miya-v1.0.0\n"
             "注文品納期 × 管理表（現品確認日・請求日）超過照合システム\n\n"
             "照合規則: 全体最適1対1マッチング（※単価・金額は照合対象外）\n"
             "頭文字設定: 管理No頭文字フィルター機能搭載（デフォルト: 2）\n"
@@ -727,29 +728,23 @@ class StockMatchApp:
             "品名参照: 管理表の個別「品名」列（O列）を正確に参照\n"
             "対応形式: Excel (.xlsx, .xlsm) / CSV\n"
             "探索範囲: 指定フォルダおよび全サブフォルダ\n"
-            r"設定保存先: C:\StockMatch\config.json 専用" "\n\n"
+            f"設定保存先: {self.CONFIG_FILE_PATH}\n\n"
             "© StockMatch_Miya System All Rights Reserved.",
         )
 
     def _open_config_folder(self):
-        """設定ファイル保存先フォルダ（C:\StockMatch）をエクスプローラーで開く"""
-        target_dir = self.ALLOWED_CONFIG_DIR
-        if not os.path.exists(target_dir):
-            try:
-                os.makedirs(target_dir, exist_ok=True)
-            except Exception as e:
-                messagebox.showerror("フォルダ参照エラー", rf"C:\StockMatch フォルダを作成できませんでした:" f"\n{e}")
-                return
+        """アプリ配置フォルダをエクスプローラーで開く"""
+        target_dir = self.APP_DIR
         try:
             os.startfile(target_dir)
         except Exception as e:
-            messagebox.showinfo("フォルダパス", f"設定ファイル保管場所:\n{target_dir}\n\n({e})")
+            messagebox.showinfo("フォルダパス", f"アプリ配置フォルダ:\n{target_dir}\n\n({e})")
 
     # =========================================================================
-    # 設定ファイル（C:\StockMatch\config.json 専用・他フォルダ保存厳重遮断ガード）
+    # 設定ファイル（アプリ配置フォルダ直下 config.json）
     # =========================================================================
     def _is_strictly_allowed_path(self, target_filepath: str) -> bool:
-        """対象パスが厳密に 'C:\\StockMatch\\config.json' であるかを検証"""
+        """対象パスがアプリフォルダ直下の config.json であるかを検証"""
         try:
             norm_target = os.path.normcase(os.path.realpath(os.path.abspath(target_filepath)))
             norm_allowed = os.path.normcase(os.path.realpath(os.path.abspath(self.CONFIG_FILE_PATH)))
@@ -758,7 +753,7 @@ class StockMatchApp:
             return False
 
     def _save_config(self, show_msg: bool = False):
-        """指定された管理表ファイルパス、注文書フォルダパス、管理No頭文字を C:\\StockMatch\\config.json に保存"""
+        """指定された管理表ファイルパス、注文書フォルダパス、管理No頭文字をアプリフォルダ内の config.json に保存"""
         mgmt = self.mgmt_file_path.get().strip().strip('"')
         order = self.order_dir_path.get().strip().strip('"')
         prefix = self.order_no_prefix.get().strip()
@@ -770,24 +765,12 @@ class StockMatchApp:
             "last_updated": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
 
-        target_dir = self.ALLOWED_CONFIG_DIR
         target_file = self.CONFIG_FILE_PATH
 
         if not self._is_strictly_allowed_path(target_file):
-            err_msg = f"セキュリティ違反: 許可されていない保存先への書き込みが要求されました。\n対象: {target_file}"
+            err_msg = f"保存エラー: 許可されていない保存先への書き込み要求です。\n対象: {target_file}"
             if show_msg:
-                messagebox.showerror("厳重ブロック", err_msg)
-            return
-
-        try:
-            if not os.path.exists(target_dir):
-                os.makedirs(target_dir, exist_ok=True)
-        except Exception as e:
-            if show_msg:
-                messagebox.showerror(
-                    "保存エラー",
-                    rf"C:\StockMatch フォルダを作成できませんでした:" f"\n{e}",
-                )
+                messagebox.showerror("保存エラー", err_msg)
             return
 
         try:
@@ -797,14 +780,14 @@ class StockMatchApp:
                 messagebox.showinfo("設定保存完了", f"パスおよび設定を保存しました:\n{target_file}\n(照合頭文字: '{prefix}')")
         except Exception as e:
             if show_msg:
-                messagebox.showerror("保存エラー", rf"C:\StockMatch\config.json への保存に失敗しました:" f"\n{e}")
+                messagebox.showerror("保存エラー", f"設定ファイルへの保存に失敗しました:\n{e}")
 
     def _save_config_manual(self):
         """「パス・設定を保存」ボタン押下時の処理"""
         self._save_config(show_msg=True)
 
     def _load_config_and_autoload(self):
-        """起動時に C:\\StockMatch\\config.json のみを読み込み"""
+        """起動時にアプリフォルダ直下の config.json を読み込み"""
         cfg_path = self.CONFIG_FILE_PATH
         if os.path.exists(cfg_path) and self._is_strictly_allowed_path(cfg_path):
             try:
@@ -827,7 +810,7 @@ class StockMatchApp:
 
     def _autoload_default_files(self):
         """カレントディレクトリにある管理表ファイルと注文書フォルダを自動補完"""
-        cwd = os.getcwd()
+        cwd = self.APP_DIR
         xlsx_files = [
             f for f in os.listdir(cwd) if f.lower().endswith((".xlsx", ".xlsm")) and not f.startswith("~$")
         ]
@@ -846,7 +829,7 @@ class StockMatchApp:
         """① 注文品管理表ファイル（単一ファイル）の選択ダイアログ"""
         initial_dir = os.path.dirname(self.mgmt_file_path.get().strip().strip('"'))
         if not initial_dir or not os.path.isdir(initial_dir):
-            initial_dir = os.getcwd()
+            initial_dir = self.APP_DIR
 
         path = filedialog.askopenfilename(
             title="注文品管理表のExcelファイルを選択",
@@ -860,7 +843,7 @@ class StockMatchApp:
         """② 注文書フォルダの選択ダイアログ"""
         initial_dir = self.order_dir_path.get().strip().strip('"')
         if not initial_dir or not os.path.isdir(initial_dir):
-            initial_dir = os.getcwd()
+            initial_dir = self.APP_DIR
         folder = filedialog.askdirectory(title="注文書が入っているフォルダを選択", initialdir=initial_dir)
         if folder:
             self.order_dir_path.set(folder)
@@ -1122,7 +1105,7 @@ class StockMatchApp:
         """文字列から8桁の管理Noを抽出（ハイフン区切り等にも対応）"""
         if not text:
             return ""
-        s = unicodedata.normalize("NFKC", str(text).strip())
+        s = unicodedata.normalize("NFKC", str(text)).strip()
         if s.endswith(".0"):
             s = s[:-2]
         m = re.search(r"(?<!\d)(\d{8})(?!\d)", s)
