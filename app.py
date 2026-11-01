@@ -246,7 +246,7 @@ class StockMatchApp:
 
         ref_menu = tk.Menu(menubar, tearoff=0)
         ref_menu.add_command(
-            label="選択行の「注文書」をExcelで開く (該当行へジャンプ)",
+            label="選択行の「注文書」をExcelで開く 【読み取り専用・保存ブロック】",
             command=self._open_selected_row_order,
         )
         ref_menu.add_command(
@@ -583,7 +583,7 @@ class StockMatchApp:
 
         open_order_btn = ttk.Button(
             filter_frame,
-            text="📄 注文書を参照",
+            text="📄 注文書を参照 (読取専用)",
             style="Action.TButton",
             command=self._open_selected_row_order,
         )
@@ -794,10 +794,20 @@ class StockMatchApp:
         sheet_name: str = "",
         row_num: int | None = None,
         label_for_status: str = "Excelファイル",
+        read_only_strict: bool = False,
     ):
         """
         指定されたExcelファイルを開き、該当シート・該当行を選択状態にして前面表示する。
-        すでにExcelで開かれている場合は再読み込みせずそのブックをアクティブにする。
+        read_only_strict=True（注文書）の場合は以下の多重誤保存ブロック機構を適用する:
+          1. Excel COM の Workbooks.Open で ReadOnly=True, IgnoreReadOnlyRecommended=True,
+             UpdateLinks=0, Notify=False, AddToMru=False を指定して強制的に読み取り専用で開く。
+          2. すでにExcel上で該当注文書が通常モード（編集可能）で開かれていた場合でも、
+             ChangeFileAccess(xlReadOnly=3) により読み取り専用モードへ強制切り替えする。
+          3. 開いた後のメモリ上の全シートおよびブック構造に保護ロック（Protect）をかけ、
+             万が一のキー入力・セル書き換え操作自体をブロックする（行選択・スクロール・コピーは可能）。
+          4. target_wb.Saved = True をセットし、=TODAY()等の自動再計算による「変更を保存しますか？」
+             確認ダイアログ自体の発生を抑止する。
+          5. os.startfile による通常モード（編集可能）でのフォールバック起動を完全に禁止する。
         """
         clean_path = filepath.strip().strip('"') if filepath else ""
         if not clean_path or not os.path.isfile(clean_path):
@@ -811,14 +821,23 @@ class StockMatchApp:
         norm_target = os.path.normcase(os.path.realpath(abs_path))
 
         if not HAS_WIN32COM:
+            if read_only_strict:
+                messagebox.showerror(
+                    "読み取り専用保護エラー",
+                    "Excel連携コンポーネント(pywin32)が利用できないため、注文書を安全な『読み取り専用・保存ブロックモード』で開けません。\n\n"
+                    "誤って上書き保存してしまう事故を厳重に防止するため、通常モードでの直接起動をブロックしました。\n"
+                    "『🔍 照合詳細・プレビュー』画面内の『② 📄 注文書シート参照 (プレビュー)』タブから安全に内容を確認してください。",
+                )
+                return
             try:
                 os.startfile(abs_path)
             except Exception as e:
                 messagebox.showerror("起動エラー", f"ファイルを開けませんでした:\n{e}")
             return
 
+        ro_badge = " 【読み取り専用・保存ブロック】" if read_only_strict else ""
         loc_desc = f" (シート:{sheet_name}" + (f" / 行:{row_num})" if row_num else ")") if sheet_name else ""
-        self.status_var.set(f"{label_for_status}をExcelで開いています: {os.path.basename(abs_path)}{loc_desc} ...")
+        self.status_var.set(f"{label_for_status}{ro_badge}をExcelで開いています: {os.path.basename(abs_path)}{loc_desc} ...")
 
         def _worker():
             try:
@@ -844,7 +863,41 @@ class StockMatchApp:
                     pass
 
                 if target_wb is None:
-                    target_wb = excel.Workbooks.Open(abs_path)
+                    if read_only_strict:
+                        # UpdateLinks=0, ReadOnly=True, Format=None, Password=None, WriteResPassword=None,
+                        # IgnoreReadOnlyRecommended=True, Origin=None, Delimiter=None, Editable=False,
+                        # Notify=False, Converter=None, AddToMru=False
+                        target_wb = excel.Workbooks.Open(
+                            abs_path,
+                            0,
+                            True,
+                            None,
+                            None,
+                            None,
+                            True,
+                            None,
+                            None,
+                            False,
+                            False,
+                            None,
+                            False,
+                        )
+                    else:
+                        target_wb = excel.Workbooks.Open(abs_path)
+                else:
+                    # すでにExcelで開かれているブックが読み取り専用でない場合、注文書は強制的に読み取り専用へ切り替える
+                    if read_only_strict:
+                        try:
+                            if not bool(target_wb.ReadOnly):
+                                prev_alerts = excel.DisplayAlerts
+                                excel.DisplayAlerts = False
+                                try:
+                                    target_wb.Saved = True
+                                    target_wb.ChangeFileAccess(3)  # xlReadOnly = 3
+                                finally:
+                                    excel.DisplayAlerts = prev_alerts
+                        except Exception:
+                            pass
 
                 target_wb.Activate()
 
@@ -866,6 +919,46 @@ class StockMatchApp:
                     except Exception:
                         pass
 
+                # 注文書の場合はメモリ上の全シートに誤編集・誤保存ブロック保護を適用し、Saved=Trueで保存確認ダイアログも抑止
+                if read_only_strict:
+                    try:
+                        for ws_i in target_wb.Worksheets:
+                            try:
+                                # EnableSelection = 0 (xlNoRestrictions: セル選択・行ジャンプ・コピーは許可しつつ編集のみ禁止)
+                                ws_i.EnableSelection = 0
+                                ws_i.Protect(
+                                    Password="StockMatch_ReadOnly_Guard",
+                                    DrawingObjects=True,
+                                    Contents=True,
+                                    Scenarios=True,
+                                    UserInterfaceOnly=False,
+                                    AllowFormattingCells=False,
+                                    AllowFormattingColumns=True,
+                                    AllowFormattingRows=True,
+                                    AllowInsertingColumns=False,
+                                    AllowInsertingRows=False,
+                                    AllowInsertingHyperlinks=False,
+                                    AllowDeletingColumns=False,
+                                    AllowDeletingRows=False,
+                                    AllowSorting=False,
+                                    AllowFiltering=True,
+                                    AllowUsingPivotTables=False,
+                                )
+                            except Exception:
+                                pass
+                        try:
+                            target_wb.Protect(
+                                Password="StockMatch_ReadOnly_Guard",
+                                Structure=True,
+                                Windows=False,
+                            )
+                        except Exception:
+                            pass
+                        # メモリ上の保護設定や=TODAY()再計算によるDirtyフラグをクリアし、閉じる際の「保存しますか？」ポップアップ自体を抑止
+                        target_wb.Saved = True
+                    except Exception:
+                        pass
+
                 try:
                     if excel.WindowState == -4140:  # xlMinimized
                         excel.WindowState = -4137  # xlMaximized
@@ -875,19 +968,31 @@ class StockMatchApp:
                 self.root.after(
                     0,
                     lambda: self.status_var.set(
-                        f"{label_for_status}を表示しました: {os.path.basename(abs_path)}{loc_desc}"
+                        f"{label_for_status}{ro_badge}を表示しました: {os.path.basename(abs_path)}{loc_desc}"
                     ),
                 )
-            except Exception:
-                try:
-                    os.startfile(abs_path)
-                except Exception as e2:
+            except Exception as e:
+                if read_only_strict:
+                    # 注文書の場合は os.startfile による通常モード（編集可能）起動へのフォールバックを絶対に行わない
                     self.root.after(
                         0,
-                        lambda err=str(e2): messagebox.showerror(
-                            "Excel起動エラー", f"ファイルを開けませんでした:\n{err}"
+                        lambda err=str(e): messagebox.showerror(
+                            "注文書 読み取り専用起動エラー",
+                            f"注文書を安全な『読み取り専用・保存ブロックモード』で開けませんでした:\n{err}\n\n"
+                            "※誤って上書き保存してしまう事故を防止するため、通常モードでの起動を厳重にブロックしました。\n"
+                            "詳細ウィンドウの『② 📄 注文書シート参照 (プレビュー)』タブから安全に確認できます。",
                         ),
                     )
+                else:
+                    try:
+                        os.startfile(abs_path)
+                    except Exception as e2:
+                        self.root.after(
+                            0,
+                            lambda err=str(e2): messagebox.showerror(
+                                "Excel起動エラー", f"ファイルを開けませんでした:\n{err}"
+                            ),
+                        )
             finally:
                 pythoncom.CoUninitialize()
 
@@ -896,7 +1001,7 @@ class StockMatchApp:
     def _open_mgmt_file_direct(self):
         """上部の設定パスにある注文品管理表ファイルをExcelで開く"""
         mgmt_path = self.mgmt_file_path.get().strip().strip('"')
-        self._open_excel_at_location(mgmt_path, label_for_status="注文品管理表")
+        self._open_excel_at_location(mgmt_path, label_for_status="注文品管理表", read_only_strict=False)
 
     def _open_order_dir_direct(self):
         """上部の設定パスにある注文書フォルダをエクスプローラーで開く"""
@@ -927,7 +1032,7 @@ class StockMatchApp:
         return records[rec_idx]
 
     def _open_selected_row_order(self):
-        """タブ1の選択行に対応する注文書Excelを開き、該当シート・該当行を選択表示する"""
+        """タブ1の選択行に対応する注文書Excelを【読み取り専用・保存ブロック】で開き、該当シート・該当行を選択表示する"""
         rec = self._get_selected_record(is_missing_tab=False)
         if not rec:
             return
@@ -943,6 +1048,7 @@ class StockMatchApp:
             sheet_name=order_sheet,
             row_num=order_row,
             label_for_status="注文書",
+            read_only_strict=True,
         )
 
     def _open_selected_row_mgmt(self, is_missing_tab: bool = False):
@@ -1026,7 +1132,7 @@ class StockMatchApp:
         if not is_missing_tab and order_path:
             o_loc = f" ({os.path.basename(order_path)} / 行{order_row})" if order_row else ""
             menu.add_command(
-                label=f"📄 この明細の『注文書』をExcelで開く{o_loc}",
+                label=f"📄 この明細の『注文書』をExcelで開く 【読取専用・保存ブロック】{o_loc}",
                 command=self._open_selected_row_order,
             )
         m_loc = f" ({mgmt_sheet} / 行{mgmt_row})" if mgmt_sheet and mgmt_row else ""
@@ -1104,10 +1210,14 @@ class StockMatchApp:
         if order_path and os.path.isfile(order_path):
             ttk.Button(
                 ref_bar,
-                text=f"📄 注文書をExcelで開く ({order_file} 行{order_row})",
+                text=f"📄 注文書をExcelで開く 【読取専用・保存禁止】 ({order_file} 行{order_row})",
                 style="Action.TButton",
                 command=lambda: self._open_excel_at_location(
-                    order_path, sheet_name=order_sheet, row_num=order_row, label_for_status="注文書"
+                    order_path,
+                    sheet_name=order_sheet,
+                    row_num=order_row,
+                    label_for_status="注文書",
+                    read_only_strict=True,
                 ),
             ).pack(side=tk.LEFT, padx=(0, 8))
             ttk.Button(
@@ -1249,6 +1359,7 @@ class StockMatchApp:
         tbl_frame.grid_rowconfigure(0, weight=1)
         tbl_frame.grid_columnconfigure(0, weight=1)
 
+        wb = None
         try:
             wb = openpyxl.load_workbook(order_path, data_only=True, read_only=True)
             ws = wb[order_sheet] if order_sheet in wb.sheetnames else wb.active
@@ -1277,12 +1388,17 @@ class StockMatchApp:
                 tree.insert("", tk.END, iid=iid, values=[row_label] + padded, tags=tags)
                 if target_row and r_idx == int(target_row):
                     target_iid = iid
-            wb.close()
             if target_iid:
                 tree.selection_set(target_iid)
                 tree.see(target_iid)
         except Exception as e:
             tree.insert("", tk.END, values=["エラー", f"注文書プレビューの読み込みに失敗しました: {e}"] + [""] * (max_preview_cols - 1))
+        finally:
+            if wb is not None:
+                try:
+                    wb.close()
+                except Exception:
+                    pass
 
     def _build_mgmt_sheet_preview_tab(
         self,
@@ -1611,9 +1727,10 @@ class StockMatchApp:
         notebook.add(tab3, text="  ③ 便利機能・ショートカットキー  ")
         txt3 = self._create_scrollable_text(tab3)
 
-        txt3.insert(tk.END, "  注文品管理表・注文書の直接参照＆プレビュー機能  \n", "h1")
+        txt3.insert(tk.END, "  注文品管理表・注文書の直接参照＆プレビュー機能（注文書は厳重保存ブロック）  \n", "h1")
         txt3.insert(tk.END, "■ 該当シート・該当行へのピンポイントExcelジャンプ＆アプリ内プレビュー\n", "h2")
-        txt3.insert(tk.END, "・一覧で明細行を選択して『📄 注文書を参照』『📋 管理表を参照』ボタンを押すか、行を【右クリック】すると、実際の注文書または注文品管理表をExcelで開き、該当シート・該当行を自動選択して表示します。\n", "point")
+        txt3.insert(tk.END, "・一覧で明細行を選択して『📄 注文書を参照 (読取専用)』『📋 管理表を参照』ボタンを押すか、行を【右クリック】すると、実際の注文書または注文品管理表をExcelで開き、該当シート・該当行を自動選択して表示します。\n", "point")
+        txt3.insert(tk.END, "★【注文書の誤保存・誤編集完全ブロック】注文書をExcelで開く際は、①読み取り専用モード強制指定、②既に開いている場合も読み取り専用へ強制切替、③メモリ上の全シート＆ブック構造ロック（セル書き換え禁止・行選択やコピーは可能）、④閉じる際の「変更を保存しますか？」確認ダイアログ抑止、⑤通常モード起動の完全遮断により、誤って注文書を上書き保存してしまう事故を厳重に防止します。\n", "point")
         txt3.insert(tk.END, "・行を【ダブルクリック】すると開く詳細ウィンドウでは、項目比較に加えて『②注文書シート参照』『③注文品管理表参照』タブからアプリ内で直接シート内容を参照できます。\n", "point")
         txt3.insert(tk.END, "・画面上部の『📋 管理表を開く』『📂 フォルダを開く』ボタンからいつでも元の管理表や注文書フォルダを開けます。\n\n", "body")
 
@@ -1646,6 +1763,7 @@ class StockMatchApp:
             "StockMatch_Miya-v1.1.0\n"
             "注文書 ⇔ 管理表 双方向照合・現品/請求超過システム\n\n"
             "・Excel直接起動: 一時ファイルなしで未保存新規ブック展開（A4横・1ページ収まり印刷設定済）\n"
+            "・注文書保護: 注文書参照時は読み取り専用＋シート保護ロック＋保存確認抑止で誤保存を完全ブロック\n"
             "・タブ完全分離: 「①納期超過・照合一覧」と「②注文書未検出(管理表のみ)」を別一覧で確認可能\n"
             "・未発注一覧フィルタ: 注文品管理表のAB列「購入数」が0の明細は自動除外\n"
             "・納期未記載対応: 注文書納期が空欄時、注文日(4行目)から指定日数(初期値7日)経過で超過判定\n"
@@ -1663,11 +1781,26 @@ class StockMatchApp:
             messagebox.showinfo("フォルダパス", f"アプリ配置フォルダ:\n{self.APP_DIR}\n\n({e})")
 
     # =========================================================================
-    # 設定ファイル処理
+    # 設定ファイル処理（注文書・管理表・Excelファイルへの書き込み完全禁止ガード）
     # =========================================================================
     def _is_strictly_allowed_path(self, target_filepath: str) -> bool:
+        """
+        アプリケーションが書き込み可能なパスを config.json 1ファイルのみに厳格制限する。
+        Excelファイル（.xlsx/.xlsm/.xls等）や注文書フォルダ配下、注文品管理表への書き込みは絶対拒否する。
+        """
         try:
+            if not target_filepath:
+                return False
             norm_target = os.path.normcase(os.path.realpath(os.path.abspath(target_filepath)))
+            # Excel関連拡張子への書き込みはいかなる場合も絶対拒否
+            if norm_target.endswith((".xlsx", ".xlsm", ".xls", ".xlsb", ".xltx", ".xltm", ".csv")):
+                return False
+            # 注文品管理表ファイル自体への書き込みを絶対拒否
+            mgmt_p = self.mgmt_file_path.get().strip().strip('"')
+            if mgmt_p:
+                norm_mgmt = os.path.normcase(os.path.realpath(os.path.abspath(mgmt_p)))
+                if norm_target == norm_mgmt:
+                    return False
             norm_allowed = os.path.normcase(os.path.realpath(os.path.abspath(self.CONFIG_FILE_PATH)))
             return norm_target == norm_allowed
         except Exception:
