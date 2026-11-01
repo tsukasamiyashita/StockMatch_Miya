@@ -3,6 +3,7 @@ import sys
 import re
 import json
 import ctypes
+import calendar
 import unicodedata
 import datetime
 import difflib
@@ -1017,8 +1018,12 @@ class StockMatchApp:
         txt2.insert(tk.END, "・日付または確認済の記載があれば『確認済 (正常)』と判定します。\n", "badge_ok")
         txt2.insert(tk.END, "・空欄のまま納期が判定基準日を過ぎている場合は『未確認 (超過X日)』として警告表示します。\n", "warn")
 
-        txt2.insert(tk.END, "\n  4. 注文書納期未記載時の自動超過判定  \n", "h1")
-        txt2.insert(tk.END, "■ 注文日（4行目）＋指定日数（初期値: 7日）による期日算出\n", "h2")
+        txt2.insert(tk.END, "\n  4. 注文書納期未記載時・期間表記（上旬/中旬/下旬等）の自動判定  \n", "h1")
+        txt2.insert(tk.END, "■ 期間表記（上旬・中旬・下旬・月末など）の期日自動変換\n", "h2")
+        txt2.insert(tk.END, "・『11/上』『11/上旬』『11月上旬』『11/初』『11月頭』等 → その月の10日（例: 11/10）までとして判定します。\n", "point")
+        txt2.insert(tk.END, "・『11/中』『11/中旬』『11月中旬』『11/中頃』『11月半ば』等 → その月の20日（例: 11/20）までとして判定します。\n", "point")
+        txt2.insert(tk.END, "・『11/下』『11/下旬』『11月下旬』『11/末』『11月末』『11月いっぱい』『11月内』等 → その月の末日（例: 11/30）までとして判定します。\n", "point")
+        txt2.insert(tk.END, "■ 納期未記載時の注文日（4行目）＋指定日数（初期値: 7日）による期日算出\n", "h2")
         txt2.insert(tk.END, "・注文書明細の納期が空欄の場合、注文書シート4行目の注文日を自動抽出し、設定日数経過後に納期超過として扱います。\n", "point")
         txt2.insert(tk.END, "・設定した日数は『設定を保存』により次回起動時にも自動的に引き継がれます。\n", "body")
         txt2.configure(state="disabled")
@@ -1245,7 +1250,9 @@ class StockMatchApp:
     # 日付・文字列正規化ユーティリティ
     # =========================================================================
     @staticmethod
-    def _parse_flexible_date(val, default_year: int | None = None) -> datetime.date | None:
+    def _parse_flexible_date(
+        val, default_year: int | None = None, allow_period: bool = True
+    ) -> datetime.date | None:
         if val is None or pd.isna(val):
             return None
 
@@ -1262,44 +1269,186 @@ class StockMatchApp:
                     pass
 
         s = str(val).strip()
-        if not s or s in ("-", "ー", "未", "未定", "None", "nan", "NaT"):
+        if not s:
             return None
 
-        s = unicodedata.normalize("NFKC", s)
-        for ch in ("/", "-", ".", "年", "月"):
-            s = s.replace(ch, "-")
-        s = s.replace("日", " ")
-        s = re.sub(r"\(.*?\)", "", s).strip()
+        s = unicodedata.normalize("NFKC", s).strip()
+        if not s or s.lower() in (
+            "-",
+            "ー",
+            "―",
+            "‐",
+            "未",
+            "未定",
+            "未確認",
+            "未着",
+            "別途",
+            "相談",
+            "要相談",
+            "調整中",
+            "none",
+            "nan",
+            "nat",
+        ):
+            return None
 
-        m_full = re.search(r"(\d{4})\s*-\s*(\d{1,2})\s*-\s*(\d{1,2})", s)
+        def _make_valid_date(y: int, m: int, d: int) -> datetime.date | None:
+            if not (1990 <= y <= 2099 and 1 <= m <= 12 and 1 <= d <= 31):
+                return None
+            max_d = calendar.monthrange(y, m)[1]
+            return datetime.date(y, m, min(d, max_d))
+
+        def _period_to_day(y: int, m: int, period_token: str) -> int | None:
+            if not (1990 <= y <= 2099 and 1 <= m <= 12):
+                return None
+            p = period_token.strip()
+            if any(k in p for k in ("下旬", "下", "末", "いっぱい", "一杯", "月内", "後半", "最終")):
+                return calendar.monthrange(y, m)[1]
+            if any(k in p for k in ("中旬", "中頃", "中ごろ", "中", "半ば", "なかば", "央")):
+                return 20
+            if "前半" in p:
+                return 15
+            if any(k in p for k in ("上旬", "上", "初旬", "初", "はじめ", "頭", "あたま")):
+                return 10
+            return None
+
+        # 曜日表記 (月), (火) 等を除去し、残りの括弧は空白化（例: 11月(上旬) などを保持）
+        s = re.sub(r"\([月火水木金土日祝・]+\)", " ", s)
+        s = s.replace("(", " ").replace(")", " ")
+
+        # 和暦（令和/R・平成/H）を西暦に変換
+        s = re.sub(r"令和\s*元\s*年", "2019年", s)
+        s = re.sub(
+            r"(?:令和|(?<![A-Za-z])[Rr])\s*(\d{1,2})\s*(?:年|[./-])",
+            lambda m_era: f"{2018 + int(m_era.group(1))}年",
+            s,
+        )
+        s = re.sub(
+            r"(?:平成|(?<![A-Za-z])[Hh])\s*(\d{1,2})\s*(?:年|[./-])",
+            lambda m_era: f"{1988 + int(m_era.group(1))}年",
+            s,
+        )
+
+        fallback_year = default_year or datetime.date.today().year
+        m_yr4 = re.search(r"(?<!\d)(20\d{2}|19\d{2})\s*(?:年|[./-])", s)
+        m_yr2 = re.search(r"(?:^|(?<!\d))(\d{2})\s*(?:年|(?=[./-]\s*\d{1,2}\s*[月./-]))", s)
+        if m_yr4:
+            inferred_y = int(m_yr4.group(1))
+        elif m_yr2 and 15 <= int(m_yr2.group(1)) <= 99:
+            inferred_y = 2000 + int(m_yr2.group(1))
+        else:
+            inferred_y = fallback_year
+
+        # 1. 期間表現（11/上旬、11/上、11/中、11/下、11月末、11月いっぱい、11/上～中 など）の解析
+        if allow_period:
+            period_matches = list(
+                re.finditer(
+                    r"(?:(?<!\d)(?P<y>20\d{2}|19\d{2}|\d{2})\s*[年./-]\s*)?"
+                    r"(?<!\d)(?P<m>1[0-2]|0?[1-9])\s*"
+                    r"(?:"
+                    r"(?:月|/|\.|-|ー|―)\s*"
+                    r"(?:(?:上旬|中旬|下旬|初旬|前半|後半|上|中|下|初)\s*(?:[~〜～・/ー―-]|から)\s*)?"
+                    r"(?P<p1>上旬|中旬|下旬|初旬|中頃|中ごろ|末日|末頃|末ごろ|月末|月内|いっぱい|一杯|前半|後半|半ば|なかば|初め|はじめ|あたま|最終|上|中(?!止)|下|初|末|頭|央)"
+                    r"|"
+                    r"\s*(?P<p2>上旬|中旬|下旬|初旬|中頃|中ごろ|末日|月末|月内|いっぱい|一杯)"
+                    r")",
+                    s,
+                )
+            )
+            if period_matches:
+                last_m = period_matches[-1]
+                y_str = last_m.group("y")
+                if y_str:
+                    y_val = int(y_str)
+                    if y_val < 100:
+                        y_val += 2000
+                else:
+                    y_val = inferred_y
+                m_val = int(last_m.group("m"))
+                p_str = last_m.group("p1") or last_m.group("p2") or ""
+                d_val = _period_to_day(y_val, m_val, p_str)
+                if d_val is not None:
+                    res = _make_valid_date(y_val, m_val, d_val)
+                    if res:
+                        return res
+
+        # 2. 西暦4桁 + 月 + 日（日範囲 2026/11/10～15 等にも対応）
+        m_full = re.search(
+            r"(?<!\d)(20\d{2}|19\d{2})\s*[年./-]\s*(\d{1,2})\s*[月./-]\s*(\d{1,2})"
+            r"(?:\s*日?\s*(?:[~〜～ー―-]|から)\s*(?:(?:\d{1,2})\s*[月./-]\s*)?(\d{1,2}))?(?!\d)",
+            s,
+        )
         if m_full:
-            try:
-                return datetime.date(int(m_full.group(1)), int(m_full.group(2)), int(m_full.group(3)))
-            except ValueError:
-                return None
+            y_val = int(m_full.group(1))
+            m_val = int(m_full.group(2))
+            d_val = int(m_full.group(4)) if m_full.group(4) else int(m_full.group(3))
+            res = _make_valid_date(y_val, m_val, d_val)
+            if res:
+                return res
 
-        m_short_yr = re.search(r"^(\d{2})\s*-\s*(\d{1,2})\s*-\s*(\d{1,2})$", s)
+        # 3. 西暦2桁 + 月 + 日（例: 26/11/15, 26.11.15頃）
+        m_short_yr = re.search(
+            r"(?:^|(?<!\d))(\d{2})\s*[年./-]\s*(\d{1,2})\s*[月./-]\s*(\d{1,2})(?!\d)",
+            s,
+        )
         if m_short_yr:
-            try:
-                year = 2000 + int(m_short_yr.group(1))
-                return datetime.date(year, int(m_short_yr.group(2)), int(m_short_yr.group(3)))
-            except ValueError:
-                return None
+            yr2 = int(m_short_yr.group(1))
+            if 15 <= yr2 <= 99:
+                res = _make_valid_date(2000 + yr2, int(m_short_yr.group(2)), int(m_short_yr.group(3)))
+                if res:
+                    return res
 
-        m_md = re.search(r"^(\d{1,2})\s*-\s*(\d{1,2})", s)
+        # 4. 月日範囲（例: 11/10～11/20, 11/25〜12/5）
+        m_md_range2 = re.search(
+            r"(?<!\d)(\d{1,2})\s*[月./-]\s*(\d{1,2})\s*日?\s*(?:[~〜～ー―]|から)\s*(\d{1,2})\s*[月./-]\s*(\d{1,2})(?!\d)",
+            s,
+        )
+        if m_md_range2:
+            res = _make_valid_date(inferred_y, int(m_md_range2.group(3)), int(m_md_range2.group(4)))
+            if res:
+                return res
+
+        # 5. 同月内の日範囲（例: 11/10～20, 11月10日〜15日, 11/10-15）
+        m_md_range1 = re.search(
+            r"(?<!\d)(\d{1,2})\s*(?:月|/|\.)\s*(\d{1,2})\s*日?\s*(?:[~〜～ー―-]|から)\s*(\d{1,2})(?!\d)",
+            s,
+        )
+        if m_md_range1:
+            res = _make_valid_date(inferred_y, int(m_md_range1.group(1)), int(m_md_range1.group(3)))
+            if res:
+                return res
+
+        # 6. 月 + 日（例: 11/15, 11月15日, 11.15, 11-15, 納期11/15頃）
+        m_md = re.search(
+            r"(?<![0-9./-])(\d{1,2})\s*(?:月|/|\.|-)\s*(\d{1,2})(?:\s*日)?(?![0-9./-])",
+            s,
+        )
         if m_md:
-            year = default_year or datetime.date.today().year
-            try:
-                return datetime.date(year, int(m_md.group(1)), int(m_md.group(2)))
-            except ValueError:
-                return None
+            res = _make_valid_date(inferred_y, int(m_md.group(1)), int(m_md.group(2)))
+            if res:
+                return res
 
-        m_8digit = re.match(r"^(\d{4})(\d{2})(\d{2})$", s)
+        # 7. 8桁数値日付（例: 20261115）
+        m_8digit = re.match(r"^(20\d{2}|19\d{2})(\d{2})(\d{2})$", s)
         if m_8digit:
-            try:
-                return datetime.date(int(m_8digit.group(1)), int(m_8digit.group(2)), int(m_8digit.group(3)))
-            except ValueError:
-                return None
+            res = _make_valid_date(int(m_8digit.group(1)), int(m_8digit.group(2)), int(m_8digit.group(3)))
+            if res:
+                return res
+
+        # 8. 月のみ表記（例: 11月, 11月予定, 11月納品, 2026年11月）→ その月の末日
+        if allow_period:
+            m_month_only = re.search(
+                r"(?<!\d)(?:(20\d{2}|19\d{2})\s*[年./-]\s*)?(1[0-2]|0?[1-9])\s*月"
+                r"(?:\s*(?:予定|頃|ごろ|度|納品|納入|入荷|迄|まで|目標|希望))?\s*$",
+                s,
+            )
+            if m_month_only:
+                y_val = int(m_month_only.group(1)) if m_month_only.group(1) else inferred_y
+                m_val = int(m_month_only.group(2))
+                max_d = calendar.monthrange(y_val, m_val)[1]
+                res = _make_valid_date(y_val, m_val, max_d)
+                if res:
+                    return res
 
         return None
 
@@ -1586,7 +1735,7 @@ class StockMatchApp:
                     continue
 
                 order_date_raw = _get_col(row_tuple, col_map.get("order_date"))
-                order_date = self._parse_flexible_date(order_date_raw)
+                order_date = self._parse_flexible_date(order_date_raw, allow_period=False)
                 inferred_year = order_date.year if order_date else datetime.date.today().year
 
                 a_col_val = _get_col(row_tuple, 1)
@@ -1599,13 +1748,13 @@ class StockMatchApp:
 
                 due_raw = _get_col(row_tuple, col_map.get("due_date"))
 
-                actual_date = self._parse_flexible_date(actual_raw, default_year=inferred_year)
+                actual_date = self._parse_flexible_date(actual_raw, default_year=inferred_year, allow_period=False)
                 actual_filled = actual_date is not None or self._is_filled_confirmation(actual_raw)
 
-                invoice_date = self._parse_flexible_date(invoice_raw, default_year=inferred_year)
+                invoice_date = self._parse_flexible_date(invoice_raw, default_year=inferred_year, allow_period=False)
                 invoice_filled = invoice_date is not None or self._is_filled_confirmation(invoice_raw)
 
-                mgmt_due_date = self._parse_flexible_date(due_raw, default_year=inferred_year)
+                mgmt_due_date = self._parse_flexible_date(due_raw, default_year=inferred_year, allow_period=True)
 
                 drawing_str = self._clean_cell_str(drawing_val)
                 part_str = self._clean_cell_str(part_val)
@@ -1774,7 +1923,7 @@ class StockMatchApp:
                 if r_idx == 4:
                     for cell_v in row_tuple:
                         if cell_v is not None and str(cell_v).strip() != "":
-                            d_cand4 = self._parse_flexible_date(cell_v)
+                            d_cand4 = self._parse_flexible_date(cell_v, allow_period=False)
                             if d_cand4:
                                 sheet_order_date = d_cand4
                                 default_year = d_cand4.year
@@ -1809,7 +1958,7 @@ class StockMatchApp:
                         for offset in range(1, 9):
                             if c_idx - 1 + offset >= len(row_tuple):
                                 break
-                            d_candidate = self._parse_flexible_date(row_tuple[c_idx - 1 + offset])
+                            d_candidate = self._parse_flexible_date(row_tuple[c_idx - 1 + offset], allow_period=False)
                             if d_candidate:
                                 sheet_order_date = d_candidate
                                 default_year = d_candidate.year
