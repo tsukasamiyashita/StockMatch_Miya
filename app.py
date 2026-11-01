@@ -24,7 +24,7 @@ class StockMatchApp:
     注文品管理表（1つのファイル）と注文書フォルダ内（サブフォルダ含む全階層）の全注文書Excelを照合し、
     今日（判定基準日）時点で「現品確認日」および「請求日」の納期超過を検査・可視化するデスクトップアプリ
     ※設定ファイルはアプリが存在するフォルダ内の config.json に保存・読込されます。
-    ※管理Noが指定の数字（デフォルト: 2）から始まる明細のみを対象とし、設定を保存できます。
+    ※管理Noが指定の数字（デフォルト: 2、カンマ区切りで複数指定可）から始まる明細のみを対象とし、設定を保存できます。
     ※2行目に「見積」の記載がある見積依頼書は自動除外し、「注文」の記載がある注文書のみを照合します。
     """
 
@@ -142,8 +142,9 @@ class StockMatchApp:
 
         # 3. ヘルプメニュー
         help_menu = tk.Menu(menubar, tearoff=0)
-        help_menu.add_command(label="使い方・操作ガイド(H)...", command=self._show_help_guide, accelerator="F1")
-        help_menu.add_command(label="照合判定ロジックについて...", command=self._show_logic_guide)
+        help_menu.add_command(label="使い方・操作ガイド(H)...", command=lambda: self._show_help_guide(tab_index=0), accelerator="F1")
+        help_menu.add_command(label="照合・判定ロジックの詳細...", command=lambda: self._show_help_guide(tab_index=1))
+        help_menu.add_command(label="ショートカット・便利機能一覧...", command=lambda: self._show_help_guide(tab_index=2))
         help_menu.add_separator()
         help_menu.add_command(label="バージョン情報...", command=self._show_about)
         menubar.add_cascade(label="ヘルプ(H)", menu=help_menu)
@@ -151,7 +152,7 @@ class StockMatchApp:
         self.root.config(menu=menubar)
 
         # ショートカットキー割り当て
-        self.root.bind_all("<F1>", lambda e: self._show_help_guide())
+        self.root.bind_all("<F1>", lambda e: self._show_help_guide(tab_index=0))
         self.root.bind_all("<F5>", lambda e: self.run_analysis())
         self.root.bind_all("<Control-o>", lambda e: self._select_mgmt_file())
         self.root.bind_all("<Control-d>", lambda e: self._select_order_dir())
@@ -177,16 +178,17 @@ class StockMatchApp:
 
         help_btn_header = tk.Button(
             header_frame,
-            text="？ ヘルプ / ガイド",
+            text="？ ヘルプ / 操作ガイド (F1)",
             bg="#334155",
             fg="#f8fafc",
             activebackground="#475569",
             activeforeground="#ffffff",
             relief="flat",
-            font=("Meiryo UI", 9),
-            padx=10,
-            pady=3,
-            command=self._show_help_guide,
+            font=("Meiryo UI", 9, "bold"),
+            padx=12,
+            pady=4,
+            cursor="hand2",
+            command=lambda: self._show_help_guide(tab_index=0),
         )
         help_btn_header.pack(side=tk.RIGHT)
 
@@ -253,25 +255,25 @@ class StockMatchApp:
             text="今日に戻す",
             style="Action.TButton",
             command=lambda: self.base_date_str.set(datetime.date.today().strftime("%Y-%m-%d")),
-        ).pack(side=tk.LEFT, padx=(0, 14))
+        ).pack(side=tk.LEFT, padx=(0, 16))
 
-        # 管理No頭文字フィルター設定入力欄
+        # 管理No頭文字フィルター設定入力欄（説明書きをわかりやすく改善）
         ttk.Label(
             row3,
             text="照合管理No頭文字:",
             style="Card.TLabel",
             font=("Meiryo UI", 9, "bold"),
         ).pack(side=tk.LEFT, padx=(0, 4))
-        prefix_entry = ttk.Entry(row3, textvariable=self.order_no_prefix, width=6, font=("Meiryo UI", 9, "bold"))
-        prefix_entry.pack(side=tk.LEFT, padx=(0, 4))
+        prefix_entry = ttk.Entry(row3, textvariable=self.order_no_prefix, width=8, font=("Meiryo UI", 9, "bold"))
+        prefix_entry.pack(side=tk.LEFT, padx=(0, 6))
 
         ttk.Label(
             row3,
-            text="※頭文字指定(例: 2)。空欄で全件",
+            text="※カンマ区切りで複数指定可 (例: 2, 3) ／ 空欄で全件照合",
             style="Card.TLabel",
-            foreground="#64748b",
+            foreground="#475569",
             font=("Meiryo UI", 8),
-        ).pack(side=tk.LEFT, padx=(0, 16))
+        ).pack(side=tk.LEFT, padx=(0, 12))
 
         self.export_btn = ttk.Button(
             row3, text="CSV/Excel出力", style="Action.TButton", command=self._export_results
@@ -604,117 +606,235 @@ class StockMatchApp:
         ttk.Button(btn_bar, text="閉じる", style="Primary.TButton", command=win.destroy).pack(side=tk.RIGHT)
 
     # =========================================================================
-    # ヘルプ・ガイドダイアログ
+    # ヘルプ・ガイドダイアログ（リッチテキスト＆タブ形式で視認性を大幅向上）
     # =========================================================================
-    def _show_help_guide(self):
-        """使い方・操作ガイドのモーダルウィンドウを表示"""
+    def _configure_rich_text_tags(self, txt: tk.Text):
+        """ヘルプ表示用のTextウィジェットに見出し・強調・ボックス等のスタイルタグを設定"""
+        txt.tag_configure(
+            "h1",
+            font=("Meiryo UI", 12, "bold"),
+            foreground="#1e293b",
+            background="#e2e8f0",
+            spacing1=8,
+            spacing3=8,
+            lmargin1=8,
+            lmargin2=8,
+        )
+        txt.tag_configure(
+            "h2",
+            font=("Meiryo UI", 10, "bold"),
+            foreground="#1d4ed8",
+            spacing1=12,
+            spacing3=4,
+            lmargin1=6,
+            lmargin2=6,
+        )
+        txt.tag_configure(
+            "body",
+            font=("Meiryo UI", 9),
+            foreground="#1e293b",
+            spacing1=2,
+            spacing2=3,
+            spacing3=2,
+            lmargin1=18,
+            lmargin2=32,
+        )
+        txt.tag_configure(
+            "point",
+            font=("Meiryo UI", 9, "bold"),
+            foreground="#0f172a",
+            background="#fef9c3",
+            spacing1=3,
+            spacing2=3,
+            spacing3=3,
+            lmargin1=18,
+            lmargin2=32,
+        )
+        txt.tag_configure(
+            "warn",
+            font=("Meiryo UI", 9, "bold"),
+            foreground="#991b1b",
+            background="#fee2e2",
+            spacing1=3,
+            spacing2=3,
+            spacing3=3,
+            lmargin1=18,
+            lmargin2=32,
+        )
+        txt.tag_configure(
+            "badge_ok",
+            font=("Meiryo UI", 9, "bold"),
+            foreground="#166534",
+            background="#dcfce7",
+            lmargin1=18,
+            lmargin2=32,
+        )
+        txt.tag_configure(
+            "sub_note",
+            font=("Meiryo UI", 9),
+            foreground="#475569",
+            spacing1=1,
+            spacing2=2,
+            spacing3=4,
+            lmargin1=30,
+            lmargin2=42,
+        )
+
+    def _show_help_guide(self, tab_index: int = 0):
+        """タブ形式で整理された見やすいヘルプ・操作ガイドウィンドウを表示"""
         win = tk.Toplevel(self.root)
-        win.title("StockMatch_Miya-v1.0.0 - 使い方・操作ガイド")
-        win.geometry("750x620")
-        win.minsize(580, 450)
+        win.title("StockMatch_Miya-v1.0.0 - ヘルプ＆操作ガイド")
+        win.geometry("880x680")
+        win.minsize(720, 520)
         win.transient(self.root)
 
-        txt_frame = ttk.Frame(win, padding=12)
-        txt_frame.pack(fill=tk.BOTH, expand=True)
+        # 上部ヘッダーバナー
+        banner = tk.Frame(win, bg="#1e293b", padx=18, pady=12)
+        banner.pack(fill=tk.X)
+        tk.Label(
+            banner,
+            text="📖 StockMatch_Miya-v1.0.0  取扱説明書・操作ガイド",
+            bg="#1e293b",
+            fg="#ffffff",
+            font=("Meiryo UI", 12, "bold"),
+            anchor="w",
+        ).pack(fill=tk.X)
+        tk.Label(
+            banner,
+            text="注文書フォルダと注文品管理表の自動照合・納期超過チェック・不一致診断ツールの使い方",
+            bg="#1e293b",
+            fg="#cbd5e1",
+            font=("Meiryo UI", 9),
+            anchor="w",
+        ).pack(fill=tk.X, pady=(2, 0))
 
-        txt = tk.Text(txt_frame, wrap="word", font=("Meiryo UI", 9), padx=10, pady=10, relief="solid", borderwidth=1)
-        vsb = ttk.Scrollbar(txt_frame, orient="vertical", command=txt.yview)
+        # タブコントロール（Notebook）
+        notebook = ttk.Notebook(win)
+        notebook.pack(fill=tk.BOTH, expand=True, padx=14, pady=(12, 6))
+
+        # --- タブ1: 基本的な使い方 ---
+        tab1 = ttk.Frame(notebook, padding=8)
+        notebook.add(tab1, text="  ① 基本的な使い方・設定  ")
+        txt1 = self._create_scrollable_text(tab1)
+
+        txt1.insert(tk.END, "  STEP 1 : ファイルとフォルダの指定  \n", "h1")
+        txt1.insert(tk.END, "① 注文品管理表ファイルの選択\n", "h2")
+        txt1.insert(tk.END, "・『ファイルを参照...』ボタンから、基準となる管理表Excel（例: 注文品管理表.xlsx）を選択します。\n", "body")
+        txt1.insert(tk.END, "・管理表の15列目（O列）付近にある個別の「品名」列を正確に参照します（D列の案件名「品名、ライン名等」とは混同しません）。\n", "sub_note")
+
+        txt1.insert(tk.END, "② 注文書フォルダパスの選択（サブフォルダ自動対応）\n", "h2")
+        txt1.insert(tk.END, "・『フォルダを参照...』ボタンから、注文書Excelが入っている親フォルダを選択します。\n", "body")
+        txt1.insert(tk.END, "★【サブフォルダ一括探索】指定したフォルダ直下だけでなく、配下のすべてのサブフォルダ（月別・案件別フォルダ等）も自動的に走査します。\n", "point")
+        txt1.insert(tk.END, "★【見積依頼書の自動除外】Excelシートの2行目を自動チェックし、「見積」と書かれた見積依頼書は除外して「注文」のシートのみを照合します。\n", "point")
+
+        txt1.insert(tk.END, "\n  STEP 2 : 照合管理No頭文字・判定基準日の設定  \n", "h1")
+        txt1.insert(tk.END, "■ 照合管理No頭文字（カンマ区切りで複数指定が可能！）\n", "h2")
+        txt1.insert(tk.END, "・注文書ファイル名の先頭8桁（管理No）が、指定した数字で始まるものだけを照合対象に絞り込みます。\n", "body")
+        txt1.insert(tk.END, "  ▸ 単独指定の例 :  「 2 」と入力  ⇒  2から始まる管理No（例: 22609030 等）のみを照合します（初期設定）。\n", "point")
+        txt1.insert(tk.END, "  ▸ 複数指定の例 :  「 2, 3 」や「 126, 226 」とカンマ区切りで入力  ⇒  該当する複数の頭文字すべてを同時に照合します。\n", "point")
+        txt1.insert(tk.END, "  ▸ 全件照合の例 :  入力欄を「 空欄 」にする  ⇒  頭文字の制限を行わず、すべての管理Noを照合します。\n", "body")
+
+        txt1.insert(tk.END, "■ 判定基準日（今日）と設定の保存\n", "h2")
+        txt1.insert(tk.END, "・納期超過の基準となる日付（初期値は当日）を YYYY-MM-DD 形式で指定します。\n", "body")
+        txt1.insert(tk.END, "・『パス・設定を保存』ボタンを押すと、「管理表パス」「注文書フォルダパス」「照合管理No頭文字」がアプリと同じフォルダ内の config.json に保存され、次回起動時に自動で復元されます。\n", "body")
+        txt1.insert(tk.END, f"  （現在の保存先パス: {self.CONFIG_FILE_PATH}）\n", "sub_note")
+
+        txt1.insert(tk.END, "\n  STEP 3 : 照合実行と結果の確認  \n", "h1")
+        txt1.insert(tk.END, "■ 『照合・遅延チェック実行』ボタン（または F5 キー）\n", "h2")
+        txt1.insert(tk.END, "・ボタンを押すと照合を開始し、進捗バーでリアルタイムに進行状況を表示します。\n", "body")
+        txt1.insert(tk.END, "・一覧の行を【ダブルクリック】すると、注文書と管理表の項目を左右に並べた「詳細比較ウィンドウ」が開き、不一致箇所が一目で分かります。\n", "point")
+        txt1.configure(state="disabled")
+
+        # --- タブ2: 照合・判定ロジックの詳細 ---
+        tab2 = ttk.Frame(notebook, padding=8)
+        notebook.add(tab2, text="  ② 照合ルール・不一致診断の仕組み  ")
+        txt2 = self._create_scrollable_text(tab2)
+
+        txt2.insert(tk.END, "  1. 注文書と管理表の照合ルール（高精度マッチング）  \n", "h1")
+        txt2.insert(tk.END, "■ 単価・金額は照合対象から除外（誤判定の防止）\n", "h2")
+        txt2.insert(tk.END, "★【重要】管理表側で単価が空欄だったり金額が 0 円になっているケースや、税抜/税込の表記差による誤った不一致を防ぐため、「単価」と「金額」は照合判定から完全に除外しています。\n", "point")
+        txt2.insert(tk.END, "・照合に使用する項目は『①管理No(8桁)』『②図面番号』『③品番』『④品名(O列)』『⑤仕様・規格』『⑥発注先・メーカー』『⑦購入数(数量)』の7項目です。\n", "body")
+
+        txt2.insert(tk.END, "■ 購入依頼（購依）と外注依頼（外依）の自動判別\n", "h2")
+        txt2.insert(tk.END, "・注文書ファイル名に「購依」が含まれる場合は管理表の『購入品リスト』を優先参照し、「外依」が含まれる場合は『外注加工リスト』を優先参照します。\n", "body")
+
+        txt2.insert(tk.END, "■ 全体最適マッチング（別業者の誤消費ブロック）\n", "h2")
+        txt2.insert(tk.END, "・発注先やメーカー名の一致を評価し、別会社の注文書が他社の管理表行を誤って先取り消費してしまう現象を防止しています。\n", "body")
+        txt2.insert(tk.END, "・同じ管理No内の全明細と管理表行のスコアを全体計算し、最も整合性の高い1対1ペアを自動決定します。\n", "body")
+
+        txt2.insert(tk.END, "\n  2. 不一致理由・照合診断の見方  \n", "h1")
+        txt2.insert(tk.END, "■ 【管理No未登録 / 管理No不一致】と表示される場合\n", "h2")
+        txt2.insert(tk.END, "・注文書ファイル名先頭8桁の管理Noが、注文品管理表のどのシートにも1件も登録されていない状態です。\n", "warn")
+        txt2.insert(tk.END, "・管理表の別管理Noに同じ品目がある場合は、そのシート名・行番号・管理Noも自動案内します。\n", "sub_note")
+
+        txt2.insert(tk.END, "■ 【項目不一致】と表示される場合\n", "h2")
+        txt2.insert(tk.END, "・管理Noは管理表に存在するものの、図番・品番・品名・仕様・数量のいずれかが食い違っている状態です。\n", "warn")
+        txt2.insert(tk.END, "・同じ管理No内で最も近い候補行を特定し、「どの一致していて、どの項目が違ったのか（例: 一致:図番,品名 / 不一致:品番）」を一覧に表示します。\n", "body")
+
+        txt2.insert(tk.END, "\n  3. 現品確認日（物：A列）と請求日（伝票：AI列）の超過判定  \n", "h1")
+        txt2.insert(tk.END, "■ 現品確認日（管理表 A列）と 請求日（管理表 AI列）\n", "h2")
+        txt2.insert(tk.END, "・セルに日付または確認済みの文字が入力されていれば『確認済 (正常)』と判定します。\n", "badge_ok")
+        txt2.insert(tk.END, "・空欄（未入力）のまま注文書納期が判定基準日を過ぎている場合は『未確認 (超過X日)』として警告表示します。\n", "warn")
+        txt2.configure(state="disabled")
+
+        # --- タブ3: フィルター・ショートカット一覧 ---
+        tab3 = ttk.Frame(notebook, padding=8)
+        notebook.add(tab3, text="  ③ 便利機能・ショートカットキー  ")
+        txt3 = self._create_scrollable_text(tab3)
+
+        txt3.insert(tk.END, "  Excel風 列フィルター＆ソート機能  \n", "h1")
+        txt3.insert(tk.END, "■ 列ヘッダーをクリックして絞り込み・並べ替え\n", "h2")
+        txt3.insert(tk.END, "・一覧テーブルの各列タイトル（総合判定、依頼区分、管理No、発注先、メーカー 等）をクリックすると、Excelと同じフィルターメニューが開きます。\n", "body")
+        txt3.insert(tk.END, "・値の検索やチェックボックスで特定の業者・管理No・判定結果だけに絞り込むことができます。\n", "body")
+        txt3.insert(tk.END, "・フィルター適用中の列には『 [▼] 』マークが付きます。画面右上の『列フィルター解除 (Excel風)』ボタンでいつでも全解除できます。\n", "point")
+
+        txt3.insert(tk.END, "\n  行ダブルクリック詳細比較（インスペクタ機能）  \n", "h1")
+        txt3.insert(tk.END, "■ 注文書と管理表の値を左右に並べて比較\n", "h2")
+        txt3.insert(tk.END, "・一覧の任意の行を【ダブルクリック】（または選択して『🔍 選択行の不一致・照合詳細を表示』をクリック）すると、項目別の比較画面が開きます。\n", "body")
+        txt3.insert(tk.END, "・管理No、図面番号、品番、品名、仕様、メーカー、購入数の7項目について「◎完全一致 / △部分一致 / ×不一致」が色分け表示されます。\n", "body")
+
+        txt3.insert(tk.END, "\n  キーボードショートカット一覧  \n", "h1")
+        txt3.insert(tk.END, "・ F1 キー        :  このヘルプ＆操作ガイドを開く\n", "body")
+        txt3.insert(tk.END, "・ F5 キー        :  照合・遅延チェックを実行する\n", "body")
+        txt3.insert(tk.END, "・ Ctrl + O       :  ① 注文品管理表ファイルを選択する\n", "body")
+        txt3.insert(tk.END, "・ Ctrl + D       :  ② 注文書フォルダを選択する\n", "body")
+        txt3.insert(tk.END, "・ Ctrl + S       :  検査結果を CSV / Excel ファイルに出力する\n", "body")
+        txt3.insert(tk.END, "・ Alt + F4       :  アプリケーションを終了する\n", "body")
+        txt3.configure(state="disabled")
+
+        # 指定タブを選択状態にする
+        try:
+            notebook.select(tab_index)
+        except Exception:
+            pass
+
+        btn_box = ttk.Frame(win, padding=(14, 8))
+        btn_box.pack(fill=tk.X)
+        ttk.Button(btn_box, text="閉じる", style="Primary.TButton", command=win.destroy).pack(side=tk.RIGHT)
+
+    def _create_scrollable_text(self, parent) -> tk.Text:
+        """スクロールバー付きの整形済みTextウィジェットを生成"""
+        frame = ttk.Frame(parent)
+        frame.pack(fill=tk.BOTH, expand=True)
+
+        txt = tk.Text(
+            frame,
+            wrap="word",
+            font=("Meiryo UI", 9),
+            bg="#ffffff",
+            fg="#1e293b",
+            padx=14,
+            pady=12,
+            relief="solid",
+            borderwidth=1,
+        )
+        vsb = ttk.Scrollbar(frame, orient="vertical", command=txt.yview)
         txt.configure(yscrollcommand=vsb.set)
         txt.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         vsb.pack(side=tk.RIGHT, fill=tk.Y)
 
-        help_content = f"""【基本操作手順】
-1. 『① 注文品管理表ファイル』の指定:
-   - 「ファイルを参照...」から管理表Excel（例: 注文品管理表.xlsx）を選択します。
-   - 管理表の15列目付近にある個別の「品名」列を正確に参照します（D列の「品名、ライン名等」と混同しません）。
-
-2. 『② 注文書フォルダパス』の指定:
-   - 「フォルダを参照...」から注文書Excelが保管されている親フォルダを選択します。
-   - 【サブフォルダ対応】指定フォルダ直下だけでなく、配下にあるすべてのサブフォルダ内も再帰的に走査し、すべての注文書Excelを自動検出・一括検査します。
-   - 【注文書と見積依頼書の分別】Excelシートの2行目に「見積」の記載がある見積依頼書は自動的にスキップされ、「注文」の記載がある注文書のみを正確に抽出して照合します。
-
-3. 『照合管理No頭文字の設定』:
-   - デフォルトは「2」（2から始まる管理Noのみを照合対象とします）。
-   - 空欄にすると頭文字による制限を行わず、全件を照合します。
-   - カンマ区切り（例: 2, 3）で複数指定も可能です。
-
-4. 『照合条件（単価・金額の除外）』:
-   - 【重要】単価や金額は見積や管理表の未記入による差分が発生しやすいため、照合・判定の対象から完全に除外しています。
-   - 「管理No」「図面番号」「品番」「品名」「仕様」「メーカー」「数量」の一致度により高精度に特定します。
-
-5. 『どこが不一致かを確認する方法（不一致理由・照合診断）』:
-   - 一覧テーブルの2列目「不一致理由・照合診断」に、なぜ不一致になったのかが具体的に表示されます。
-   - さらに【行をダブルクリック】するか「🔍 選択行の不一致・照合詳細を表示」ボタンを押すと、注文書と管理表の項目別比較ウィンドウが開き、どの文字が食い違っているかを一目で確認できます。
-
-6. 『パス・設定を保存』ボタン:
-   - ボタンを押すと、現在の管理表パス、注文書フォルダパス、および管理No頭文字設定がアプリ配置フォルダ内の config.json に保存されます。
-   - 設定保存先: {self.CONFIG_FILE_PATH}
-
-7. 『照合・遅延チェック実行』ボタン (F5キー):
-   - 照合計算を開始します。進捗バーで現在の状況がリアルタイムに表示されます。
-"""
-        txt.insert("1.0", help_content)
-        txt.configure(state="disabled")
-
-        btn_box = ttk.Frame(win, padding=(12, 8))
-        btn_box.pack(fill=tk.X)
-        ttk.Button(btn_box, text="閉じる", style="Primary.TButton", command=win.destroy).pack(side=tk.RIGHT)
-
-    def _show_logic_guide(self):
-        """照合判定ロジック詳細ガイドを表示"""
-        win = tk.Toplevel(self.root)
-        win.title("照合・遅延判定ロジックの詳細")
-        win.geometry("700x560")
-        win.minsize(560, 420)
-        win.transient(self.root)
-
-        txt_frame = ttk.Frame(win, padding=12)
-        txt_frame.pack(fill=tk.BOTH, expand=True)
-
-        txt = tk.Text(txt_frame, wrap="word", font=("Meiryo UI", 9), padx=10, pady=10, relief="solid", borderwidth=1)
-        vsb = ttk.Scrollbar(txt_frame, orient="vertical", command=txt.yview)
-        txt.configure(yscrollcommand=vsb.set)
-        txt.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        vsb.pack(side=tk.RIGHT, fill=tk.Y)
-
-        logic_content = """【不一致診断・照合ロジック】
-
-■ 管理No頭文字フィルター:
-  - 設定された頭文字（例: '2'）で始まらない管理Noを持つ注文書ファイルや明細は、自動的に検査対象から除外されます。
-  - 管理表側も対象の管理Noに限定して高精度にインデックス化されます。
-
-■ 注文書と見積依頼書の分別（2行目チェック）:
-  - 注文書フォルダ内の各シートの2行目を走査し、「見積」や「見積依頼」などの文言があるシートは自動的に除外します。
-  - 2行目に「注文」や「発注」などの記載がある注文書シートのみを検査対象として抽出します。
-
-■ 単価・金額の照合除外:
-  - 単価・金額は照合およびスコアリングから完全に除外されています。
-  - 管理表側の単価・金額が空欄や0円であっても、図番・品番・品名・仕様・数量が一致していれば確実に正常一致と判定されます。
-
-■ 発注先・メーカーの優先判定:
-  - 注文書の発注先（キーエンス等）やメーカー名が管理表の仕入先・メーカーと一致することを重視して評価します。
-  - 発注先が明らかに異なる業者の明細行は、同一管理No内であっても誤って照合されないようガードされています。
-
-■ 全体最適組み合わせマッチング:
-  - 手前の行から順番に消費するのではなく、管理Noごとに「全明細合計で最も整合性が高くなる組み合わせ」を自動決定します。
-
-■ 不一致になるパターン（テーブルの「不一致理由・照合診断」列に表示）:
-  パターン①【管理No不一致】:
-    - 注文書ファイル名先頭8桁の管理No（例: 22609051）が、注文品管理表のどのシートにも1件も存在しない場合。
-
-  パターン②【明細項目不一致】:
-    - 管理Noは管理表に存在するものの、図面番号・品番・品名・仕様・数量がいずれも基準値に達しなかった場合。
-    - 最も近い管理表の候補行を自動抽出し、「図番・品番・品名・仕様・数量」のどれが一致し、どれが不一致かを明示します。
-
-■ 現品確認日（物：A列）と請求日（伝票：AI列）の判定:
-  - 管理表のA列・AI列に日付や確認文字が入っていれば「確認済 (正常)」、空欄で納期を過ぎていれば「未確認 (超過X日)」と判定します。
-"""
-        txt.insert("1.0", logic_content)
-        txt.configure(state="disabled")
-
-        btn_box = ttk.Frame(win, padding=(12, 8))
-        btn_box.pack(fill=tk.X)
-        ttk.Button(btn_box, text="閉じる", style="Primary.TButton", command=win.destroy).pack(side=tk.RIGHT)
+        self._configure_rich_text_tags(txt)
+        return txt
 
     def _show_about(self):
         """バージョン情報ダイアログの表示"""
@@ -722,13 +842,12 @@ class StockMatchApp:
             "バージョン情報",
             "StockMatch_Miya-v1.0.0\n"
             "注文品納期 × 管理表（現品確認日・請求日）超過照合システム\n\n"
-            "照合規則: 全体最適1対1マッチング（※単価・金額は照合対象外）\n"
-            "頭文字設定: 管理No頭文字フィルター機能搭載（デフォルト: 2）\n"
-            "分別機能: 2行目の記載により「見積依頼書」を除外し「注文書」のみ照合\n"
-            "品名参照: 管理表の個別「品名」列（O列）を正確に参照\n"
-            "対応形式: Excel (.xlsx, .xlsm) / CSV\n"
-            "探索範囲: 指定フォルダおよび全サブフォルダ\n"
-            f"設定保存先: {self.CONFIG_FILE_PATH}\n\n"
+            "・照合方式: 全体最適1対1マッチング（※単価・金額は照合対象外）\n"
+            "・頭文字指定: 管理No頭文字フィルター搭載（デフォルト: 2 ／ カンマ区切りで複数指定可）\n"
+            "・自動分別: 2行目の記載により「見積依頼書」を除外し「注文書」のみ照合\n"
+            "・品名参照: 管理表の個別「品名」列（O列）を正確に参照\n"
+            "・探索範囲: 指定フォルダおよび配下の全サブフォルダを一括検査\n"
+            f"・設定保存先: {self.CONFIG_FILE_PATH}\n\n"
             "© StockMatch_Miya System All Rights Reserved.",
         )
 
@@ -777,7 +896,11 @@ class StockMatchApp:
             with open(target_file, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
             if show_msg:
-                messagebox.showinfo("設定保存完了", f"パスおよび設定を保存しました:\n{target_file}\n(照合頭文字: '{prefix}')")
+                prefix_disp = prefix if prefix else "（指定なし・全件対象）"
+                messagebox.showinfo(
+                    "設定保存完了",
+                    f"パスおよび設定を保存しました:\n{target_file}\n\n・照合管理No頭文字: {prefix_disp}",
+                )
         except Exception as e:
             if show_msg:
                 messagebox.showerror("保存エラー", f"設定ファイルへの保存に失敗しました:\n{e}")
@@ -853,11 +976,11 @@ class StockMatchApp:
         self.ui_queue.put(("PROGRESS", (percent, message)))
 
     def _get_target_prefixes(self) -> list[str]:
-        """設定された照合管理No頭文字のリストを取得（カンマ区切り対応、全角半角正規化）"""
+        """設定された照合管理No頭文字のリストを取得（カンマ区切り・読点・空白区切り対応、全角半角正規化）"""
         raw = self.order_no_prefix.get().strip()
         if not raw:
             return []
-        norm = unicodedata.normalize("NFKC", raw).replace("、", ",").replace(" ", "")
+        norm = unicodedata.normalize("NFKC", raw).replace("、", ",").replace("，", ",")
         prefixes = [p.strip() for p in norm.split(",") if p.strip()]
         return prefixes
 
@@ -1768,7 +1891,7 @@ class StockMatchApp:
         self.export_btn.configure(state=tk.DISABLED)
         self.progress_var.set(2.0)
         self.progress_text_var.set("解析を開始しています...")
-        prefix_info = f" (頭文字: {', '.join(target_prefixes)})" if target_prefixes else " (全件対象)"
+        prefix_info = f" (対象頭文字: {', '.join(target_prefixes)})" if target_prefixes else " (全件対象)"
         self.status_var.set(f"実行中: ファイルを読み込んでいます{prefix_info}。しばらくお待ちください...")
 
         worker = threading.Thread(
@@ -1835,7 +1958,7 @@ class StockMatchApp:
                     order_items_count = payload["order_items_count"]
                     mgmt_rows_count = payload["mgmt_rows_count"]
                     prefixes = payload.get("prefixes", [])
-                    p_info = f" (頭文字: {', '.join(prefixes)})" if prefixes else ""
+                    p_info = f" (対象頭文字: {', '.join(prefixes)})" if prefixes else " (頭文字制限なし)"
 
                     self.column_filters.clear()
                     self._update_all_headings()
