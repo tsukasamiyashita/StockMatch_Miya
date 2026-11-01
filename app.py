@@ -68,7 +68,7 @@ class StockMatchApp:
         self.mgmt_file_path = tk.StringVar()
         self.order_dir_path = tk.StringVar()
         self.base_date_str = tk.StringVar(value=datetime.date.today().strftime("%Y-%m-%d"))
-        self.filter_mode = tk.StringVar(value="ALL_DELAY")
+        self.filter_mode = tk.StringVar(value="BOTH_DELAY")
         self.search_keyword = tk.StringVar()
         self.missing_search_keyword = tk.StringVar()
 
@@ -964,7 +964,7 @@ class StockMatchApp:
 
         txt1.insert(tk.END, "\n  STEP 3 : 2つの独立タブによる確認  \n", "h1")
         txt1.insert(tk.END, "■ 照合実行後の2系統タブ表示\n", "h2")
-        txt1.insert(tk.END, "・『① 納期超過・照合結果 一覧』タブ: 注文書由来の納期遅延・確認状況、管理表未記載案件を確認できます。\n", "point")
+        txt1.insert(tk.END, "・『① 納期超過・照合結果 一覧』タブ: 注文書由来の納期遅延・確認状況、管理表未記載案件を確認できます（※初期表示フィルタは最も確認優先度の高い『現品・請求の両方超過』がデフォルト選択されます）。\n", "point")
         txt1.insert(tk.END, "・『② 【未発注・注文書なし】管理表のみ記載 一覧』タブ: 管理表に記載があるのに注文書が未手配の明細を独立して一覧確認できます。\n", "point")
         txt1.insert(tk.END, "★【購入数0の自動除外】管理表AB列の購入数が『0』の項目（在庫充当品等）は未発注一覧から自動除外されます。\n", "point")
         txt1.insert(tk.END, "・一覧の行を【ダブルクリック】すると項目別比較ウィンドウが開きます。\n", "body")
