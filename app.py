@@ -68,6 +68,7 @@ class StockMatchApp:
         self.mgmt_file_path = tk.StringVar()
         self.order_dir_path = tk.StringVar()
         self.base_date_str = tk.StringVar(value=datetime.date.today().strftime("%Y-%m-%d"))
+        self.blank_due_grace_days = tk.StringVar(value="7")
         self.filter_mode = tk.StringVar(value="BOTH_DELAY")
         self.search_keyword = tk.StringVar()
         self.missing_search_keyword = tk.StringVar()
@@ -90,6 +91,15 @@ class StockMatchApp:
         self._build_menu()
         self._build_ui()
         self._load_config_and_autoload()
+
+    def _get_grace_days(self) -> int:
+        """納期未記載時に注文日を基準とする猶予日数（デフォルト7日）を整数で取得"""
+        val = self.blank_due_grace_days.get().strip()
+        try:
+            days = int(val)
+            return max(0, days)
+        except ValueError:
+            return 7
 
     def _resolve_icon_path(self) -> str | None:
         """icon.ico の実在パスを探索して返す"""
@@ -228,7 +238,7 @@ class StockMatchApp:
         menubar.add_cascade(label="ファイル(F)", menu=file_menu)
 
         config_menu = tk.Menu(menubar, tearoff=0)
-        config_menu.add_command(label="現在のパス設定を保存 (アプリフォルダ直下)", command=self._save_config_manual)
+        config_menu.add_command(label="現在の設定を保存 (パス・超過日数)", command=self._save_config_manual)
         config_menu.add_command(label="アプリ配置フォルダを開く", command=self._open_config_folder)
         menubar.add_cascade(label="設定(S)", menu=config_menu)
 
@@ -322,11 +332,11 @@ class StockMatchApp:
         ttk.Button(row2, text="フォルダを参照...", style="Action.TButton", command=self._select_order_dir).pack(
             side=tk.LEFT, padx=(0, 8)
         )
-        ttk.Button(row2, text="パス設定を保存", style="Action.TButton", command=self._save_config_manual).pack(
+        ttk.Button(row2, text="設定を保存", style="Action.TButton", command=self._save_config_manual).pack(
             side=tk.LEFT
         )
 
-        # ③ 基準日・実行ボタン行
+        # ③ 基準日・超過設定・実行ボタン行
         row3 = ttk.Frame(file_card, style="Card.TFrame")
         row3.pack(fill=tk.X, pady=(2, 6))
 
@@ -349,11 +359,26 @@ class StockMatchApp:
 
         ttk.Label(
             row3,
-            text="※タブ②『注文書未検出』では、管理表AB列の「購入数」が0の明細は自動除外されます。",
+            text="納期未記載時:",
             style="Card.TLabel",
-            foreground="#475569",
-            font=("Meiryo UI", 8),
-        ).pack(side=tk.LEFT, padx=(0, 12))
+            font=("Meiryo UI", 9, "bold"),
+        ).pack(side=tk.LEFT)
+        ttk.Label(
+            row3,
+            text="注文日(4行目)から",
+            style="Card.TLabel",
+            font=("Meiryo UI", 9),
+        ).pack(side=tk.LEFT, padx=(4, 2))
+        grace_entry = ttk.Entry(
+            row3, textvariable=self.blank_due_grace_days, width=4, justify="center", font=("Meiryo UI", 9)
+        )
+        grace_entry.pack(side=tk.LEFT, padx=(2, 2))
+        ttk.Label(
+            row3,
+            text="日経過で超過",
+            style="Card.TLabel",
+            font=("Meiryo UI", 9),
+        ).pack(side=tk.LEFT, padx=(2, 14))
 
         self.excel_open_btn = ttk.Button(
             row3,
@@ -957,10 +982,12 @@ class StockMatchApp:
         txt1.insert(tk.END, "★【サブフォルダ一括探索】指定したフォルダ直下だけでなく、配下の全サブフォルダ内も漏れなく自動スキャンします。\n", "point")
         txt1.insert(tk.END, "★【見積依頼書の自動除外】Excelシートの2行目を自動検査し、「見積」の記載があるシートは除外して「注文」シートのみを照合します。\n", "point")
 
-        txt1.insert(tk.END, "\n  STEP 2 : 判定基準日の設定とパス保存  \n", "h1")
+        txt1.insert(tk.END, "\n  STEP 2 : 判定基準日・超過日数の設定と保存  \n", "h1")
         txt1.insert(tk.END, "■ 判定基準日（今日）と設定の保存\n", "h2")
         txt1.insert(tk.END, "・納期超過の判定基準日（初期値は今日）を YYYY-MM-DD 形式で指定します。\n", "body")
-        txt1.insert(tk.END, "・『パス設定を保存』ボタンを押すと、管理表パス・注文書フォルダパスがアプリフォルダ内の config.json に保存されます。\n", "body")
+        txt1.insert(tk.END, "・『設定を保存』ボタンを押すと、管理表パス・注文書フォルダパスおよび納期未記載時の超過日数が config.json に保存されます。\n", "body")
+        txt1.insert(tk.END, "■ 納期未記載時の注文日基準判定\n", "h2")
+        txt1.insert(tk.END, "・注文書明細の納期が空欄の場合、注文書4行目に記載されている「注文日」から指定日数（初期値: 7日）を経過した時点で超過とみなします。\n", "point")
 
         txt1.insert(tk.END, "\n  STEP 3 : 2つの独立タブによる確認  \n", "h1")
         txt1.insert(tk.END, "■ 照合実行後の2系統タブ表示\n", "h2")
@@ -989,6 +1016,11 @@ class StockMatchApp:
         txt2.insert(tk.END, "■ 現品確認日（物）と 請求日（伝票）\n", "h2")
         txt2.insert(tk.END, "・日付または確認済の記載があれば『確認済 (正常)』と判定します。\n", "badge_ok")
         txt2.insert(tk.END, "・空欄のまま納期が判定基準日を過ぎている場合は『未確認 (超過X日)』として警告表示します。\n", "warn")
+
+        txt2.insert(tk.END, "\n  4. 注文書納期未記載時の自動超過判定  \n", "h1")
+        txt2.insert(tk.END, "■ 注文日（4行目）＋指定日数（初期値: 7日）による期日算出\n", "h2")
+        txt2.insert(tk.END, "・注文書明細の納期が空欄の場合、注文書シート4行目の注文日を自動抽出し、設定日数経過後に納期超過として扱います。\n", "point")
+        txt2.insert(tk.END, "・設定した日数は『設定を保存』により次回起動時にも自動的に引き継がれます。\n", "body")
         txt2.configure(state="disabled")
 
         tab3 = ttk.Frame(notebook, padding=8)
@@ -1026,6 +1058,7 @@ class StockMatchApp:
             "・Excel直接起動: 一時ファイルなしで未保存新規ブックとして開く\n"
             "・タブ完全分離: 「①納期超過・照合一覧」と「②注文書未検出(管理表のみ)」を別一覧で確認可能\n"
             "・未発注一覧フィルタ: 注文品管理表のAB列「購入数」が0の明細は自動除外\n"
+            "・納期未記載対応: 注文書納期が空欄時、注文日(4行目)から指定日数(初期値7日)経過で超過判定\n"
             "・照合方式: 全体最適1対1マッチング（※単価・金額は照合対象外）\n"
             "・自動分別: 2行目の記載により「見積依頼書」を除外し「注文書」のみ照合\n"
             "・探索範囲: 指定フォルダおよび配下の全サブフォルダを一括検査\n"
@@ -1053,10 +1086,12 @@ class StockMatchApp:
     def _save_config(self, show_msg: bool = False):
         mgmt = self.mgmt_file_path.get().strip().strip('"')
         order = self.order_dir_path.get().strip().strip('"')
+        grace_days = self._get_grace_days()
 
         data = {
             "mgmt_file_path": mgmt,
             "order_dir_path": order,
+            "blank_due_grace_days": grace_days,
             "last_updated": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
 
@@ -1072,7 +1107,7 @@ class StockMatchApp:
             with open(target_file, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
             if show_msg:
-                messagebox.showinfo("設定保存完了", f"パス設定を保存しました:\n{target_file}")
+                messagebox.showinfo("設定保存完了", f"パスおよび納期超過設定を保存しました:\n{target_file}\n(納期未記載時の超過基準: 注文日から{grace_days}日経過)")
         except Exception as e:
             if show_msg:
                 messagebox.showerror("保存エラー", f"設定ファイルへの保存に失敗しました:\n{e}")
@@ -1088,10 +1123,13 @@ class StockMatchApp:
                     data = json.load(f)
                 mgmt = data.get("mgmt_file_path", "")
                 order = data.get("order_dir_path", "")
+                grace_days = data.get("blank_due_grace_days", 7)
                 if mgmt and os.path.isfile(mgmt):
                     self.mgmt_file_path.set(mgmt)
                 if order and os.path.isdir(order):
                     self.order_dir_path.set(order)
+                if grace_days is not None:
+                    self.blank_due_grace_days.set(str(grace_days))
             except Exception:
                 pass
 
@@ -1731,6 +1769,18 @@ class StockMatchApp:
             sheet_order_date = None
             default_year = datetime.date.today().year
 
+            # 注文書4行目にある注文日付の明示的探索
+            for r_idx, row_tuple in raw_rows:
+                if r_idx == 4:
+                    for cell_v in row_tuple:
+                        if cell_v is not None and str(cell_v).strip() != "":
+                            d_cand4 = self._parse_flexible_date(cell_v)
+                            if d_cand4:
+                                sheet_order_date = d_cand4
+                                default_year = d_cand4.year
+                                break
+                    break
+
             for r_idx, row_tuple in raw_rows:
                 if r_idx > 16:
                     break
@@ -2003,15 +2053,16 @@ class StockMatchApp:
         self.progress_text_var.set("解析を開始しています...")
         self.status_var.set("実行中: 注文品管理表と注文書フォルダを照合しています...")
 
+        grace_days = self._get_grace_days()
         worker = threading.Thread(
             target=self._analysis_worker,
-            args=(mgmt_path, order_dir, base_date),
+            args=(mgmt_path, order_dir, base_date, grace_days),
             daemon=True,
         )
         worker.start()
         self.root.after(40, self._poll_ui_queue)
 
-    def _analysis_worker(self, mgmt_path: str, order_dir: str, base_date: datetime.date):
+    def _analysis_worker(self, mgmt_path: str, order_dir: str, base_date: datetime.date, grace_days: int = 7):
         try:
             self._report_progress(5.0, "[1/3] 注文品管理表を開いています...")
             mgmt_rows = self._parse_management_book(mgmt_path, progress_cb=self._report_progress)
@@ -2032,7 +2083,7 @@ class StockMatchApp:
 
             self._report_progress(75.0, f"[3/3] 明細の双方向照合を実行中 ({len(order_items)} 件)...")
             main_records, missing_records = self._match_and_evaluate(
-                mgmt_rows, order_items, base_date, progress_cb=self._report_progress
+                mgmt_rows, order_items, base_date, grace_days=grace_days, progress_cb=self._report_progress
             )
 
             self.ui_queue.put(
@@ -2441,6 +2492,7 @@ class StockMatchApp:
         mgmt_rows: list[dict],
         order_items: list[dict],
         base_date: datetime.date,
+        grace_days: int = 7,
         progress_cb=None,
     ) -> tuple[list[dict], list[dict]]:
         """
@@ -2523,6 +2575,17 @@ class StockMatchApp:
                     pct = 75.0 + (18.0 * processed_orders / max(1, total_orders))
                     progress_cb(pct, f"[3/3] 注文書明細と管理表を照合・診断中 ({processed_orders}/{total_orders} 件目)...")
 
+                order_due = o_item.get("due_date")
+                order_dt = o_item.get("order_date")
+                is_fallback = False
+                if order_due:
+                    final_due = order_due
+                elif order_dt:
+                    final_due = order_dt + datetime.timedelta(days=grace_days)
+                    is_fallback = True
+                else:
+                    final_due = best_mgmt.get("mgmt_due_date") if r_idx in matched_pairs else None
+
                 if r_idx in matched_pairs:
                     c_idx, sc = matched_pairs[r_idx]
                     best_mgmt = m_list[c_idx]
@@ -2542,7 +2605,7 @@ class StockMatchApp:
                         item_name=o_item.get("item_name") or best_mgmt.get("item_name", ""),
                         model_spec=o_item.get("model_spec") or best_mgmt.get("model_spec", ""),
                         qty=o_item.get("qty") or best_mgmt.get("qty", ""),
-                        due_date=o_item.get("due_date") or best_mgmt.get("mgmt_due_date"),
+                        due_date=final_due,
                         actual_date=best_mgmt.get("actual_date"),
                         actual_raw=best_mgmt.get("actual_raw", ""),
                         actual_filled=best_mgmt.get("actual_filled", False),
@@ -2552,6 +2615,9 @@ class StockMatchApp:
                         person=best_mgmt.get("person", ""),
                         source_info=f"[{o_item.get('req_type_label', '')}] 注文書:{o_item['file']} ⇔ 管理表:{best_mgmt['sheet']}(行{best_mgmt['row']})",
                         base_date=base_date,
+                        is_fallback_order_date=is_fallback,
+                        order_date=order_dt,
+                        grace_days=grace_days,
                         is_unmatched=False,
                         mismatch_reason=match_summary,
                         diagnostic_data=diag_data,
@@ -2566,7 +2632,7 @@ class StockMatchApp:
                         item_name=o_item.get("item_name", ""),
                         model_spec=o_item.get("model_spec", ""),
                         qty=o_item.get("qty", ""),
-                        due_date=o_item.get("due_date"),
+                        due_date=final_due,
                         actual_date=None,
                         actual_raw="",
                         actual_filled=False,
@@ -2576,6 +2642,9 @@ class StockMatchApp:
                         person="【不一致】",
                         source_info=f"【不一致】注文書:{o_item['file']}(行{o_item['row']})",
                         base_date=base_date,
+                        is_fallback_order_date=is_fallback,
+                        order_date=order_dt,
+                        grace_days=grace_days,
                         is_unmatched=True,
                         mismatch_reason=reason_txt,
                         diagnostic_data=diag_data,
@@ -2657,6 +2726,8 @@ class StockMatchApp:
         source_info: str,
         base_date: datetime.date,
         is_fallback_order_date: bool = False,
+        order_date: datetime.date | None = None,
+        grace_days: int = 7,
         is_unmatched: bool = False,
         mismatch_reason: str = "",
         diagnostic_data: dict | None = None,
@@ -2670,14 +2741,16 @@ class StockMatchApp:
             delta_from_today = (base_date - due_date).days
             if delta_from_today > 0:
                 overdue_days_num = delta_from_today
-                days_overdue_str = (
-                    f"{delta_from_today}日超過"
-                    if not is_fallback_order_date
-                    else f"発注後{delta_from_today}日経過"
-                )
+                if is_fallback_order_date and order_date:
+                    days_since_order = (base_date - order_date).days
+                    days_overdue_str = f"{delta_from_today}日超過 (注文後{days_since_order}日)"
+                elif is_fallback_order_date:
+                    days_overdue_str = f"{delta_from_today}日超過"
+                else:
+                    days_overdue_str = f"{delta_from_today}日超過"
             elif delta_from_today == 0:
                 overdue_days_num = 0
-                days_overdue_str = "本日納期"
+                days_overdue_str = "本日満了" if is_fallback_order_date else "本日納期"
             else:
                 overdue_days_num = delta_from_today
                 days_overdue_str = f"残り{-delta_from_today}日"
@@ -2756,7 +2829,10 @@ class StockMatchApp:
 
         due_str = due_date.strftime("%Y-%m-%d") if due_date else "未記載"
         if is_fallback_order_date and due_date:
-            due_str = f"({due_date.strftime('%Y-%m-%d')}発注)"
+            if order_date:
+                due_str = f"未記載 ({order_date.strftime('%Y-%m-%d')}注文+{grace_days}日)"
+            else:
+                due_str = f"未記載 (注文+{grace_days}日)"
 
         return {
             "status_badge": status_badge,
