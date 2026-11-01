@@ -83,6 +83,7 @@ class StockMatchApp:
         # 解析結果データ保持（2系統に分離）
         self.analyzed_records = []       # タブ1: 注文書由来の照合・遅延レコード
         self.missing_order_records = []   # タブ2: 注文書未検出（管理表のみ）レコード
+        self.cached_mgmt_rows = []       # 注文品管理表の全行キャッシュ（プレビュー参照用）
 
         # 各タブの列フィルター保持用辞書
         self.column_filters_main = {}
@@ -243,6 +244,24 @@ class StockMatchApp:
         config_menu.add_command(label="アプリ配置フォルダを開く", command=self._open_config_folder)
         menubar.add_cascade(label="設定(S)", menu=config_menu)
 
+        ref_menu = tk.Menu(menubar, tearoff=0)
+        ref_menu.add_command(
+            label="選択行の「注文書」をExcelで開く (該当行へジャンプ)",
+            command=self._open_selected_row_order,
+        )
+        ref_menu.add_command(
+            label="選択行の「注文品管理表」をExcelで開く (該当行へジャンプ)",
+            command=self._open_active_tab_selected_mgmt,
+        )
+        ref_menu.add_command(
+            label="選択行の照合詳細・シートプレビューを表示",
+            command=self._open_active_tab_selected_detail,
+        )
+        ref_menu.add_separator()
+        ref_menu.add_command(label="注文品管理表ファイルをExcelで開く", command=self._open_mgmt_file_direct)
+        ref_menu.add_command(label="注文書フォルダをエクスプローラーで開く", command=self._open_order_dir_direct)
+        menubar.add_cascade(label="参照(R)", menu=ref_menu)
+
         help_menu = tk.Menu(menubar, tearoff=0)
         help_menu.add_command(label="使い方・操作ガイド(H)...", command=lambda: self._show_help_guide(tab_index=0), accelerator="F1")
         help_menu.add_command(label="照合・判定ロジックの詳細...", command=lambda: self._show_help_guide(tab_index=1))
@@ -314,6 +333,9 @@ class StockMatchApp:
         mgmt_entry = ttk.Entry(row1, textvariable=self.mgmt_file_path, width=65)
         mgmt_entry.pack(side=tk.LEFT, padx=(4, 8), fill=tk.X, expand=True)
         ttk.Button(row1, text="ファイルを参照...", style="Action.TButton", command=self._select_mgmt_file).pack(
+            side=tk.LEFT, padx=(0, 8)
+        )
+        ttk.Button(row1, text="📋 管理表を開く", style="Action.TButton", command=self._open_mgmt_file_direct).pack(
             side=tk.LEFT
         )
 
@@ -331,6 +353,9 @@ class StockMatchApp:
         order_entry = ttk.Entry(row2, textvariable=self.order_dir_path, width=65)
         order_entry.pack(side=tk.LEFT, padx=(4, 8), fill=tk.X, expand=True)
         ttk.Button(row2, text="フォルダを参照...", style="Action.TButton", command=self._select_order_dir).pack(
+            side=tk.LEFT, padx=(0, 8)
+        )
+        ttk.Button(row2, text="📂 フォルダを開く", style="Action.TButton", command=self._open_order_dir_direct).pack(
             side=tk.LEFT, padx=(0, 8)
         )
         ttk.Button(row2, text="設定を保存", style="Action.TButton", command=self._save_config_manual).pack(
@@ -542,19 +567,35 @@ class StockMatchApp:
 
         clear_col_btn = ttk.Button(
             filter_frame,
-            text="列フィルター解除 (Excel風)",
+            text="列フィルター解除",
             style="Action.TButton",
             command=self._clear_all_main_column_filters,
         )
-        clear_col_btn.pack(side=tk.RIGHT, padx=(6, 0))
+        clear_col_btn.pack(side=tk.RIGHT, padx=(4, 0))
+
+        open_mgmt_btn = ttk.Button(
+            filter_frame,
+            text="📋 管理表を参照",
+            style="Action.TButton",
+            command=lambda: self._open_selected_row_mgmt(is_missing_tab=False),
+        )
+        open_mgmt_btn.pack(side=tk.RIGHT, padx=(4, 0))
+
+        open_order_btn = ttk.Button(
+            filter_frame,
+            text="📄 注文書を参照",
+            style="Action.TButton",
+            command=self._open_selected_row_order,
+        )
+        open_order_btn.pack(side=tk.RIGHT, padx=(4, 0))
 
         inspect_btn = ttk.Button(
             filter_frame,
-            text="🔍 選択行の不一致・照合詳細を表示",
+            text="🔍 照合詳細・プレビュー",
             style="Action.TButton",
             command=lambda: self._open_selected_row_detail(is_missing_tab=False),
         )
-        inspect_btn.pack(side=tk.RIGHT, padx=(6, 0))
+        inspect_btn.pack(side=tk.RIGHT, padx=(4, 0))
 
         table_container = ttk.Frame(parent)
         table_container.pack(fill=tk.BOTH, expand=True)
@@ -609,6 +650,7 @@ class StockMatchApp:
 
         self.tree_main.bind("<Button-1>", self._on_tree_main_click)
         self.tree_main.bind("<Double-1>", lambda e: self._on_tree_double_click(e, is_missing_tab=False))
+        self.tree_main.bind("<Button-3>", lambda e: self._on_tree_right_click(e, is_missing_tab=False))
 
         self.tree_main.tag_configure("UNMATCHED", background="#ede9fe", foreground="#4c1d95")
         self.tree_main.tag_configure("BOTH_DELAY", background="#fee2e2", foreground="#7f1d1d")
@@ -652,9 +694,17 @@ class StockMatchApp:
         )
         clear_missing_col_btn.pack(side=tk.RIGHT, padx=(6, 0))
 
+        open_missing_mgmt_btn = ttk.Button(
+            filter_frame,
+            text="📋 管理表を参照",
+            style="Action.TButton",
+            command=lambda: self._open_selected_row_mgmt(is_missing_tab=True),
+        )
+        open_missing_mgmt_btn.pack(side=tk.RIGHT, padx=(6, 0))
+
         inspect_missing_btn = ttk.Button(
             filter_frame,
-            text="🔍 選択行の詳細を確認",
+            text="🔍 詳細・プレビュー",
             style="Action.TButton",
             command=lambda: self._open_selected_row_detail(is_missing_tab=True),
         )
@@ -707,6 +757,7 @@ class StockMatchApp:
 
         self.tree_missing.bind("<Button-1>", self._on_tree_missing_click)
         self.tree_missing.bind("<Double-1>", lambda e: self._on_tree_double_click(e, is_missing_tab=True))
+        self.tree_missing.bind("<Button-3>", lambda e: self._on_tree_right_click(e, is_missing_tab=True))
 
         self.tree_missing.tag_configure("MISSING_ORDER", background="#fef3c7", foreground="#92400e")
 
@@ -735,8 +786,265 @@ class StockMatchApp:
         return card
 
     # =========================================================================
-    # 不一致・照合詳細の比較インスペクタ
+    # 注文品管理表・注文書の直接参照＆プレビュー機能
     # =========================================================================
+    def _open_excel_at_location(
+        self,
+        filepath: str,
+        sheet_name: str = "",
+        row_num: int | None = None,
+        label_for_status: str = "Excelファイル",
+    ):
+        """
+        指定されたExcelファイルを開き、該当シート・該当行を選択状態にして前面表示する。
+        すでにExcelで開かれている場合は再読み込みせずそのブックをアクティブにする。
+        """
+        clean_path = filepath.strip().strip('"') if filepath else ""
+        if not clean_path or not os.path.isfile(clean_path):
+            messagebox.showwarning(
+                "ファイル未検出",
+                f"対象の{label_for_status}が見つかりません:\n{clean_path or '(未指定)'}",
+            )
+            return
+
+        abs_path = os.path.abspath(clean_path)
+        norm_target = os.path.normcase(os.path.realpath(abs_path))
+
+        if not HAS_WIN32COM:
+            try:
+                os.startfile(abs_path)
+            except Exception as e:
+                messagebox.showerror("起動エラー", f"ファイルを開けませんでした:\n{e}")
+            return
+
+        loc_desc = f" (シート:{sheet_name}" + (f" / 行:{row_num})" if row_num else ")") if sheet_name else ""
+        self.status_var.set(f"{label_for_status}をExcelで開いています: {os.path.basename(abs_path)}{loc_desc} ...")
+
+        def _worker():
+            try:
+                pythoncom.CoInitialize()
+                try:
+                    excel = win32com.client.GetActiveObject("Excel.Application")
+                except Exception:
+                    excel = win32com.client.Dispatch("Excel.Application")
+
+                excel.Visible = True
+
+                target_wb = None
+                try:
+                    for wb_cand in excel.Workbooks:
+                        try:
+                            cand_full = os.path.normcase(os.path.realpath(os.path.abspath(wb_cand.FullName)))
+                            if cand_full == norm_target:
+                                target_wb = wb_cand
+                                break
+                        except Exception:
+                            continue
+                except Exception:
+                    pass
+
+                if target_wb is None:
+                    target_wb = excel.Workbooks.Open(abs_path)
+
+                target_wb.Activate()
+
+                target_ws = None
+                if sheet_name:
+                    try:
+                        target_ws = target_wb.Sheets(sheet_name)
+                        target_ws.Activate()
+                    except Exception:
+                        target_ws = target_wb.ActiveSheet
+                else:
+                    target_ws = target_wb.ActiveSheet
+
+                if target_ws is not None and row_num and int(row_num) >= 1:
+                    r_int = int(row_num)
+                    try:
+                        target_ws.Rows(r_int).Select()
+                        excel.ActiveWindow.ScrollRow = max(1, r_int - 6)
+                    except Exception:
+                        pass
+
+                try:
+                    if excel.WindowState == -4140:  # xlMinimized
+                        excel.WindowState = -4137  # xlMaximized
+                except Exception:
+                    pass
+
+                self.root.after(
+                    0,
+                    lambda: self.status_var.set(
+                        f"{label_for_status}を表示しました: {os.path.basename(abs_path)}{loc_desc}"
+                    ),
+                )
+            except Exception:
+                try:
+                    os.startfile(abs_path)
+                except Exception as e2:
+                    self.root.after(
+                        0,
+                        lambda err=str(e2): messagebox.showerror(
+                            "Excel起動エラー", f"ファイルを開けませんでした:\n{err}"
+                        ),
+                    )
+            finally:
+                pythoncom.CoUninitialize()
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _open_mgmt_file_direct(self):
+        """上部の設定パスにある注文品管理表ファイルをExcelで開く"""
+        mgmt_path = self.mgmt_file_path.get().strip().strip('"')
+        self._open_excel_at_location(mgmt_path, label_for_status="注文品管理表")
+
+    def _open_order_dir_direct(self):
+        """上部の設定パスにある注文書フォルダをエクスプローラーで開く"""
+        order_dir = self.order_dir_path.get().strip().strip('"')
+        if not order_dir or not os.path.isdir(order_dir):
+            messagebox.showwarning("フォルダ未検出", f"有効な注文書フォルダが指定されていません:\n{order_dir or '(未指定)'}")
+            return
+        try:
+            os.startfile(os.path.abspath(order_dir))
+        except Exception as e:
+            messagebox.showerror("フォルダ起動エラー", f"フォルダを開けませんでした:\n{e}")
+
+    def _get_selected_record(self, is_missing_tab: bool) -> dict | None:
+        tree = self.tree_missing if is_missing_tab else self.tree_main
+        records = self.missing_order_records if is_missing_tab else self.analyzed_records
+        sel = tree.selection()
+        if not sel:
+            messagebox.showinfo("行未選択", "一覧テーブルから参照したい行をクリックして選択してください。")
+            return None
+        item_id = sel[0]
+        prefix = "mis_" if is_missing_tab else "rec_"
+        rec_idx_str = item_id.replace(prefix, "")
+        if not rec_idx_str.isdigit():
+            return None
+        rec_idx = int(rec_idx_str)
+        if not (0 <= rec_idx < len(records)):
+            return None
+        return records[rec_idx]
+
+    def _open_selected_row_order(self):
+        """タブ1の選択行に対応する注文書Excelを開き、該当シート・該当行を選択表示する"""
+        rec = self._get_selected_record(is_missing_tab=False)
+        if not rec:
+            return
+        diag = rec.get("diagnostic_data", {})
+        order_path = diag.get("order_full_path", "")
+        order_sheet = diag.get("order_sheet", "")
+        order_row = diag.get("order_row")
+        if not order_path:
+            messagebox.showinfo("注文書なし", "この明細には対応する注文書ファイルパスが紐付いていません。")
+            return
+        self._open_excel_at_location(
+            order_path,
+            sheet_name=order_sheet,
+            row_num=order_row,
+            label_for_status="注文書",
+        )
+
+    def _open_selected_row_mgmt(self, is_missing_tab: bool = False):
+        """選択行に対応する注文品管理表Excelを開き、該当シート・該当行を選択表示する"""
+        rec = self._get_selected_record(is_missing_tab=is_missing_tab)
+        if not rec:
+            return
+        mgmt_path = self.mgmt_file_path.get().strip().strip('"')
+        diag = rec.get("diagnostic_data", {})
+        mgmt_sheet = diag.get("mgmt_sheet") or rec.get("mgmt_sheet", "")
+        mgmt_row = diag.get("mgmt_row") or (int(rec["mgmt_row"]) if str(rec.get("mgmt_row", "")).isdigit() else None)
+
+        # 不一致行などで mgmt_row が未確定の場合、同じ管理Noの先頭行を探す
+        if not mgmt_row and self.cached_mgmt_rows:
+            target_no = rec.get("order_no", "")
+            for m in self.cached_mgmt_rows:
+                if m.get("order_no_8") == target_no or m.get("order_no") == target_no:
+                    mgmt_sheet = m.get("sheet", "")
+                    mgmt_row = m.get("row")
+                    break
+
+        self._open_excel_at_location(
+            mgmt_path,
+            sheet_name=mgmt_sheet,
+            row_num=mgmt_row,
+            label_for_status="注文品管理表",
+        )
+
+    def _open_active_tab_selected_mgmt(self):
+        try:
+            is_missing = self.notebook.index("current") == 1
+        except Exception:
+            is_missing = False
+        self._open_selected_row_mgmt(is_missing_tab=is_missing)
+
+    def _open_active_tab_selected_detail(self):
+        try:
+            is_missing = self.notebook.index("current") == 1
+        except Exception:
+            is_missing = False
+        self._open_selected_row_detail(is_missing_tab=is_missing)
+
+    def _open_order_file_parent_folder(self, order_full_path: str):
+        if order_full_path and os.path.isfile(order_full_path):
+            folder = os.path.dirname(os.path.abspath(order_full_path))
+            try:
+                os.startfile(folder)
+                return
+            except Exception:
+                pass
+        self._open_order_dir_direct()
+
+    def _on_tree_right_click(self, event, is_missing_tab: bool):
+        """一覧行の右クリック時にコンテキストメニューを表示し、注文書・管理表を即座に参照可能にする"""
+        tree = self.tree_missing if is_missing_tab else self.tree_main
+        region = tree.identify_region(event.x, event.y)
+        if region == "heading":
+            return
+        row_id = tree.identify_row(event.y)
+        if not row_id:
+            return
+        tree.selection_set(row_id)
+        tree.focus(row_id)
+
+        rec = self._get_selected_record(is_missing_tab=is_missing_tab)
+        if not rec:
+            return
+        diag = rec.get("diagnostic_data", {})
+        order_path = diag.get("order_full_path", "")
+        order_sheet = diag.get("order_sheet", "")
+        order_row = diag.get("order_row")
+        mgmt_sheet = diag.get("mgmt_sheet") or rec.get("mgmt_sheet", "")
+        mgmt_row = diag.get("mgmt_row") or rec.get("mgmt_row", "")
+
+        menu = tk.Menu(self.root, tearoff=0, font=("Meiryo UI", 9))
+        menu.add_command(
+            label="🔍 照合詳細・シートプレビューを表示 (ダブルクリック)",
+            command=lambda: self._open_selected_row_detail(is_missing_tab=is_missing_tab),
+        )
+        menu.add_separator()
+        if not is_missing_tab and order_path:
+            o_loc = f" ({os.path.basename(order_path)} / 行{order_row})" if order_row else ""
+            menu.add_command(
+                label=f"📄 この明細の『注文書』をExcelで開く{o_loc}",
+                command=self._open_selected_row_order,
+            )
+        m_loc = f" ({mgmt_sheet} / 行{mgmt_row})" if mgmt_sheet and mgmt_row else ""
+        menu.add_command(
+            label=f"📋 この明細の『注文品管理表』をExcelで開く{m_loc}",
+            command=lambda: self._open_selected_row_mgmt(is_missing_tab=is_missing_tab),
+        )
+        if not is_missing_tab and order_path:
+            menu.add_separator()
+            menu.add_command(
+                label="📂 この注文書の保存先フォルダを開く",
+                command=lambda: self._open_order_file_parent_folder(order_path),
+            )
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
     def _on_tree_double_click(self, event, is_missing_tab: bool):
         tree = self.tree_missing if is_missing_tab else self.tree_main
         region = tree.identify_region(event.x, event.y)
@@ -745,32 +1053,26 @@ class StockMatchApp:
         self._open_selected_row_detail(is_missing_tab=is_missing_tab)
 
     def _open_selected_row_detail(self, is_missing_tab: bool):
-        """選択されている行の不一致理由・項目比較ダイアログを開く"""
-        tree = self.tree_missing if is_missing_tab else self.tree_main
-        records = self.missing_order_records if is_missing_tab else self.analyzed_records
-
-        sel = tree.selection()
-        if not sel:
-            messagebox.showinfo("行未選択", "一覧テーブルから確認したい行をクリックして選択してください。")
+        """選択されている行の不一致理由・項目比較および注文書/管理表プレビューダイアログを開く"""
+        rec = self._get_selected_record(is_missing_tab=is_missing_tab)
+        if not rec:
             return
-
-        item_id = sel[0]
-        prefix = "mis_" if is_missing_tab else "rec_"
-        rec_idx_str = item_id.replace(prefix, "")
-        if not rec_idx_str.isdigit():
-            return
-        rec_idx = int(rec_idx_str)
-        if not (0 <= rec_idx < len(records)):
-            return
-
-        rec = records[rec_idx]
         diag = rec.get("diagnostic_data", {})
+        order_path = diag.get("order_full_path", "")
+        order_file = diag.get("order_file", "")
+        order_sheet = diag.get("order_sheet", "")
+        order_row = diag.get("order_row")
+        mgmt_sheet = diag.get("mgmt_sheet") or rec.get("mgmt_sheet", "")
+        mgmt_row = diag.get("mgmt_row") or (
+            int(rec["mgmt_row"]) if str(rec.get("mgmt_row", "")).isdigit() else None
+        )
+        order_no_val = rec.get("order_no", "")
 
         win = tk.Toplevel(self.root)
-        win.title(f"詳細情報 — 管理No: {rec['order_no']} / 品名: {rec['item_name']}")
+        win.title(f"詳細・データ参照 — 管理No: {order_no_val} / 品名: {rec['item_name']}")
         self._apply_window_icon(win)
-        win.geometry("920x660")
-        win.minsize(760, 520)
+        win.geometry("1020x720")
+        win.minsize(820, 560)
         win.transient(self.root)
 
         banner_bg = "#92400e" if is_missing_tab else ("#4c1d95" if rec.get("is_unmatched") else "#1e293b")
@@ -787,26 +1089,71 @@ class StockMatchApp:
             anchor="w",
         ).pack(fill=tk.X)
 
-        body = ttk.Frame(win, padding=14)
-        body.pack(fill=tk.BOTH, expand=True)
+        # クイック参照ツールバー（Excelで該当行へジャンプ・フォルダ参照）
+        ref_bar = tk.Frame(win, bg="#f1f5f9", padx=14, pady=8, highlightbackground="#cbd5e1", highlightthickness=1)
+        ref_bar.pack(fill=tk.X)
+
+        tk.Label(
+            ref_bar,
+            text="直接参照:",
+            bg="#f1f5f9",
+            fg="#1e293b",
+            font=("Meiryo UI", 9, "bold"),
+        ).pack(side=tk.LEFT, padx=(0, 8))
+
+        if order_path and os.path.isfile(order_path):
+            ttk.Button(
+                ref_bar,
+                text=f"📄 注文書をExcelで開く ({order_file} 行{order_row})",
+                style="Action.TButton",
+                command=lambda: self._open_excel_at_location(
+                    order_path, sheet_name=order_sheet, row_num=order_row, label_for_status="注文書"
+                ),
+            ).pack(side=tk.LEFT, padx=(0, 8))
+            ttk.Button(
+                ref_bar,
+                text="📂 注文書の保存フォルダを開く",
+                style="Action.TButton",
+                command=lambda: self._open_order_file_parent_folder(order_path),
+            ).pack(side=tk.LEFT, padx=(0, 8))
+
+        mgmt_btn_label = (
+            f"📋 注文品管理表をExcelで開く ({mgmt_sheet} 行{mgmt_row})"
+            if mgmt_sheet and mgmt_row
+            else "📋 注文品管理表をExcelで開く"
+        )
+        ttk.Button(
+            ref_bar,
+            text=mgmt_btn_label,
+            style="Action.TButton",
+            command=lambda: self._open_selected_row_mgmt(is_missing_tab=is_missing_tab),
+        ).pack(side=tk.LEFT, padx=(0, 8))
+
+        # 3つのタブで「項目比較」「注文書プレビュー」「管理表プレビュー」を切り替え可能にする
+        detail_nb = ttk.Notebook(win)
+        detail_nb.pack(fill=tk.BOTH, expand=True, padx=14, pady=(10, 6))
+
+        # --- タブ1: 項目別比較・診断レポート ---
+        tab_cmp = ttk.Frame(detail_nb, padding=10)
+        detail_nb.add(tab_cmp, text="  ① 🔍 項目比較・診断レポート  ")
 
         lbl_cmp = ttk.Label(
-            body,
+            tab_cmp,
             text="■ 注文書 と 注文品管理表 の項目別詳細（単価・金額は照合対象外）",
             font=("Meiryo UI", 9, "bold"),
         )
         lbl_cmp.pack(anchor="w", pady=(0, 6))
 
         cmp_cols = ("field", "order_val", "mgmt_val", "judge")
-        cmp_tree = ttk.Treeview(body, columns=cmp_cols, show="headings", height=10)
+        cmp_tree = ttk.Treeview(tab_cmp, columns=cmp_cols, show="headings", height=10)
         cmp_tree.heading("field", text="比較項目")
         cmp_tree.heading("order_val", text="注文書の記載内容")
         cmp_tree.heading("mgmt_val", text="注文品管理表の記載内容")
         cmp_tree.heading("judge", text="照合判定")
 
         cmp_tree.column("field", width=160, anchor="w")
-        cmp_tree.column("order_val", width=285, anchor="w")
-        cmp_tree.column("mgmt_val", width=285, anchor="w")
+        cmp_tree.column("order_val", width=310, anchor="w")
+        cmp_tree.column("mgmt_val", width=310, anchor="w")
         cmp_tree.column("judge", width=140, anchor="center")
 
         cmp_tree.tag_configure("MATCH", background="#dcfce7", foreground="#166534")
@@ -819,16 +1166,16 @@ class StockMatchApp:
         for f_name, o_v, m_v, j_txt, tag in cmp_rows:
             cmp_tree.insert("", tk.END, values=(f_name, o_v, m_v, j_txt), tags=(tag,))
 
-        cmp_tree.pack(fill=tk.X, pady=(0, 12))
+        cmp_tree.pack(fill=tk.X, pady=(0, 10))
 
         lbl_rep = ttk.Label(
-            body,
+            tab_cmp,
             text="■ 詳細診断レポート",
             font=("Meiryo UI", 9, "bold"),
         )
-        lbl_rep.pack(anchor="w", pady=(0, 6))
+        lbl_rep.pack(anchor="w", pady=(0, 4))
 
-        txt_frame = ttk.Frame(body)
+        txt_frame = ttk.Frame(tab_cmp)
         txt_frame.pack(fill=tk.BOTH, expand=True)
 
         txt = tk.Text(txt_frame, wrap="word", font=("Meiryo UI", 9), padx=10, pady=8, relief="solid", borderwidth=1)
@@ -840,9 +1187,241 @@ class StockMatchApp:
         txt.insert("1.0", diag.get("detail_text", rec.get("mismatch_reason", "")))
         txt.configure(state="disabled")
 
+        # --- タブ2: 注文書シート参照 (アプリ内プレビュー) ---
+        tab_order_prev = ttk.Frame(detail_nb, padding=10)
+        detail_nb.add(tab_order_prev, text="  ② 📄 注文書シート参照 (プレビュー)  ")
+        self._build_order_sheet_preview_tab(tab_order_prev, order_path, order_sheet, order_row)
+
+        # --- タブ3: 注文品管理表参照 (アプリ内プレビュー) ---
+        tab_mgmt_prev = ttk.Frame(detail_nb, padding=10)
+        detail_nb.add(tab_mgmt_prev, text="  ③ 📋 注文品管理表参照 (同一管理No・周辺行)  ")
+        self._build_mgmt_sheet_preview_tab(tab_mgmt_prev, order_no_val, mgmt_sheet, mgmt_row, is_missing_tab)
+
         btn_bar = ttk.Frame(win, padding=(14, 8))
         btn_bar.pack(fill=tk.X)
         ttk.Button(btn_bar, text="閉じる", style="Primary.TButton", command=win.destroy).pack(side=tk.RIGHT)
+
+    def _build_order_sheet_preview_tab(
+        self, parent: ttk.Frame, order_path: str, order_sheet: str, target_row: int | None
+    ):
+        """注文書Excelシートの内容をアプリ内のテーブルでそのまま参照・確認できるプレビュータブ"""
+        if not order_path or not os.path.isfile(order_path):
+            ttk.Label(
+                parent,
+                text="この明細は『注文書未検出（管理表のみ記載）』のため、対応する注文書ファイルが存在しません。",
+                font=("Meiryo UI", 10, "bold"),
+                foreground="#92400e",
+            ).pack(anchor="w", pady=20)
+            return
+
+        info_lbl = ttk.Label(
+            parent,
+            text=f"■ 注文書ファイル: {os.path.basename(order_path)}   |   シート: {order_sheet}   |   該当明細行: 行{target_row or '-'} （★黄色ハイライト行）",
+            font=("Meiryo UI", 9, "bold"),
+        )
+        info_lbl.pack(anchor="w", pady=(0, 6))
+
+        tbl_frame = ttk.Frame(parent)
+        tbl_frame.pack(fill=tk.BOTH, expand=True)
+
+        max_preview_cols = 14
+        col_ids = ["row_no"] + [f"c{i}" for i in range(1, max_preview_cols + 1)]
+        tree = ttk.Treeview(tbl_frame, columns=col_ids, show="headings", selectmode="browse")
+        tree.heading("row_no", text="行")
+        tree.column("row_no", width=55, anchor="center")
+
+        for i in range(1, max_preview_cols + 1):
+            col_letter = chr(64 + i)
+            tree.heading(f"c{i}", text=f"{col_letter}列")
+            tree.column(f"c{i}", width=110, anchor="w")
+
+        tree.tag_configure("TARGET_ROW", background="#fef08a", foreground="#713f12")
+        tree.tag_configure("ORDER_DATE_ROW", background="#e0f2fe", foreground="#0369a1")
+        tree.tag_configure("HEADER_ROW", background="#e2e8f0", foreground="#0f172a")
+
+        vsb = ttk.Scrollbar(tbl_frame, orient="vertical", command=tree.yview)
+        hsb = ttk.Scrollbar(tbl_frame, orient="horizontal", command=tree.xview)
+        tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+
+        tree.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        hsb.grid(row=1, column=0, sticky="ew")
+        tbl_frame.grid_rowconfigure(0, weight=1)
+        tbl_frame.grid_columnconfigure(0, weight=1)
+
+        try:
+            wb = openpyxl.load_workbook(order_path, data_only=True, read_only=True)
+            ws = wb[order_sheet] if order_sheet in wb.sheetnames else wb.active
+            target_iid = None
+            for r_idx, row_tuple in enumerate(ws.iter_rows(max_row=120, max_col=30, values_only=True), start=1):
+                if not row_tuple or not any(v is not None and str(v).strip() != "" for v in row_tuple):
+                    continue
+                non_empty_vals = [
+                    self._clean_cell_str(v)
+                    for v in row_tuple
+                    if v is not None and str(v).strip() != ""
+                ]
+                if not non_empty_vals:
+                    continue
+                padded = (non_empty_vals + [""] * max_preview_cols)[:max_preview_cols]
+                row_label = f"★ {r_idx}" if target_row and r_idx == int(target_row) else str(r_idx)
+                tags = ()
+                if target_row and r_idx == int(target_row):
+                    tags = ("TARGET_ROW",)
+                elif r_idx == 4:
+                    tags = ("ORDER_DATE_ROW",)
+                elif any("品名" in v or "図面" in v or "数量" in v for v in non_empty_vals):
+                    tags = ("HEADER_ROW",)
+
+                iid = f"ord_r_{r_idx}"
+                tree.insert("", tk.END, iid=iid, values=[row_label] + padded, tags=tags)
+                if target_row and r_idx == int(target_row):
+                    target_iid = iid
+            wb.close()
+            if target_iid:
+                tree.selection_set(target_iid)
+                tree.see(target_iid)
+        except Exception as e:
+            tree.insert("", tk.END, values=["エラー", f"注文書プレビューの読み込みに失敗しました: {e}"] + [""] * (max_preview_cols - 1))
+
+    def _build_mgmt_sheet_preview_tab(
+        self,
+        parent: ttk.Frame,
+        order_no_val: str,
+        mgmt_sheet: str,
+        target_row: int | None,
+        is_missing_tab: bool,
+    ):
+        """注文品管理表の同一管理No行および周辺行をアプリ内で即座に一覧参照できるプレビュータブ"""
+        info_lbl = ttk.Label(
+            parent,
+            text=(
+                f"■ 注文品管理表 抽出プレビュー   |   対象管理No: {order_no_val or '-'}   |   "
+                f"照合先: {mgmt_sheet or '-'} (行{target_row or '-'})  ※ダブルクリックでExcelの該当行を開きます"
+            ),
+            font=("Meiryo UI", 9, "bold"),
+        )
+        info_lbl.pack(anchor="w", pady=(0, 6))
+
+        tbl_frame = ttk.Frame(parent)
+        tbl_frame.pack(fill=tk.BOTH, expand=True)
+
+        cols = (
+            "mark",
+            "sheet",
+            "row",
+            "order_no",
+            "actual_raw",
+            "drawing_no",
+            "part_no",
+            "item_name",
+            "maker",
+            "spec",
+            "qty",
+            "mgmt_due_raw",
+            "invoice_raw",
+            "person",
+        )
+        tree = ttk.Treeview(tbl_frame, columns=cols, show="headings", selectmode="browse")
+        col_defs = [
+            ("mark", "対象", 65, "center"),
+            ("sheet", "シート", 85, "center"),
+            ("row", "行", 55, "center"),
+            ("order_no", "管理No", 95, "center"),
+            ("actual_raw", "現品確認(A列)", 95, "center"),
+            ("drawing_no", "図面番号", 110, "w"),
+            ("part_no", "品番", 110, "w"),
+            ("item_name", "品名", 140, "w"),
+            ("maker", "メーカー/業者", 110, "w"),
+            ("spec", "仕様・規格", 130, "w"),
+            ("qty", "購入数(AB列)", 85, "center"),
+            ("mgmt_due_raw", "管理表納期", 90, "center"),
+            ("invoice_raw", "請求日(AI列)", 95, "center"),
+            ("person", "担当", 65, "center"),
+        ]
+        for c_id, title, w, anc in col_defs:
+            tree.heading(c_id, text=title)
+            tree.column(c_id, width=w, anchor=anc)
+
+        tree.tag_configure("TARGET_ROW", background="#fef08a", foreground="#713f12")
+        tree.tag_configure("SAME_NO", background="#f0fdf4", foreground="#166534")
+
+        vsb = ttk.Scrollbar(tbl_frame, orient="vertical", command=tree.yview)
+        hsb = ttk.Scrollbar(tbl_frame, orient="horizontal", command=tree.xview)
+        tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+
+        tree.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        hsb.grid(row=1, column=0, sticky="ew")
+        tbl_frame.grid_rowconfigure(0, weight=1)
+        tbl_frame.grid_columnconfigure(0, weight=1)
+
+        matched_rows = []
+        for m in self.cached_mgmt_rows:
+            same_no = order_no_val and (
+                m.get("order_no_8") == order_no_val or m.get("order_no") == order_no_val
+            )
+            near_row = (
+                mgmt_sheet
+                and target_row
+                and m.get("sheet") == mgmt_sheet
+                and abs(int(m.get("row", 0)) - int(target_row)) <= 10
+            )
+            if same_no or near_row:
+                matched_rows.append(m)
+
+        target_iid = None
+        for idx, m in enumerate(matched_rows):
+            is_target = (
+                mgmt_sheet
+                and target_row
+                and m.get("sheet") == mgmt_sheet
+                and int(m.get("row", -1)) == int(target_row)
+            )
+            mark_str = "★ 該当行" if is_target else ("同一No" if m.get("order_no_8") == order_no_val else "周辺行")
+            tag = "TARGET_ROW" if is_target else ("SAME_NO" if m.get("order_no_8") == order_no_val else "")
+            iid = f"mprev_{idx}"
+            tree.insert(
+                "",
+                tk.END,
+                iid=iid,
+                values=(
+                    mark_str,
+                    m.get("sheet", ""),
+                    m.get("row", ""),
+                    m.get("order_no_8") or m.get("order_no", ""),
+                    m.get("actual_raw") or (m["actual_date"].strftime("%Y-%m-%d") if m.get("actual_date") else "未入力"),
+                    m.get("drawing_no", ""),
+                    m.get("part_no", ""),
+                    m.get("item_name", ""),
+                    m.get("maker", ""),
+                    m.get("spec", ""),
+                    m.get("qty", ""),
+                    m.get("mgmt_due_raw") or (m["mgmt_due_date"].strftime("%Y-%m-%d") if m.get("mgmt_due_date") else ""),
+                    m.get("invoice_raw") or (m["invoice_date"].strftime("%Y-%m-%d") if m.get("invoice_date") else "未入力"),
+                    m.get("person", ""),
+                ),
+                tags=(tag,) if tag else (),
+            )
+            if is_target:
+                target_iid = iid
+
+        if target_iid:
+            tree.selection_set(target_iid)
+            tree.see(target_iid)
+
+        def _on_mgmt_prev_dblclick(_e):
+            sel = tree.selection()
+            if not sel:
+                return
+            vals = tree.item(sel[0], "values")
+            if len(vals) >= 3:
+                sh_name = str(vals[1])
+                r_num = int(vals[2]) if str(vals[2]).isdigit() else None
+                mgmt_path = self.mgmt_file_path.get().strip().strip('"')
+                self._open_excel_at_location(mgmt_path, sheet_name=sh_name, row_num=r_num, label_for_status="注文品管理表")
+
+        tree.bind("<Double-1>", _on_mgmt_prev_dblclick)
 
     # =========================================================================
     # ヘルプ・ガイドダイアログ
@@ -1031,6 +1610,12 @@ class StockMatchApp:
         tab3 = ttk.Frame(notebook, padding=8)
         notebook.add(tab3, text="  ③ 便利機能・ショートカットキー  ")
         txt3 = self._create_scrollable_text(tab3)
+
+        txt3.insert(tk.END, "  注文品管理表・注文書の直接参照＆プレビュー機能  \n", "h1")
+        txt3.insert(tk.END, "■ 該当シート・該当行へのピンポイントExcelジャンプ＆アプリ内プレビュー\n", "h2")
+        txt3.insert(tk.END, "・一覧で明細行を選択して『📄 注文書を参照』『📋 管理表を参照』ボタンを押すか、行を【右クリック】すると、実際の注文書または注文品管理表をExcelで開き、該当シート・該当行を自動選択して表示します。\n", "point")
+        txt3.insert(tk.END, "・行を【ダブルクリック】すると開く詳細ウィンドウでは、項目比較に加えて『②注文書シート参照』『③注文品管理表参照』タブからアプリ内で直接シート内容を参照できます。\n", "point")
+        txt3.insert(tk.END, "・画面上部の『📋 管理表を開く』『📂 フォルダを開く』ボタンからいつでも元の管理表や注文書フォルダを開けます。\n\n", "body")
 
         txt3.insert(tk.END, "  Excel風 列フィルター＆ソート機能  \n", "h1")
         txt3.insert(tk.END, "■ 列ヘッダーをクリックして絞り込み・並べ替え\n", "h2")
@@ -2241,6 +2826,7 @@ class StockMatchApp:
                     {
                         "main_records": main_records,
                         "missing_records": missing_records,
+                        "mgmt_rows": mgmt_rows,
                         "base_date": base_date,
                         "valid_order_files": valid_order_files,
                         "ignored_files": ignored_files,
@@ -2269,6 +2855,7 @@ class StockMatchApp:
 
                     self.analyzed_records = payload["main_records"]
                     self.missing_order_records = payload["missing_records"]
+                    self.cached_mgmt_rows = payload.get("mgmt_rows", [])
                     base_date = payload["base_date"]
                     valid_order_files = payload["valid_order_files"]
                     mgmt_rows_count = payload["mgmt_rows_count"]
@@ -2569,6 +3156,13 @@ class StockMatchApp:
         return {
             "comparison_rows": rows,
             "detail_text": "\n".join(detail_lines),
+            "order_full_path": o_item.get("full_path", "") if o_item else "",
+            "order_file": o_item.get("file", "") if o_item else "",
+            "order_sheet": o_item.get("sheet", "") if o_item else "",
+            "order_row": o_item.get("row") if o_item else None,
+            "mgmt_sheet": m_row.get("sheet", "") if m_row else "",
+            "mgmt_row": m_row.get("row") if m_row else None,
+            "order_no": (o_item.get("order_no_8") if o_item else None) or (m_row.get("order_no_8") if m_row else ""),
         }
 
     def _diagnose_unmatched_item(
