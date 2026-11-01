@@ -1060,7 +1060,7 @@ class StockMatchApp:
             "バージョン情報",
             "StockMatch_Miya-v1.1.0\n"
             "注文書 ⇔ 管理表 双方向照合・現品/請求超過システム\n\n"
-            "・Excel直接起動: 一時ファイルなしで未保存新規ブックとして開く\n"
+            "・Excel直接起動: 一時ファイルなしで未保存新規ブック展開（A4横・1ページ収まり印刷設定済）\n"
             "・タブ完全分離: 「①納期超過・照合一覧」と「②注文書未検出(管理表のみ)」を別一覧で確認可能\n"
             "・未発注一覧フィルタ: 注文品管理表のAB列「購入数」が0の明細は自動除外\n"
             "・納期未記載対応: 注文書納期が空欄時、注文日(4行目)から指定日数(初期値7日)経過で超過判定\n"
@@ -3527,6 +3527,46 @@ class StockMatchApp:
         b = int(hex_color[4:6], 16)
         return (b << 16) | (g << 8) | r
 
+    @staticmethod
+    def _configure_excel_page_setup(ws, excel, sheet_title: str):
+        """
+        業務帳票として最適なExcel印刷設定（A4横、横幅1ページ収まり、見出し行繰り返し等）を適用
+        """
+        try:
+            ps = ws.PageSetup
+            # 1. 用紙方向: 横向き (xlLandscape = 2)
+            ps.Orientation = 2
+            # 2. 用紙サイズ: A4 (xlPaperA4 = 9)
+            ps.PaperSize = 9
+            # 3. 横幅1ページに収める（縦は行数に合わせて自然に流れる）
+            ps.Zoom = False
+            ps.FitToPagesWide = 1
+            ps.FitToPagesTall = False
+            # 4. タイトル行の繰り返し（2ページ目以降も見出し1行目を印刷）
+            ps.PrintTitleRows = "$1:$1"
+            # 5. グリッド線（枠線）の印刷
+            ps.PrintGridlines = True
+            # 6. 水平中央揃え
+            ps.CenterHorizontally = True
+            # 7. 余白設定（狭めにしてデータをゆったり印刷）
+            try:
+                ps.LeftMargin = excel.InchesToPoints(0.5)
+                ps.RightMargin = excel.InchesToPoints(0.5)
+                ps.TopMargin = excel.InchesToPoints(0.6)
+                ps.BottomMargin = excel.InchesToPoints(0.6)
+                ps.HeaderMargin = excel.InchesToPoints(0.3)
+                ps.FooterMargin = excel.InchesToPoints(0.3)
+            except Exception:
+                pass
+            # 8. ヘッダー・フッター
+            ps.LeftHeader = f"&\"Meiryo UI,Bold\"StockMatch_Miya - {sheet_title}"
+            ps.RightHeader = "&\"Meiryo UI\"作成日: &D"
+            ps.LeftFooter = "&\"Meiryo UI\"&A"
+            ps.CenterFooter = "&\"Meiryo UI\"&P / &N ページ"
+            ps.RightFooter = ""
+        except Exception:
+            pass
+
     def _open_in_excel_direct(self):
         """
         一時ファイルを一切作成せず、ExcelのCOMオートメーション経由で
@@ -3707,6 +3747,9 @@ class StockMatchApp:
                 ws1.Range("A2").Select()
                 excel.ActiveWindow.FreezePanes = True
 
+                # シート1の印刷設定（A4横・横幅1ページ自動収まり・見出し行繰り返し等）
+                self._configure_excel_page_setup(ws1, excel, "納期超過・照合結果")
+
                 # -------------------------------------------------------------
                 # 2. シート2: 注文書未検出(管理表のみ)
                 # -------------------------------------------------------------
@@ -3798,6 +3841,9 @@ class StockMatchApp:
                 excel.ActiveWindow.SplitColumn = 0
                 ws2.Range("A2").Select()
                 excel.ActiveWindow.FreezePanes = True
+
+                # シート2の印刷設定（A4横・横幅1ページ自動収まり・見出し行繰り返し等）
+                self._configure_excel_page_setup(ws2, excel, "注文書未検出(管理表のみ)")
 
                 # 最終的に第1シートをアクティブにし、A1セルを選択
                 ws1.Activate()
