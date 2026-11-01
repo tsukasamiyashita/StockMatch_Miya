@@ -23,15 +23,12 @@ except ImportError:
 class StockMatchApp:
     """
     StockMatch_Miya-v1.0.0
-    注文品管理表（1つのファイル）と注文書フォルダ内（サブフォルダ含む全階層）の全注文書Excelを照合し、
-    今日（判定基準日）時点で「現品確認日」および「請求日」の納期超過を検査・可視化するデスクトップアプリ
-    ※注文品管理表に存在する管理No（8桁）の注文書・明細のみを照合対象とします。
-    ※設定ファイルはアプリが存在するフォルダ内の config.json に保存・読込されます。
-    ※アイコンはアプリが存在するフォルダ内の icon.ico を全ウィンドウに適用します。
-    ※2行目に「見積」の記載がある見積依頼書は自動除外し、「注文」の記載がある注文書のみを照合します。
+    注文品管理表（1つのファイル）と注文書フォルダ内（サブフォルダ含む全階層）の全注文書Excelを双方向照合し、
+    ・納期超過（現品確認日・請求日）および管理表未記載の注文書
+    ・注文書未検出（管理表にあるのに注文書が見当たらない未発注明細 / ※AB列購入数0は自動除外）
+    を2つの独立したタブ一覧で明確に分離して確認・可視化するデスクトップアプリ
     """
 
-    # アプリ配置フォルダおよび設定ファイル・アイコンファイルパスの定義
     if getattr(sys, "frozen", False):
         APP_DIR = os.path.dirname(os.path.abspath(sys.executable))
         RESOURCE_DIR = getattr(sys, "_MEIPASS", APP_DIR)
@@ -55,7 +52,7 @@ class StockMatchApp:
         except Exception:
             self.root.geometry(f"{self.root.winfo_screenwidth()}x{self.root.winfo_screenheight()}+0+0")
 
-        self.root.minsize(1060, 720)
+        self.root.minsize(1080, 720)
 
         # 状態保持用変数
         self.mgmt_file_path = tk.StringVar()
@@ -63,6 +60,7 @@ class StockMatchApp:
         self.base_date_str = tk.StringVar(value=datetime.date.today().strftime("%Y-%m-%d"))
         self.filter_mode = tk.StringVar(value="ALL_DELAY")
         self.search_keyword = tk.StringVar()
+        self.missing_search_keyword = tk.StringVar()
 
         # 進捗表示・非同期スレッド管理用
         self.progress_var = tk.DoubleVar(value=0.0)
@@ -70,10 +68,13 @@ class StockMatchApp:
         self.is_running = False
         self.ui_queue = queue.Queue()
 
-        # 解析結果データ保持リスト
-        self.analyzed_records = []
-        # 各列の個別フィルター保持用辞書 {col_id: set_of_selected_values}
-        self.column_filters = {}
+        # 解析結果データ保持（2系統に分離）
+        self.analyzed_records = []       # タブ1: 注文書由来の照合・遅延レコード
+        self.missing_order_records = []   # タブ2: 注文書未検出（管理表のみ）レコード
+
+        # 各タブの列フィルター保持用辞書
+        self.column_filters_main = {}
+        self.column_filters_missing = {}
 
         self._setup_styles()
         self._build_menu()
@@ -93,20 +94,19 @@ class StockMatchApp:
         return None
 
     def _apply_window_icon(self, window: tk.Wm, is_main: bool = False):
-        """指定ウィンドウ（ルートまたはToplevel）に icon.ico を設定する"""
+        """指定ウィンドウに icon.ico を設定する"""
         icon_path = self._resolve_icon_path()
         if not icon_path:
             return
         try:
             if is_main:
-                # default指定により、以降生成されるToplevelやダイアログにもアイコンが引き継がれる
                 window.iconbitmap(default=icon_path)
             window.iconbitmap(icon_path)
         except Exception:
             pass
 
     def _setup_styles(self):
-        """UIテーマ・スタイルの設定"""
+        """UIテーマ・スタイルの設定（タブ選択状態の視認性を劇的に向上）"""
         style = ttk.Style()
         if "clam" in style.theme_names():
             style.theme_use("clam")
@@ -155,11 +155,45 @@ class StockMatchApp:
             padding=(4, 6),
         )
 
+        # --- タブウィジェット (Notebook) の視認性強化スタイル ---
+        style.configure(
+            "TNotebook",
+            background="#f8fafc",
+            borderwidth=0,
+            tabmargins=[2, 4, 2, 0]
+        )
+        style.configure(
+            "TNotebook.Tab",
+            font=("Meiryo UI", 10),
+            padding=(20, 8),
+            background="#e2e8f0",
+            foreground="#64748b",
+            borderwidth=1,
+            lightcolor="#cbd5e1",
+            darkcolor="#94a3b8",
+        )
+        style.map(
+            "TNotebook.Tab",
+            background=[
+                ("selected", "#1e293b"),
+                ("active", "#cbd5e1"),
+            ],
+            foreground=[
+                ("selected", "#ffffff"),
+                ("active", "#0f172a"),
+            ],
+            font=[
+                ("selected", ("Meiryo UI", 10, "bold")),
+            ],
+            expand=[
+                ("selected", [1, 2, 1, 0]),
+            ],
+        )
+
     def _build_menu(self):
-        """上部メニューバー（ファイル / 設定 / ヘルプ）の作成"""
+        """上部メニューバー"""
         menubar = tk.Menu(self.root)
 
-        # 1. ファイルメニュー
         file_menu = tk.Menu(menubar, tearoff=0)
         file_menu.add_command(label="注文品管理表ファイルを選択...", command=self._select_mgmt_file, accelerator="Ctrl+O")
         file_menu.add_command(label="注文書フォルダを選択...", command=self._select_order_dir, accelerator="Ctrl+D")
@@ -170,13 +204,11 @@ class StockMatchApp:
         file_menu.add_command(label="終了", command=self.root.quit, accelerator="Alt+F4")
         menubar.add_cascade(label="ファイル(F)", menu=file_menu)
 
-        # 2. 設定メニュー
         config_menu = tk.Menu(menubar, tearoff=0)
         config_menu.add_command(label="現在のパス設定を保存 (アプリフォルダ直下)", command=self._save_config_manual)
         config_menu.add_command(label="アプリ配置フォルダを開く", command=self._open_config_folder)
         menubar.add_cascade(label="設定(S)", menu=config_menu)
 
-        # 3. ヘルプメニュー
         help_menu = tk.Menu(menubar, tearoff=0)
         help_menu.add_command(label="使い方・操作ガイド(H)...", command=lambda: self._show_help_guide(tab_index=0), accelerator="F1")
         help_menu.add_command(label="照合・判定ロジックの詳細...", command=lambda: self._show_help_guide(tab_index=1))
@@ -187,7 +219,6 @@ class StockMatchApp:
 
         self.root.config(menu=menubar)
 
-        # ショートカットキー割り当て
         self.root.bind_all("<F1>", lambda e: self._show_help_guide(tab_index=0))
         self.root.bind_all("<F5>", lambda e: self.run_analysis())
         self.root.bind_all("<Control-o>", lambda e: self._select_mgmt_file())
@@ -207,7 +238,7 @@ class StockMatchApp:
 
         sub_lbl = ttk.Label(
             header_frame,
-            text="  |  注文書納期 × 管理表（現品確認日・請求日）超過照合システム",
+            text="  |  注文書 ⇔ 管理表（個別タブ分離：納期超過照合 × 注文書未検出）",
             style="SubHeader.TLabel",
         )
         sub_lbl.pack(side=tk.LEFT, padx=(8, 0))
@@ -235,7 +266,7 @@ class StockMatchApp:
         file_card = ttk.Frame(ctrl_container, style="Card.TFrame", padding=12)
         file_card.pack(fill=tk.X)
 
-        # ① 注文品管理表ファイル選択行
+        # ① 注文品管理表ファイル行
         row1 = ttk.Frame(file_card, style="Card.TFrame")
         row1.pack(fill=tk.X, pady=(0, 6))
 
@@ -252,7 +283,7 @@ class StockMatchApp:
             side=tk.LEFT
         )
 
-        # ② 注文書フォルダ選択行（サブフォルダ含む全階層を走査）
+        # ② 注文書フォルダ行
         row2 = ttk.Frame(file_card, style="Card.TFrame")
         row2.pack(fill=tk.X, pady=(0, 6))
 
@@ -295,7 +326,7 @@ class StockMatchApp:
 
         ttk.Label(
             row3,
-            text="※注文品管理表に登録されている管理No(8桁)と一致する注文書のみを照合します（見積依頼書は自動で除外）。",
+            text="※タブ②『注文書未検出』では、管理表AB列の「購入数」が0の明細は自動除外されます。",
             style="Card.TLabel",
             foreground="#475569",
             font=("Meiryo UI", 8),
@@ -311,7 +342,7 @@ class StockMatchApp:
         )
         self.run_btn.pack(side=tk.RIGHT)
 
-        # ④ 進捗バー＆実行状況表示
+        # ④ 進捗バー
         row4 = ttk.Frame(file_card, style="Card.TFrame")
         row4.pack(fill=tk.X, pady=(4, 0))
 
@@ -343,26 +374,27 @@ class StockMatchApp:
         self.progress_lbl.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
         # 3. サマリーKPIカードエリア
-        kpi_frame = ttk.Frame(self.root, padding=(16, 0, 16, 10))
+        kpi_frame = ttk.Frame(self.root, padding=(16, 0, 16, 8))
         kpi_frame.pack(fill=tk.X)
 
         self.kpi_vars = {
-            "total": tk.StringVar(value="0 件"),
-            "unmatched": tk.StringVar(value="0 件"),
+            "order_total": tk.StringVar(value="0 件"),
             "both_delay": tk.StringVar(value="0 件"),
             "actual_delay": tk.StringVar(value="0 件"),
             "invoice_delay": tk.StringVar(value="0 件"),
+            "unmatched": tk.StringVar(value="0 件"),
             "ok": tk.StringVar(value="0 件"),
+            "missing_order": tk.StringVar(value="0 件"),
         }
 
-        self._create_kpi_card(kpi_frame, "検査対象注文明細 総数", self.kpi_vars["total"], "#334155", "#f1f5f9").pack(
+        self._create_kpi_card(kpi_frame, "注文書明細 総数", self.kpi_vars["order_total"], "#334155", "#f1f5f9").pack(
             side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6)
         )
         self._create_kpi_card(
             kpi_frame, "【不一致】管理表未記載", self.kpi_vars["unmatched"], "#4c1d95", "#ede9fe"
         ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
         self._create_kpi_card(
-            kpi_frame, "【重要】現品・請求 共に超過", self.kpi_vars["both_delay"], "#991b1b", "#fee2e2"
+            kpi_frame, "【警告】現品・請求 超過", self.kpi_vars["both_delay"], "#991b1b", "#fee2e2"
         ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
         self._create_kpi_card(
             kpi_frame, "【現品超過】現品確認 遅れ", self.kpi_vars["actual_delay"], "#9a3412", "#ffedd5"
@@ -371,17 +403,70 @@ class StockMatchApp:
             kpi_frame, "【請求超過】伝票(請求) 遅れ", self.kpi_vars["invoice_delay"], "#854d0e", "#fef9c3"
         ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
         self._create_kpi_card(kpi_frame, "正常・納期前・確認済", self.kpi_vars["ok"], "#166534", "#dcfce7").pack(
-            side=tk.LEFT, fill=tk.X, expand=True
+            side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6)
         )
+        self._create_kpi_card(
+            kpi_frame, "【別タブ】注文書未検出", self.kpi_vars["missing_order"], "#92400e", "#fef3c7"
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True)
 
-        # 4. フィルタ・検索バー
-        filter_frame = ttk.Frame(self.root, padding=(16, 0, 16, 8))
+        # 4. タブ切り替えコンテナ（Notebook）
+        self.notebook = ttk.Notebook(self.root)
+        self.notebook.pack(fill=tk.BOTH, expand=True, padx=16, pady=(0, 8))
+
+        # --- タブ1: 納期超過・照合結果 一覧 ---
+        tab1 = ttk.Frame(self.notebook)
+        self.notebook.add(tab1, text="  【選択中】▶ ① 納期超過・照合結果 一覧 (0件)  ")
+        self._build_main_table_tab(tab1)
+
+        # --- タブ2: 注文書未検出（管理表のみ）一覧 ---
+        tab2 = ttk.Frame(self.notebook)
+        self.notebook.add(tab2, text="  ▷ ② 【未発注・注文書なし】管理表のみ記載 一覧 (0件)  ")
+        self._build_missing_order_tab(tab2)
+
+        # タブ切り替えイベントをバインドして視覚的タイトルを同期更新
+        self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
+
+        # 5. ステータスバー
+        self.status_var = tk.StringVar(
+            value="準備完了: ①注文品管理表ファイル と ②注文書フォルダパス を指定して「照合・遅延チェック実行」を押してください。"
+        )
+        status_bar = tk.Label(
+            self.root,
+            textvariable=self.status_var,
+            bg="#e2e8f0",
+            fg="#334155",
+            anchor="w",
+            padx=12,
+            pady=4,
+            font=("Meiryo UI", 9),
+        )
+        status_bar.pack(fill=tk.X, side=tk.BOTTOM)
+
+    def _on_tab_changed(self, event=None):
+        """タブが切り替わったときにタイトル文言を更新し、選択中を強調表示する"""
+        try:
+            curr_tab_idx = self.notebook.index("current")
+            total_main = len(self.analyzed_records)
+            total_missing = len(self.missing_order_records)
+
+            if curr_tab_idx == 0:
+                self.notebook.tab(0, text=f"  【選択中】▶ ① 納期超過・照合結果 一覧 ({total_main}件)  ")
+                self.notebook.tab(1, text=f"  ▷ ② 【未発注・注文書なし】管理表のみ記載 一覧 ({total_missing}件)  ")
+            else:
+                self.notebook.tab(0, text=f"  ▷ ① 納期超過・照合結果 一覧 ({total_main}件)  ")
+                self.notebook.tab(1, text=f"  【選択中】▶ ② 【未発注・注文書なし】管理表のみ記載 一覧 ({total_missing}件)  ")
+        except Exception:
+            pass
+
+    def _build_main_table_tab(self, parent):
+        """タブ1: 納期超過・照合結果テーブルの構築"""
+        filter_frame = ttk.Frame(parent, padding=(4, 6, 4, 6))
         filter_frame.pack(fill=tk.X)
 
         ttk.Label(filter_frame, text="表示フィルタ:", font=("Meiryo UI", 9, "bold")).pack(side=tk.LEFT, padx=(0, 8))
 
         modes = [
-            ("すべての異常(超過・不一致)を表示", "ALL_DELAY"),
+            ("すべての異常(超過・不一致)", "ALL_DELAY"),
             ("管理表との不一致のみ", "UNMATCHED_ONLY"),
             ("現品確認日の超過のみ", "ACTUAL_DELAY"),
             ("請求日(伝票)の超過のみ", "INVOICE_DELAY"),
@@ -394,33 +479,32 @@ class StockMatchApp:
                 text=text,
                 variable=self.filter_mode,
                 value=mode_val,
-                command=self._refresh_table,
+                command=self._refresh_main_table,
             )
-            rb.pack(side=tk.LEFT, padx=(0, 10))
+            rb.pack(side=tk.LEFT, padx=(0, 8))
 
-        ttk.Label(filter_frame, text="キーワード検索:").pack(side=tk.LEFT, padx=(12, 4))
-        search_entry = ttk.Entry(filter_frame, textvariable=self.search_keyword, width=20)
+        ttk.Label(filter_frame, text="キーワード:").pack(side=tk.LEFT, padx=(10, 4))
+        search_entry = ttk.Entry(filter_frame, textvariable=self.search_keyword, width=18)
         search_entry.pack(side=tk.LEFT)
-        search_entry.bind("<KeyRelease>", lambda e: self._refresh_table())
+        search_entry.bind("<KeyRelease>", lambda e: self._refresh_main_table())
 
-        self.clear_col_filters_btn = ttk.Button(
+        clear_col_btn = ttk.Button(
             filter_frame,
             text="列フィルター解除 (Excel風)",
             style="Action.TButton",
-            command=self._clear_all_column_filters,
+            command=self._clear_all_main_column_filters,
         )
-        self.clear_col_filters_btn.pack(side=tk.RIGHT, padx=(6, 0))
+        clear_col_btn.pack(side=tk.RIGHT, padx=(6, 0))
 
-        self.inspect_btn = ttk.Button(
+        inspect_btn = ttk.Button(
             filter_frame,
             text="🔍 選択行の不一致・照合詳細を表示",
             style="Action.TButton",
-            command=self._open_selected_row_detail,
+            command=lambda: self._open_selected_row_detail(is_missing_tab=False),
         )
-        self.inspect_btn.pack(side=tk.RIGHT, padx=(6, 0))
+        inspect_btn.pack(side=tk.RIGHT, padx=(6, 0))
 
-        # 5. メイン結果テーブル（Treeview）
-        table_container = ttk.Frame(self.root, padding=(16, 0, 16, 12))
+        table_container = ttk.Frame(parent)
         table_container.pack(fill=tk.BOTH, expand=True)
 
         columns = (
@@ -443,10 +527,10 @@ class StockMatchApp:
             "source_info",
         )
 
-        self.tree = ttk.Treeview(table_container, columns=columns, show="headings", selectmode="browse")
+        self.tree_main = ttk.Treeview(table_container, columns=columns, show="headings", selectmode="browse")
 
-        self.col_configs = [
-            ("status_badge", "総合判定", 155, "center"),
+        self.col_configs_main = [
+            ("status_badge", "総合判定", 165, "center"),
             ("mismatch_reason", "不一致理由・照合診断", 340, "w"),
             ("req_type", "依頼区分", 80, "center"),
             ("order_no", "管理No(注文番号)", 115, "center"),
@@ -455,7 +539,7 @@ class StockMatchApp:
             ("item_name", "品名", 145, "w"),
             ("model_spec", "型番・規格(図番)", 165, "w"),
             ("qty", "数量", 60, "center"),
-            ("due_date", "注文書納期", 95, "center"),
+            ("due_date", "注文書納期", 100, "center"),
             ("days_overdue", "基準日超過", 90, "center"),
             ("actual_date", "現品確認日(物)", 110, "center"),
             ("actual_status", "現品状況", 135, "center"),
@@ -465,54 +549,131 @@ class StockMatchApp:
             ("source_info", "照合元情報", 190, "w"),
         ]
 
-        self.col_titles = {col_id: title for col_id, title, _, _ in self.col_configs}
+        self.col_titles_main = {col_id: title for col_id, title, _, _ in self.col_configs_main}
 
-        for col_id, heading_text, width, anchor in self.col_configs:
-            self._update_heading_display(col_id)
-            self.tree.column(col_id, width=width, anchor=anchor)
+        for col_id, _, width, anchor in self.col_configs_main:
+            self._update_heading_display_main(col_id)
+            self.tree_main.column(col_id, width=width, anchor=anchor)
 
-        self.tree.bind("<Button-1>", self._on_tree_click)
-        self.tree.bind("<Double-1>", self._on_tree_double_click)
+        self.tree_main.bind("<Button-1>", self._on_tree_main_click)
+        self.tree_main.bind("<Double-1>", lambda e: self._on_tree_double_click(e, is_missing_tab=False))
 
-        # 行の背景色タグ設定
-        self.tree.tag_configure("UNMATCHED", background="#ede9fe", foreground="#4c1d95")  # 紫系（不一致）
-        self.tree.tag_configure("BOTH_DELAY", background="#fee2e2", foreground="#7f1d1d")
-        self.tree.tag_configure("ACTUAL_DELAY", background="#ffedd5", foreground="#7c2d12")
-        self.tree.tag_configure("INVOICE_DELAY", background="#fef9c3", foreground="#713f12")
-        self.tree.tag_configure("OK", background="#ffffff", foreground="#334155")
+        self.tree_main.tag_configure("UNMATCHED", background="#ede9fe", foreground="#4c1d95")
+        self.tree_main.tag_configure("BOTH_DELAY", background="#fee2e2", foreground="#7f1d1d")
+        self.tree_main.tag_configure("ACTUAL_DELAY", background="#ffedd5", foreground="#7c2d12")
+        self.tree_main.tag_configure("INVOICE_DELAY", background="#fef9c3", foreground="#713f12")
+        self.tree_main.tag_configure("OK", background="#ffffff", foreground="#334155")
 
-        vsb = ttk.Scrollbar(table_container, orient="vertical", command=self.tree.yview)
-        hsb = ttk.Scrollbar(table_container, orient="horizontal", command=self.tree.xview)
-        self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        vsb = ttk.Scrollbar(table_container, orient="vertical", command=self.tree_main.yview)
+        hsb = ttk.Scrollbar(table_container, orient="horizontal", command=self.tree_main.xview)
+        self.tree_main.configure(yscrollcommand=vsb.set)
 
-        self.tree.grid(row=0, column=0, sticky="nsew")
+        self.tree_main.grid(row=0, column=0, sticky="nsew")
         vsb.grid(row=0, column=1, sticky="ns")
         hsb.grid(row=1, column=0, sticky="ew")
 
         table_container.grid_rowconfigure(0, weight=1)
         table_container.grid_columnconfigure(0, weight=1)
 
-        # 6. ステータスバー
-        self.status_var = tk.StringVar(
-            value="準備完了: ①注文品管理表ファイル と ②注文書フォルダパス を指定して「照合・遅延チェック実行」を押してください。"
+    def _build_missing_order_tab(self, parent):
+        """タブ2: 注文書未検出（管理表のみ）テーブルの構築"""
+        filter_frame = ttk.Frame(parent, padding=(4, 6, 4, 6))
+        filter_frame.pack(fill=tk.X)
+
+        ttk.Label(
+            filter_frame,
+            text="※注文品管理表に記載があるものの、注文書フォルダ内に対応する注文書Excelが存在しない未発注案件です（※AB列購入数0は自動除外）。",
+            font=("Meiryo UI", 9, "bold"),
+            foreground="#92400e",
+        ).pack(side=tk.LEFT, padx=(0, 10))
+
+        ttk.Label(filter_frame, text="キーワード:").pack(side=tk.LEFT, padx=(10, 4))
+        missing_search_entry = ttk.Entry(filter_frame, textvariable=self.missing_search_keyword, width=20)
+        missing_search_entry.pack(side=tk.LEFT)
+        missing_search_entry.bind("<KeyRelease>", lambda e: self._refresh_missing_table())
+
+        clear_missing_col_btn = ttk.Button(
+            filter_frame,
+            text="列フィルター解除 (Excel風)",
+            style="Action.TButton",
+            command=self._clear_all_missing_column_filters,
         )
-        status_bar = tk.Label(
-            self.root,
-            textvariable=self.status_var,
-            bg="#e2e8f0",
-            fg="#334155",
-            anchor="w",
-            padx=12,
-            pady=4,
-            font=("Meiryo UI", 9),
+        clear_missing_col_btn.pack(side=tk.RIGHT, padx=(6, 0))
+
+        inspect_missing_btn = ttk.Button(
+            filter_frame,
+            text="🔍 選択行の詳細を確認",
+            style="Action.TButton",
+            command=lambda: self._open_selected_row_detail(is_missing_tab=True),
         )
-        status_bar.pack(fill=tk.X, side=tk.BOTTOM)
+        inspect_missing_btn.pack(side=tk.RIGHT, padx=(6, 0))
+
+        table_container = ttk.Frame(parent)
+        table_container.pack(fill=tk.BOTH, expand=True)
+
+        columns = (
+            "status_badge",
+            "mgmt_sheet",
+            "mgmt_row",
+            "order_no",
+            "supplier",
+            "maker",
+            "item_name",
+            "model_spec",
+            "qty",
+            "due_date",
+            "actual_date",
+            "invoice_date",
+            "person",
+            "mismatch_reason",
+        )
+
+        self.tree_missing = ttk.Treeview(table_container, columns=columns, show="headings", selectmode="browse")
+
+        self.col_configs_missing = [
+            ("status_badge", "状態判定", 150, "center"),
+            ("mgmt_sheet", "管理表シート", 100, "center"),
+            ("mgmt_row", "行番号", 65, "center"),
+            ("order_no", "管理No(8桁)", 105, "center"),
+            ("supplier", "業者 / 発注先", 140, "w"),
+            ("maker", "メーカー", 100, "w"),
+            ("item_name", "品名", 160, "w"),
+            ("model_spec", "型番・規格・図番", 180, "w"),
+            ("qty", "購入数", 60, "center"),
+            ("due_date", "管理表納期", 95, "center"),
+            ("actual_date", "現品確認日", 95, "center"),
+            ("invoice_date", "請求日", 95, "center"),
+            ("person", "担当", 75, "center"),
+            ("mismatch_reason", "未検出診断内容", 320, "w"),
+        ]
+
+        self.col_titles_missing = {col_id: title for col_id, title, _, _ in self.col_configs_missing}
+
+        for col_id, _, width, anchor in self.col_configs_missing:
+            self._update_heading_display_missing(col_id)
+            self.tree_missing.column(col_id, width=width, anchor=anchor)
+
+        self.tree_missing.bind("<Button-1>", self._on_tree_missing_click)
+        self.tree_missing.bind("<Double-1>", lambda e: self._on_tree_double_click(e, is_missing_tab=True))
+
+        self.tree_missing.tag_configure("MISSING_ORDER", background="#fef3c7", foreground="#92400e")
+
+        vsb = ttk.Scrollbar(table_container, orient="vertical", command=self.tree_missing.yview)
+        hsb = ttk.Scrollbar(table_container, orient="horizontal", command=self.tree_missing.xview)
+        self.tree_missing.configure(yscrollcommand=vsb.set)
+
+        self.tree_missing.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        hsb.grid(row=1, column=0, sticky="ew")
+
+        table_container.grid_rowconfigure(0, weight=1)
+        table_container.grid_columnconfigure(0, weight=1)
 
     def _create_kpi_card(
         self, parent, title: str, value_var: tk.StringVar, fg_color: str, bg_color: str
     ) -> tk.Frame:
         """KPIサマリー表示用カードの生成"""
-        card = tk.Frame(parent, bg=bg_color, highlightbackground="#cbd5e1", highlightthickness=1, padx=10, pady=8)
+        card = tk.Frame(parent, bg=bg_color, highlightbackground="#cbd5e1", highlightthickness=1, padx=8, pady=8)
         lbl_title = tk.Label(card, text=title, bg=bg_color, fg=fg_color, font=("Meiryo UI", 8, "bold"), anchor="w")
         lbl_title.pack(fill=tk.X)
         lbl_val = tk.Label(
@@ -522,52 +683,53 @@ class StockMatchApp:
         return card
 
     # =========================================================================
-    # 不一致・照合詳細の比較インスペクタ（ダブルクリック / ボタン表示）
+    # 不一致・照合詳細の比較インスペクタ
     # =========================================================================
-    def _on_tree_double_click(self, event):
-        """データ行のダブルクリックで詳細比較ウィンドウを表示"""
-        region = self.tree.identify_region(event.x, event.y)
+    def _on_tree_double_click(self, event, is_missing_tab: bool):
+        tree = self.tree_missing if is_missing_tab else self.tree_main
+        region = tree.identify_region(event.x, event.y)
         if region == "heading":
             return
-        self._open_selected_row_detail()
+        self._open_selected_row_detail(is_missing_tab=is_missing_tab)
 
-    def _open_selected_row_detail(self):
-        """現在選択されている行の不一致理由・項目比較ダイアログを開く"""
-        sel = self.tree.selection()
+    def _open_selected_row_detail(self, is_missing_tab: bool):
+        """選択されている行の不一致理由・項目比較ダイアログを開く"""
+        tree = self.tree_missing if is_missing_tab else self.tree_main
+        records = self.missing_order_records if is_missing_tab else self.analyzed_records
+
+        sel = tree.selection()
         if not sel:
             messagebox.showinfo("行未選択", "一覧テーブルから確認したい行をクリックして選択してください。")
             return
 
         item_id = sel[0]
-        rec_idx_str = item_id.replace("rec_", "")
+        prefix = "mis_" if is_missing_tab else "rec_"
+        rec_idx_str = item_id.replace(prefix, "")
         if not rec_idx_str.isdigit():
             return
         rec_idx = int(rec_idx_str)
-        if not (0 <= rec_idx < len(self.analyzed_records)):
+        if not (0 <= rec_idx < len(records)):
             return
 
-        rec = self.analyzed_records[rec_idx]
+        rec = records[rec_idx]
         diag = rec.get("diagnostic_data", {})
 
         win = tk.Toplevel(self.root)
-        win.title(f"不一致・照合詳細比較 — 管理No: {rec['order_no']} / 品名: {rec['item_name']}")
+        win.title(f"詳細情報 — 管理No: {rec['order_no']} / 品名: {rec['item_name']}")
         self._apply_window_icon(win)
         win.geometry("920x660")
         win.minsize(760, 520)
         win.transient(self.root)
 
-        top_banner = tk.Frame(
-            win,
-            bg="#4c1d95" if rec.get("is_unmatched") else "#1e293b",
-            padx=14,
-            pady=10,
-        )
+        banner_bg = "#92400e" if is_missing_tab else ("#4c1d95" if rec.get("is_unmatched") else "#1e293b")
+
+        top_banner = tk.Frame(win, bg=banner_bg, padx=14, pady=10)
         top_banner.pack(fill=tk.X)
 
         tk.Label(
             top_banner,
             text=f"判定: {rec['status_badge']}   |   {rec['mismatch_reason']}",
-            bg=top_banner["bg"],
+            bg=banner_bg,
             fg="#ffffff",
             font=("Meiryo UI", 10, "bold"),
             anchor="w",
@@ -576,10 +738,9 @@ class StockMatchApp:
         body = ttk.Frame(win, padding=14)
         body.pack(fill=tk.BOTH, expand=True)
 
-        # 項目別比較テーブル
         lbl_cmp = ttk.Label(
             body,
-            text="■ 注文書 と 注文品管理表（最有力候補または照合行）の項目別比較（※単価・金額は照合対象外）",
+            text="■ 注文書 と 注文品管理表 の項目別詳細（単価・金額は照合対象外）",
             font=("Meiryo UI", 9, "bold"),
         )
         lbl_cmp.pack(anchor="w", pady=(0, 6))
@@ -588,8 +749,8 @@ class StockMatchApp:
         cmp_tree = ttk.Treeview(body, columns=cmp_cols, show="headings", height=10)
         cmp_tree.heading("field", text="比較項目")
         cmp_tree.heading("order_val", text="注文書の記載内容")
-        cmp_tree.heading("mgmt_val", text="注文品管理表の記載内容 (最有力候補)")
-        cmp_tree.heading("judge", text="照合判定 (単価・金額除外)")
+        cmp_tree.heading("mgmt_val", text="注文品管理表の記載内容")
+        cmp_tree.heading("judge", text="照合判定")
 
         cmp_tree.column("field", width=160, anchor="w")
         cmp_tree.column("order_val", width=285, anchor="w")
@@ -608,10 +769,9 @@ class StockMatchApp:
 
         cmp_tree.pack(fill=tk.X, pady=(0, 12))
 
-        # 詳細診断レポートテキスト
         lbl_rep = ttk.Label(
             body,
-            text="■ 詳細診断レポート（なぜ不一致になったか / 管理表側の検索状況）",
+            text="■ 詳細診断レポート",
             font=("Meiryo UI", 9, "bold"),
         )
         lbl_rep.pack(anchor="w", pady=(0, 6))
@@ -633,10 +793,9 @@ class StockMatchApp:
         ttk.Button(btn_bar, text="閉じる", style="Primary.TButton", command=win.destroy).pack(side=tk.RIGHT)
 
     # =========================================================================
-    # ヘルプ・ガイドダイアログ（リッチテキスト＆タブ形式で視認性を大幅向上）
+    # ヘルプ・ガイドダイアログ
     # =========================================================================
     def _configure_rich_text_tags(self, txt: tk.Text):
-        """ヘルプ表示用のTextウィジェットに見出し・強調・ボックス等のスタイルタグを設定"""
         txt.tag_configure(
             "h1",
             font=("Meiryo UI", 12, "bold"),
@@ -708,7 +867,6 @@ class StockMatchApp:
         )
 
     def _show_help_guide(self, tab_index: int = 0):
-        """タブ形式で整理された見やすいヘルプ・操作ガイドウィンドウを表示"""
         win = tk.Toplevel(self.root)
         win.title("StockMatch_Miya-v1.0.0 - ヘルプ＆操作ガイド")
         self._apply_window_icon(win)
@@ -716,7 +874,6 @@ class StockMatchApp:
         win.minsize(720, 520)
         win.transient(self.root)
 
-        # 上部ヘッダーバナー
         banner = tk.Frame(win, bg="#1e293b", padx=18, pady=12)
         banner.pack(fill=tk.X)
         tk.Label(
@@ -729,104 +886,83 @@ class StockMatchApp:
         ).pack(fill=tk.X)
         tk.Label(
             banner,
-            text="注文書フォルダと注文品管理表の自動照合・納期超過チェック・不一致診断ツールの使い方",
+            text="注文書と注文品管理表の双方向自動照合・タブ分離一覧表示・納期超過チェックツールの使い方",
             bg="#1e293b",
             fg="#cbd5e1",
             font=("Meiryo UI", 9),
             anchor="w",
         ).pack(fill=tk.X, pady=(2, 0))
 
-        # タブコントロール（Notebook）
         notebook = ttk.Notebook(win)
         notebook.pack(fill=tk.BOTH, expand=True, padx=14, pady=(12, 6))
 
-        # --- タブ1: 基本的な使い方 ---
         tab1 = ttk.Frame(notebook, padding=8)
         notebook.add(tab1, text="  ① 基本的な使い方・設定  ")
         txt1 = self._create_scrollable_text(tab1)
 
         txt1.insert(tk.END, "  STEP 1 : ファイルとフォルダの指定  \n", "h1")
         txt1.insert(tk.END, "① 注文品管理表ファイルの選択\n", "h2")
-        txt1.insert(tk.END, "・『ファイルを参照...』ボタンから、基準となる管理表Excel（例: 注文品管理表.xlsx）を選択します。\n", "body")
-        txt1.insert(tk.END, "・管理表に登録されている「管理No（8桁）」を自動的に収集し、その管理Noに一致する注文書のみを照合対象とします。\n", "point")
-        txt1.insert(tk.END, "・管理表の15列目（O列）付近にある個別の「品名」列を正確に参照します（D列の案件名「品名、ライン名等」とは混同しません）。\n", "sub_note")
+        txt1.insert(tk.END, "・『ファイルを参照...』ボタンから管理表Excel（例: 注文品管理表.xlsx）を選択します。\n", "body")
+        txt1.insert(tk.END, "・管理表に登録されているすべての「管理No（8桁）」を自動抽出し、一致する注文書を照合します。\n", "point")
+        txt1.insert(tk.END, "・管理表のAB列（28列目）にある「購入数」列を正確に参照します。\n", "sub_note")
 
         txt1.insert(tk.END, "② 注文書フォルダパスの選択（サブフォルダ自動対応）\n", "h2")
-        txt1.insert(tk.END, "・『フォルダを参照...』ボタンから、注文書Excelが入っている親フォルダを選択します。\n", "body")
-        txt1.insert(tk.END, "★【サブフォルダ一括探索】指定したフォルダ直下だけでなく、配下のすべてのサブフォルダ（月別・案件別フォルダ等）も自動的に走査します。\n", "point")
-        txt1.insert(tk.END, "★【管理表にある管理Noのみ照合】注文書ファイル名の先頭8桁（管理No）が注文品管理表に存在するファイルのみを照合対象とし、管理表にない管理Noのファイルは自動的にスキップします。\n", "point")
-        txt1.insert(tk.END, "★【見積依頼書の自動除外】Excelシートの2行目を自動チェックし、「見積」と書かれた見積依頼書は除外して「注文」のシートのみを照合します。\n", "point")
+        txt1.insert(tk.END, "・『フォルダを参照...』ボタンから注文書Excelが保管されている親フォルダを選択します。\n", "body")
+        txt1.insert(tk.END, "★【サブフォルダ一括探索】指定したフォルダ直下だけでなく、配下の全サブフォルダ内も漏れなく自動スキャンします。\n", "point")
+        txt1.insert(tk.END, "★【見積依頼書の自動除外】Excelシートの2行目を自動検査し、「見積」の記載があるシートは除外して「注文」シートのみを照合します。\n", "point")
 
         txt1.insert(tk.END, "\n  STEP 2 : 判定基準日の設定とパス保存  \n", "h1")
         txt1.insert(tk.END, "■ 判定基準日（今日）と設定の保存\n", "h2")
-        txt1.insert(tk.END, "・納期超過の基準となる日付（初期値は当日）を YYYY-MM-DD 形式で指定します。\n", "body")
-        txt1.insert(tk.END, "・『パス設定を保存』ボタンを押すと、「注文品管理表ファイルパス」「注文書フォルダパス」がアプリと同じフォルダ内の config.json に保存され、次回起動時に自動で復元されます。\n", "body")
-        txt1.insert(tk.END, f"  （現在の保存先パス: {self.CONFIG_FILE_PATH}）\n", "sub_note")
+        txt1.insert(tk.END, "・納期超過の判定基準日（初期値は今日）を YYYY-MM-DD 形式で指定します。\n", "body")
+        txt1.insert(tk.END, "・『パス設定を保存』ボタンを押すと、管理表パス・注文書フォルダパスがアプリフォルダ内の config.json に保存されます。\n", "body")
 
-        txt1.insert(tk.END, "\n  STEP 3 : 照合実行と結果の確認  \n", "h1")
-        txt1.insert(tk.END, "■ 『照合・遅延チェック実行』ボタン（または F5 キー）\n", "h2")
-        txt1.insert(tk.END, "・ボタンを押すと照合を開始し、進捗バーでリアルタイムに進行状況を表示します。\n", "body")
-        txt1.insert(tk.END, "・一覧の行を【ダブルクリック】すると、注文書と管理表の項目を左右に並べた「詳細比較ウィンドウ」が開き、不一致箇所が一目で分かります。\n", "point")
+        txt1.insert(tk.END, "\n  STEP 3 : 2つの独立タブによる確認  \n", "h1")
+        txt1.insert(tk.END, "■ 照合実行後の2系統タブ表示\n", "h2")
+        txt1.insert(tk.END, "・『① 納期超過・照合結果 一覧』タブ: 注文書由来の納期遅延・確認状況、管理表未記載案件を確認できます。\n", "point")
+        txt1.insert(tk.END, "・『② 【未発注・注文書なし】管理表のみ記載 一覧』タブ: 管理表に記載があるのに注文書が未手配の明細を独立して一覧確認できます。\n", "point")
+        txt1.insert(tk.END, "★【購入数0の自動除外】管理表AB列の購入数が『0』の項目（在庫充当品等）は未発注一覧から自動除外されます。\n", "point")
+        txt1.insert(tk.END, "・一覧の行を【ダブルクリック】すると項目別比較ウィンドウが開きます。\n", "body")
         txt1.configure(state="disabled")
 
-        # --- タブ2: 照合・判定ロジックの詳細 ---
         tab2 = ttk.Frame(notebook, padding=8)
-        notebook.add(tab2, text="  ② 照合ルール・不一致診断の仕組み  ")
+        notebook.add(tab2, text="  ② 照合ルール・タブ分離の仕組み  ")
         txt2 = self._create_scrollable_text(tab2)
 
-        txt2.insert(tk.END, "  1. 注文書と管理表の照合ルール（高精度マッチング）  \n", "h1")
-        txt2.insert(tk.END, "■ 注文品管理表にある管理No（8桁）の項目のみを照合\n", "h2")
-        txt2.insert(tk.END, "・まず注文品管理表を読み込み、管理表内に記載されているすべての管理No（8桁）をリストアップします。\n", "body")
-        txt2.insert(tk.END, "・注文書フォルダ内のファイルのうち、管理表に存在する管理Noと一致する注文書のみを抽出して1対1照合を行います。\n", "point")
+        txt2.insert(tk.END, "  1. 注文書未検出（管理表のみ）の独立表示  \n", "h1")
+        txt2.insert(tk.END, "■ タブ②『【未発注・注文書なし】管理表のみ記載 一覧』\n", "h2")
+        txt2.insert(tk.END, "・管理表に登録されているが、注文書Excelがフォルダ内に存在しない未発注案件を完全に別枠で集約します。\n", "point")
+        txt2.insert(tk.END, "★【AB列購入数0の自動除外】管理表のAB列（28列目）「購入数」が『0』の項目は未発注一覧から自動的に除外されます。\n", "point")
+        txt2.insert(tk.END, "・メインの納期照合一覧に混ざらないため、注文品管理の作業効率が大幅に向上します。\n", "body")
 
-        txt2.insert(tk.END, "■ 単価・金額は照合対象から除外（誤判定の防止）\n", "h2")
-        txt2.insert(tk.END, "★【重要】管理表側で単価が空欄だったり金額が 0 円になっているケースや、税抜/税込の表記差による誤った不一致を防ぐため、「単価」と「金額」は照合判定から完全に除外しています。\n", "point")
-        txt2.insert(tk.END, "・照合に使用する項目は『①管理No(8桁)』『②図面番号』『③品番』『④品名(O列)』『⑤仕様・規格』『⑥発注先・メーカー』『⑦購入数(数量)』の7項目です。\n", "body")
+        txt2.insert(tk.END, "\n  2. 高精度マッチングの基本ルール  \n", "h1")
+        txt2.insert(tk.END, "■ 単価・金額は照合対象外（誤判定の完全防止）\n", "h2")
+        txt2.insert(tk.END, "★【重要】単価未入力・金額0円や消費税表記の違いによる誤判定を防ぐため、単価・金額は照合計算から完全に除外しています。\n", "point")
+        txt2.insert(tk.END, "・照合は『①管理No(8桁)』『②図面番号』『③品番』『④品名』『⑤仕様・規格』『⑥発注先・メーカー』『⑦購入数(AB列)』で行われます。\n", "body")
 
-        txt2.insert(tk.END, "■ 購入依頼（購依）と外注依頼（外依）の自動判別\n", "h2")
-        txt2.insert(tk.END, "・注文書ファイル名に「購依」が含まれる場合は管理表の『購入品リスト』を優先参照し、「外依」が含まれる場合は『外注加工リスト』を優先参照します。\n", "body")
-
-        txt2.insert(tk.END, "■ 全体最適マッチング（別業者の誤消費ブロック）\n", "h2")
-        txt2.insert(tk.END, "・発注先やメーカー名の一致を評価し、別会社の注文書が他社の管理表行を誤って先取り消費してしまう現象を防止しています。\n", "body")
-        txt2.insert(tk.END, "・同じ管理No内の全明細と管理表行のスコアを全体計算し、最も整合性の高い1対1ペアを自動決定します。\n", "body")
-
-        txt2.insert(tk.END, "\n  2. 不一致理由・照合診断の見方  \n", "h1")
-        txt2.insert(tk.END, "■ 【項目不一致 / 明細未記載】と表示される場合\n", "h2")
-        txt2.insert(tk.END, "・管理Noは管理表に存在するものの、該当する図番・品番・品名・仕様・数量の明細行が管理表に見つからない（または食い違っている）状態です。\n", "warn")
-        txt2.insert(tk.END, "・同じ管理No内で最も近い候補行を特定し、「どの項目が一致していて、どの項目が違ったのか（例: 一致:図番,品名 / 不一致:品番）」を一覧に表示します。\n", "body")
-
-        txt2.insert(tk.END, "\n  3. 現品確認日（物：A列）と請求日（伝票：AI列）の超過判定  \n", "h1")
-        txt2.insert(tk.END, "■ 現品確認日（管理表 A列）と 請求日（管理表 AI列）\n", "h2")
-        txt2.insert(tk.END, "・セルに日付または確認済みの文字が入力されていれば『確認済 (正常)』と判定します。\n", "badge_ok")
-        txt2.insert(tk.END, "・空欄（未入力）のまま注文書納期が判定基準日を過ぎている場合は『未確認 (超過X日)』として警告表示します。\n", "warn")
+        txt2.insert(tk.END, "\n  3. 現品確認日（A列）と請求日（AI列）の超過判定  \n", "h1")
+        txt2.insert(tk.END, "■ 現品確認日（物）と 請求日（伝票）\n", "h2")
+        txt2.insert(tk.END, "・日付または確認済の記載があれば『確認済 (正常)』と判定します。\n", "badge_ok")
+        txt2.insert(tk.END, "・空欄のまま納期が判定基準日を過ぎている場合は『未確認 (超過X日)』として警告表示します。\n", "warn")
         txt2.configure(state="disabled")
 
-        # --- タブ3: フィルター・ショートカット一覧 ---
         tab3 = ttk.Frame(notebook, padding=8)
         notebook.add(tab3, text="  ③ 便利機能・ショートカットキー  ")
         txt3 = self._create_scrollable_text(tab3)
 
         txt3.insert(tk.END, "  Excel風 列フィルター＆ソート機能  \n", "h1")
         txt3.insert(tk.END, "■ 列ヘッダーをクリックして絞り込み・並べ替え\n", "h2")
-        txt3.insert(tk.END, "・一覧テーブルの各列タイトル（総合判定、依頼区分、管理No、発注先、メーカー 等）をクリックすると、Excelと同じフィルターメニューが開きます。\n", "body")
-        txt3.insert(tk.END, "・値の検索やチェックボックスで特定の業者・管理No・判定結果だけに絞り込むことができます。\n", "body")
-        txt3.insert(tk.END, "・フィルター適用中の列には『 [▼] 』マークが付きます。画面右上の『列フィルター解除 (Excel風)』ボタンでいつでも全解除できます。\n", "point")
-
-        txt3.insert(tk.END, "\n  行ダブルクリック詳細比較（インスペクタ機能）  \n", "h1")
-        txt3.insert(tk.END, "■ 注文書と管理表の値を左右に並べて比較\n", "h2")
-        txt3.insert(tk.END, "・一覧の任意の行を【ダブルクリック】（または選択して『🔍 選択行の不一致・照合詳細を表示』をクリック）すると、項目別の比較画面が開きます。\n", "body")
-        txt3.insert(tk.END, "・管理No、図面番号、品番、品名、仕様、メーカー、購入数の7項目について「◎完全一致 / △部分一致 / ×不一致」が色分け表示されます。\n", "body")
+        txt3.insert(tk.END, "・両タブそれぞれで独立して列ごとのExcel風フィルターメニューが開きます。\n", "body")
+        txt3.insert(tk.END, "・値の検索やチェックボックスで特定の業者・管理Noだけに絞り込めます。\n", "body")
 
         txt3.insert(tk.END, "\n  キーボードショートカット一覧  \n", "h1")
         txt3.insert(tk.END, "・ F1 キー        :  このヘルプ＆操作ガイドを開く\n", "body")
         txt3.insert(tk.END, "・ F5 キー        :  照合・遅延チェックを実行する\n", "body")
         txt3.insert(tk.END, "・ Ctrl + O       :  ① 注文品管理表ファイルを選択する\n", "body")
         txt3.insert(tk.END, "・ Ctrl + D       :  ② 注文書フォルダを選択する\n", "body")
-        txt3.insert(tk.END, "・ Ctrl + S       :  検査結果を CSV / Excel ファイルに出力する\n", "body")
+        txt3.insert(tk.END, "・ Ctrl + S       :  検査結果を CSV / Excel ファイルに出力する (2シート出力)\n", "body")
         txt3.insert(tk.END, "・ Alt + F4       :  アプリケーションを終了する\n", "body")
         txt3.configure(state="disabled")
 
-        # 指定タブを選択状態にする
         try:
             notebook.select(tab_index)
         except Exception:
@@ -836,59 +972,31 @@ class StockMatchApp:
         btn_box.pack(fill=tk.X)
         ttk.Button(btn_box, text="閉じる", style="Primary.TButton", command=win.destroy).pack(side=tk.RIGHT)
 
-    def _create_scrollable_text(self, parent) -> tk.Text:
-        """スクロールバー付きの整形済みTextウィジェットを生成"""
-        frame = ttk.Frame(parent)
-        frame.pack(fill=tk.BOTH, expand=True)
-
-        txt = tk.Text(
-            frame,
-            wrap="word",
-            font=("Meiryo UI", 9),
-            bg="#ffffff",
-            fg="#1e293b",
-            padx=14,
-            pady=12,
-            relief="solid",
-            borderwidth=1,
-        )
-        vsb = ttk.Scrollbar(frame, orient="vertical", command=txt.yview)
-        txt.configure(yscrollcommand=vsb.set)
-        txt.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        vsb.pack(side=tk.RIGHT, fill=tk.Y)
-
-        self._configure_rich_text_tags(txt)
-        return txt
-
     def _show_about(self):
-        """バージョン情報ダイアログの表示"""
         messagebox.showinfo(
             "バージョン情報",
             "StockMatch_Miya-v1.0.0\n"
-            "注文品納期 × 管理表（現品確認日・請求日）超過照合システム\n\n"
-            "・照合対象: 注文品管理表に登録されている管理No(8桁)と一致する注文書のみ\n"
+            "注文書 ⇔ 管理表 双方向照合・現品/請求超過システム\n\n"
+            "・タブ完全分離: 「①納期超過・照合一覧」と「②注文書未検出(管理表のみ)」を別一覧で確認可能\n"
+            "・未発注一覧フィルタ: 注文品管理表のAB列「購入数」が0の明細は自動除外\n"
             "・照合方式: 全体最適1対1マッチング（※単価・金額は照合対象外）\n"
             "・自動分別: 2行目の記載により「見積依頼書」を除外し「注文書」のみ照合\n"
-            "・品名参照: 管理表の個別「品名」列（O列）を正確に参照\n"
+            "・品名参照: 管理表の個別「品名」列（T列/O列）を正確に参照\n"
             "・探索範囲: 指定フォルダおよび配下の全サブフォルダを一括検査\n"
-            f"・設定保存先: {self.CONFIG_FILE_PATH}\n"
-            f"・アイコン設定: {self.ICON_FILE_PATH}\n\n"
+            f"・設定保存先: {self.CONFIG_FILE_PATH}\n\n"
             "© StockMatch_Miya System All Rights Reserved.",
         )
 
     def _open_config_folder(self):
-        """アプリ配置フォルダをエクスプローラーで開く"""
-        target_dir = self.APP_DIR
         try:
-            os.startfile(target_dir)
+            os.startfile(self.APP_DIR)
         except Exception as e:
-            messagebox.showinfo("フォルダパス", f"アプリ配置フォルダ:\n{target_dir}\n\n({e})")
+            messagebox.showinfo("フォルダパス", f"アプリ配置フォルダ:\n{self.APP_DIR}\n\n({e})")
 
     # =========================================================================
-    # 設定ファイル（アプリ配置フォルダ直下 config.json）
+    # 設定ファイル処理
     # =========================================================================
     def _is_strictly_allowed_path(self, target_filepath: str) -> bool:
-        """対象パスがアプリフォルダ直下の config.json であるかを検証"""
         try:
             norm_target = os.path.normcase(os.path.realpath(os.path.abspath(target_filepath)))
             norm_allowed = os.path.normcase(os.path.realpath(os.path.abspath(self.CONFIG_FILE_PATH)))
@@ -897,7 +1005,6 @@ class StockMatchApp:
             return False
 
     def _save_config(self, show_msg: bool = False):
-        """指定された管理表ファイルパス、注文書フォルダパスをアプリフォルダ内の config.json に保存"""
         mgmt = self.mgmt_file_path.get().strip().strip('"')
         order = self.order_dir_path.get().strip().strip('"')
 
@@ -919,20 +1026,15 @@ class StockMatchApp:
             with open(target_file, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
             if show_msg:
-                messagebox.showinfo(
-                    "設定保存完了",
-                    f"パス設定を保存しました:\n{target_file}",
-                )
+                messagebox.showinfo("設定保存完了", f"パス設定を保存しました:\n{target_file}")
         except Exception as e:
             if show_msg:
                 messagebox.showerror("保存エラー", f"設定ファイルへの保存に失敗しました:\n{e}")
 
     def _save_config_manual(self):
-        """「パス設定を保存」ボタン押下時の処理"""
         self._save_config(show_msg=True)
 
     def _load_config_and_autoload(self):
-        """起動時にアプリフォルダ直下の config.json を読み込み"""
         cfg_path = self.CONFIG_FILE_PATH
         if os.path.exists(cfg_path) and self._is_strictly_allowed_path(cfg_path):
             try:
@@ -951,7 +1053,6 @@ class StockMatchApp:
             self._autoload_default_files()
 
     def _autoload_default_files(self):
-        """カレントディレクトリにある管理表ファイルと注文書フォルダを自動補完"""
         cwd = self.APP_DIR
         xlsx_files = [
             f for f in os.listdir(cwd) if f.lower().endswith((".xlsx", ".xlsm")) and not f.startswith("~$")
@@ -968,7 +1069,6 @@ class StockMatchApp:
                 self.order_dir_path.set(cwd)
 
     def _select_mgmt_file(self):
-        """① 注文品管理表ファイル（単一ファイル）の選択ダイアログ"""
         initial_dir = os.path.dirname(self.mgmt_file_path.get().strip().strip('"'))
         if not initial_dir or not os.path.isdir(initial_dir):
             initial_dir = self.APP_DIR
@@ -982,7 +1082,6 @@ class StockMatchApp:
             self.mgmt_file_path.set(path)
 
     def _select_order_dir(self):
-        """② 注文書フォルダの選択ダイアログ"""
         initial_dir = self.order_dir_path.get().strip().strip('"')
         if not initial_dir or not os.path.isdir(initial_dir):
             initial_dir = self.APP_DIR
@@ -991,16 +1090,11 @@ class StockMatchApp:
             self.order_dir_path.set(folder)
 
     def _report_progress(self, percent: float, message: str):
-        """バックグラウンドスレッドから進捗バーとステータスメッセージを更新キューへ送る"""
         self.ui_queue.put(("PROGRESS", (percent, message)))
 
     def _collect_valid_order_files(
         self, folder_path: str, mgmt_filepath: str, valid_mgmt_order_nos: set[str], progress_cb=None
     ) -> tuple[list[dict], int, int]:
-        """
-        注文書フォルダ内（サブフォルダ含む全階層）を再帰的に走査し、
-        注文品管理表に存在する管理No（valid_mgmt_order_nos）と一致する注文書明細のみを抽出する。
-        """
         order_items = []
         valid_file_count = 0
         ignored_file_count = 0
@@ -1043,7 +1137,6 @@ class StockMatchApp:
                 ignored_file_count += 1
                 continue
 
-            # ファイル名の先頭8桁から管理Noを抽出し、注文品管理表に存在しない管理Noのファイルは即座にスキップ
             norm_entry = unicodedata.normalize("NFKC", entry_name)
             m_pre = re.match(r"^\s*(\d{8})", norm_entry)
             if m_pre:
@@ -1069,7 +1162,6 @@ class StockMatchApp:
     # =========================================================================
     @staticmethod
     def _parse_flexible_date(val, default_year: int = None) -> datetime.date | None:
-        """Excel内の多様な日付表現を安全に datetime.date に変換"""
         if val is None or pd.isna(val):
             return None
 
@@ -1129,7 +1221,6 @@ class StockMatchApp:
 
     @staticmethod
     def _is_filled_confirmation(raw_val) -> bool:
-        """現品確認日や請求日のセルに記入があるか判定"""
         if raw_val is None or pd.isna(raw_val):
             return False
         s = str(raw_val).strip()
@@ -1141,7 +1232,6 @@ class StockMatchApp:
 
     @staticmethod
     def _normalize_key(text: str) -> str:
-        """照合比較用に文字列を正規化（スペース・中点・記号・法人格を除去、×やxも統一）"""
         if not text or pd.isna(text):
             return ""
         s = str(text).strip()
@@ -1156,7 +1246,6 @@ class StockMatchApp:
 
     @staticmethod
     def _clean_company_name(text: str) -> str:
-        """会社名比較用の簡易正規化（法人格や不要記号を除去）"""
         if not text:
             return ""
         s = unicodedata.normalize("NFKC", str(text)).strip()
@@ -1167,7 +1256,6 @@ class StockMatchApp:
 
     @classmethod
     def _make_bigrams(cls, norm_str: str) -> frozenset:
-        """2文字N-gram集合を作成"""
         if len(norm_str) < 2:
             return frozenset()
         return frozenset(norm_str[i : i + 2] for i in range(len(norm_str) - 1))
@@ -1176,7 +1264,6 @@ class StockMatchApp:
     def _fast_similarity(
         cls, na: str, bg_a: frozenset, nb: str, bg_b: frozenset
     ) -> float:
-        """高速あいまい一致度計算"""
         if not na or not nb:
             return 0.0
         if na == nb:
@@ -1200,7 +1287,6 @@ class StockMatchApp:
 
     @staticmethod
     def _extract_Leading_number(text: str) -> str:
-        """数値部分を抽出して正規化"""
         if text is None or pd.isna(text):
             return ""
         s = str(text).strip()
@@ -1216,8 +1302,26 @@ class StockMatchApp:
         return val_str
 
     @staticmethod
+    def _is_zero_quantity(qty_str: str) -> bool:
+        """購入数・数量文字列が 0 または 0.0、全角０等であるかを確実に判定する"""
+        if qty_str is None or pd.isna(qty_str):
+            return False
+        clean = unicodedata.normalize("NFKC", str(qty_str)).strip()
+        if clean in ("0", "0.0", "０", "0個", "0台", "0本", "0式", "0組", "0ヶ"):
+            return True
+        m = re.match(r"^0+(?:\.0+)?(?:\D.*)?$", clean)
+        if m:
+            return True
+        try:
+            num_match = re.search(r"^(\d+(?:\.\d+)?)", clean)
+            if num_match and float(num_match.group(1)) == 0.0:
+                return True
+        except Exception:
+            pass
+        return False
+
+    @staticmethod
     def _clean_cell_str(v) -> str:
-        """セル値をクリーンな文字列に変換"""
         if v is None or pd.isna(v):
             return ""
         s = str(v).strip()
@@ -1229,7 +1333,6 @@ class StockMatchApp:
 
     @staticmethod
     def _extract_8digit_no(text: str) -> str:
-        """文字列から8桁の管理Noを抽出（ハイフン区切り等にも対応）"""
         if not text:
             return ""
         s = unicodedata.normalize("NFKC", str(text)).strip()
@@ -1245,13 +1348,9 @@ class StockMatchApp:
         return m2.group(1) if m2 else ""
 
     # =========================================================================
-    # Excel解析ロジック（①注文品管理表 & ②注文書）
+    # Excel解析ロジック
     # =========================================================================
     def _parse_management_book(self, filepath: str, progress_cb=None) -> list[dict]:
-        """
-        『注文品管理表.xlsx』の全シートを高速走査
-        ※「品名、ライン名等」（案件名）ではなく、個別の「品名」列（15列目/O列）を正確に品名として取得します。
-        """
         wb = openpyxl.load_workbook(filepath, data_only=True, read_only=True)
         mgmt_rows = []
         sheet_names = wb.sheetnames
@@ -1268,10 +1367,13 @@ class StockMatchApp:
             s_clean = sheet_name.replace(" ", "")
             if any(k in s_clean for k in ("購入品", "購入", "購入依頼")):
                 sheet_cat = "PURCHASE"
+                sheet_cat_label = "購入依頼"
             elif any(k in s_clean for k in ("外注加工", "外注", "外依")):
                 sheet_cat = "OUTSOURCE"
+                sheet_cat_label = "外注依頼"
             else:
                 sheet_cat = "OTHER"
+                sheet_cat_label = "管理表品目"
 
             sheet_default_order_no = self._extract_8digit_no(sheet_name)
 
@@ -1293,6 +1395,7 @@ class StockMatchApp:
             header_pos_in_list = None
             col_map = {}
 
+            # ヘッダー探索（先頭18行以内）
             for list_i, (r_idx, row_tuple) in enumerate(raw_rows[:18]):
                 if r_idx > 25:
                     break
@@ -1309,8 +1412,8 @@ class StockMatchApp:
                     row_vals.append((c_idx, combined, re.sub(r"\s+", "", v_curr)))
 
                 joined = " ".join(v[1] for v in row_vals)
-                if "品名" in joined and (
-                    "図面" in joined or "品番" in joined or "仕様" in joined or "現品" in joined or "メーカー" in joined
+                if ("品名" in joined or "購入数" in joined) and (
+                    "図面" in joined or "品番" in joined or "仕様" in joined or "現品" in joined or "メーカー" in joined or "管理" in joined
                 ):
                     header_pos_in_list = list_i
                     for c_idx, v_comb, v_curr in row_vals:
@@ -1336,7 +1439,8 @@ class StockMatchApp:
                         elif "ライン名" in v_comb or "品名、ライン名" in v_comb or "品名・ライン名" in v_comb:
                             col_map["line_name"] = c_idx
                         elif ("品名" in v_comb or "名称" in v_comb or "商品名" in v_comb) and "品名、ライン名" not in v_comb:
-                            if c_idx >= 10:
+                            # T列(20列目)またはO列(15列目)付近の個別品名
+                            if c_idx >= 15:
                                 col_map["item_name"] = c_idx
                             elif "item_name" not in col_map:
                                 col_map["item_name"] = c_idx
@@ -1344,7 +1448,14 @@ class StockMatchApp:
                             col_map.setdefault("maker", c_idx)
                         elif "仕様" in v_comb or "規格" in v_comb or "材質" in v_comb or "寸法" in v_comb:
                             col_map.setdefault("spec", c_idx)
-                        elif "購入数" in v_comb or "発注数" in v_comb or v_curr in ("数量", "数", "購入数", "必要数"):
+                        elif "購入数" in v_comb or v_curr == "購入数":
+                            # ★ AB列（28列目付近）の購入数を最優先で設定
+                            col_map["qty"] = c_idx
+                        elif "必要数" in v_comb or v_curr == "必要数":
+                            col_map.setdefault("req_qty", c_idx)
+                        elif "在庫数" in v_comb or v_curr == "在庫数":
+                            col_map.setdefault("stock_qty", c_idx)
+                        elif ("数量" in v_comb or v_curr in ("数", "発注数")) and "購入数" not in col_map:
                             col_map.setdefault("qty", c_idx)
                         elif "単価" in v_curr and "金額" not in v_curr and "必要数" not in v_curr:
                             col_map.setdefault("unit_price", c_idx)
@@ -1359,49 +1470,17 @@ class StockMatchApp:
             if header_pos_in_list is None:
                 continue
 
-            if "drawing_no" in col_map:
-                base_c = col_map["drawing_no"]
-                col_map.setdefault("part_no", base_c + 1)
-                col_map.setdefault("item_name", base_c + 2)
-                col_map.setdefault("maker", base_c + 3)
-                col_map.setdefault("spec", base_c + 4)
-                col_map.setdefault("qty", base_c + 5)
-                col_map.setdefault("unit_price", base_c + 6)
-                col_map.setdefault("amount", base_c + 7)
-            elif "part_no" in col_map:
-                pc = col_map["part_no"]
-                col_map.setdefault("drawing_no", pc - 1)
-                col_map.setdefault("item_name", pc + 1)
-                col_map.setdefault("maker", pc + 2)
-                col_map.setdefault("spec", pc + 3)
-                col_map.setdefault("qty", pc + 4)
-                col_map.setdefault("unit_price", pc + 5)
-                col_map.setdefault("amount", pc + 6)
-
-            if col_map.get("item_name") and col_map["item_name"] < 10 and col_map.get("drawing_no"):
-                col_map["item_name"] = col_map["drawing_no"] + 2
-
-            col_map.setdefault("actual_date", 1)
-            col_map.setdefault("invoice_date", 35)
+            # AB列（28列目）が購入数であるケースを確実に優先
+            # A=1, ..., Z=26, AA=27, AB=28, AI=35
+            col_map.setdefault("actual_date", 1)    # A列: 現品確認日
+            col_map.setdefault("order_no", 13)      # M列: 管理No
+            col_map.setdefault("item_name", 20)     # T列: 品名 (または15列目)
+            col_map.setdefault("maker", 21)         # U列: メーカー
+            col_map.setdefault("spec", 23)          # W列: 仕様
+            col_map["qty"] = 28                     # AB列: ★購入数を強制・優先固定
+            col_map.setdefault("invoice_date", 35)  # AI列: 請求日
 
             data_slice = raw_rows[header_pos_in_list + 1 :]
-
-            if "order_no" not in col_map and data_slice:
-                max_scan_col = min(13, col_map.get("drawing_no", 13))
-                best_c = None
-                best_hits = 0
-                for c_try in range(2, max_scan_col):
-                    hits = 0
-                    for _, rtuple in data_slice[:80]:
-                        if c_try - 1 < len(rtuple):
-                            v_try = self._extract_8digit_no(rtuple[c_try - 1])
-                            if v_try and not v_try.startswith("202"):
-                                hits += 1
-                    if hits > best_hits:
-                        best_hits = hits
-                        best_c = c_try
-                if best_c and best_hits >= 1:
-                    col_map["order_no"] = best_c
 
             def _get_col(rtuple: tuple, col_1based: int | None):
                 if not col_1based or col_1based < 1 or col_1based > len(rtuple):
@@ -1419,7 +1498,12 @@ class StockMatchApp:
                 line_val = _get_col(row_tuple, col_map.get("line_name"))
                 order_no_val = _get_col(row_tuple, col_map.get("order_no"))
 
-                if not any([drawing_val, part_val, item_val, spec_val]):
+                # AB列の購入数を取得（万が一AB列が範囲外の場合はmapped qty）
+                qty_val = _get_col(row_tuple, 28)
+                if qty_val is None:
+                    qty_val = _get_col(row_tuple, col_map.get("qty"))
+
+                if not any([drawing_val, part_val, item_val, spec_val, maker_val, line_val]):
                     continue
 
                 order_date_raw = _get_col(row_tuple, col_map.get("order_date"))
@@ -1450,7 +1534,7 @@ class StockMatchApp:
                 maker_str = self._clean_cell_str(maker_val)
                 spec_str = self._clean_cell_str(spec_val)
                 line_str = self._clean_cell_str(line_val)
-                qty_str = self._clean_cell_str(_get_col(row_tuple, col_map.get("qty")))
+                qty_str = self._clean_cell_str(qty_val)
                 unit_price_str = self._clean_cell_str(_get_col(row_tuple, col_map.get("unit_price")))
                 amount_str = self._clean_cell_str(_get_col(row_tuple, col_map.get("amount")))
 
@@ -1458,10 +1542,7 @@ class StockMatchApp:
                 exact_order_no_8 = self._extract_8digit_no(raw_order_no_str)
 
                 if not exact_order_no_8:
-                    max_c = min(13, col_map.get("drawing_no", 13))
-                    for c_scan in range(2, max_c):
-                        if c_scan == col_map.get("order_date"):
-                            continue
+                    for c_scan in (13, 11, 2, 3, 4):
                         cand_8 = self._extract_8digit_no(_get_col(row_tuple, c_scan))
                         if cand_8 and not cand_8.startswith("202"):
                             exact_order_no_8 = cand_8
@@ -1492,6 +1573,7 @@ class StockMatchApp:
                     {
                         "sheet": sheet_name,
                         "sheet_cat": sheet_cat,
+                        "sheet_cat_label": sheet_cat_label,
                         "row": r_idx,
                         "order_no": order_no_str,
                         "order_no_8": exact_order_no_8,
@@ -1502,7 +1584,7 @@ class StockMatchApp:
                         "item_name": item_str,
                         "line_name": line_str,
                         "maker": maker_str,
-                        "supplier": "",
+                        "supplier": maker_str,
                         "spec": spec_str,
                         "model_spec": model_spec_display,
                         "qty": qty_str,
@@ -1516,6 +1598,7 @@ class StockMatchApp:
                         "invoice_raw": self._clean_cell_str(invoice_raw),
                         "invoice_filled": invoice_filled,
                         "mgmt_due_date": mgmt_due_date,
+                        "mgmt_due_raw": self._clean_cell_str(due_raw),
                         "person": person_str,
                         "norm_drawing": norm_drawing,
                         "bg_drawing": self._make_bigrams(norm_drawing),
@@ -1540,12 +1623,6 @@ class StockMatchApp:
         return mgmt_rows
 
     def _parse_order_book(self, filepath: str, valid_mgmt_order_nos: set[str]) -> list[dict]:
-        """
-        注文書Excelファイルから明細を抽出
-        ※2行目を確認し、「見積」や「見積依頼」などの記載がある場合は見積依頼書として完全にスキップし、
-          「注文」や「発注」などの記載がある注文書シートのみを照合対象として抽出します。
-        ※注文品管理表に存在する管理No（valid_mgmt_order_nos）と一致しない注文書は除外します。
-        """
         wb = openpyxl.load_workbook(filepath, data_only=True, read_only=True)
         order_items = []
         filename = os.path.basename(filepath)
@@ -1558,7 +1635,6 @@ class StockMatchApp:
         else:
             file_order_no_8 = self._extract_8digit_no(norm_fname)
 
-        # ファイル名由来の管理Noが注文品管理表に存在しない場合はスキップ
         if file_order_no_8 and file_order_no_8 not in valid_mgmt_order_nos:
             wb.close()
             return []
@@ -1595,9 +1671,6 @@ class StockMatchApp:
             if not raw_rows:
                 continue
 
-            # =================================================================
-            # 【重要】2行目における「注文」vs「見積」の分別判定
-            # =================================================================
             row2_text = ""
             for r_idx, row_tuple in raw_rows:
                 if r_idx == 2:
@@ -1606,11 +1679,9 @@ class StockMatchApp:
                     )
                     break
 
-            # 2行目に「見積」の文字が含まれる場合は見積依頼書とみなし、このシートは完全にスキップ
             if "見積" in row2_text:
                 continue
 
-            # 2行目に「注文」「発注」「注文書」「発注書」等の記載がなく、かつファイル名やシートにも見積の気配がある場合はスキップ
             if row2_text and not any(k in row2_text for k in ("注文", "発注")):
                 if "見積" in row2_text or "見積" in filename or "見積" in sheet_name:
                     continue
@@ -1680,7 +1751,6 @@ class StockMatchApp:
                         if cleaned_sup and not sheet_supplier:
                             sheet_supplier = cleaned_sup
 
-            # シート内で特定された管理Noが注文品管理表に存在しない場合はスキップ
             resolved_no_8 = file_order_no_8 or (
                 sheet_order_no if len(sheet_order_no) == 8 and sheet_order_no.isdigit() else self._normalize_key(sheet_order_no)
             )
@@ -1806,7 +1876,6 @@ class StockMatchApp:
                 unit_price_str = self._clean_cell_str(unit_price_val)
                 amount_str = self._clean_cell_str(amount_val)
 
-                # 注記行や非明細行の除外（数量と納期が両方とも空欄の行は除外）
                 if not qty_num and due_date is None:
                     continue
 
@@ -1866,10 +1935,9 @@ class StockMatchApp:
         return order_items
 
     # =========================================================================
-    # 照合・遅延判定＋不一致理由の診断ロジック
+    # 照合処理
     # =========================================================================
     def run_analysis(self):
-        """照合処理をバックグラウンドスレッドで開始"""
         if self.is_running:
             return
 
@@ -1885,7 +1953,7 @@ class StockMatchApp:
 
         base_date = self._parse_flexible_date(self.base_date_str.get())
         if not base_date:
-            messagebox.showerror("日付エラー", "判定基準日は YYYY-MM-DD 形式（例: 2026-10-30）で入力してください。")
+            messagebox.showerror("日付エラー", "判定基準日は YYYY-MM-DD 形式で入力してください。")
             return
 
         self.is_running = True
@@ -1893,7 +1961,7 @@ class StockMatchApp:
         self.export_btn.configure(state=tk.DISABLED)
         self.progress_var.set(2.0)
         self.progress_text_var.set("解析を開始しています...")
-        self.status_var.set("実行中: 注文品管理表から対象管理Noを読み込んでいます。しばらくお待ちください...")
+        self.status_var.set("実行中: 注文品管理表と注文書フォルダを照合しています...")
 
         worker = threading.Thread(
             target=self._analysis_worker,
@@ -1903,15 +1971,11 @@ class StockMatchApp:
         worker.start()
         self.root.after(40, self._poll_ui_queue)
 
-    def _analysis_worker(
-        self, mgmt_path: str, order_dir: str, base_date: datetime.date
-    ):
-        """バックグラウンドスレッドで実行されるExcel読込・照合処理"""
+    def _analysis_worker(self, mgmt_path: str, order_dir: str, base_date: datetime.date):
         try:
             self._report_progress(5.0, "[1/3] 注文品管理表を開いています...")
             mgmt_rows = self._parse_management_book(mgmt_path, progress_cb=self._report_progress)
 
-            # 注文品管理表に存在するすべての管理Noを抽出
             valid_mgmt_order_nos = set()
             for m in mgmt_rows:
                 no8 = m.get("order_no_8") or m.get("norm_order_no")
@@ -1926,8 +1990,8 @@ class StockMatchApp:
                 order_dir, mgmt_path, valid_mgmt_order_nos, progress_cb=self._report_progress
             )
 
-            self._report_progress(75.0, f"[3/3] 明細の最適照合と不一致診断を実行中 ({len(order_items)} 件)...")
-            analyzed_records = self._match_and_evaluate(
+            self._report_progress(75.0, f"[3/3] 明細の双方向照合を実行中 ({len(order_items)} 件)...")
+            main_records, missing_records = self._match_and_evaluate(
                 mgmt_rows, order_items, base_date, progress_cb=self._report_progress
             )
 
@@ -1935,7 +1999,8 @@ class StockMatchApp:
                 (
                     "DONE",
                     {
-                        "records": analyzed_records,
+                        "main_records": main_records,
+                        "missing_records": missing_records,
                         "base_date": base_date,
                         "valid_order_files": valid_order_files,
                         "ignored_files": ignored_files,
@@ -1949,7 +2014,6 @@ class StockMatchApp:
             self.ui_queue.put(("ERROR", str(e)))
 
     def _poll_ui_queue(self):
-        """ワーカースレッドからの進捗・完了通知を受け取ってUIを更新"""
         try:
             while True:
                 msg_type, payload = self.ui_queue.get_nowait()
@@ -1963,28 +2027,34 @@ class StockMatchApp:
                     self.run_btn.configure(state=tk.NORMAL, text="照合・遅延チェック実行")
                     self.export_btn.configure(state=tk.NORMAL)
 
-                    self.analyzed_records = payload["records"]
+                    self.analyzed_records = payload["main_records"]
+                    self.missing_order_records = payload["missing_records"]
                     base_date = payload["base_date"]
                     valid_order_files = payload["valid_order_files"]
-                    order_items_count = payload["order_items_count"]
                     mgmt_rows_count = payload["mgmt_rows_count"]
                     mgmt_no_count = payload.get("mgmt_no_count", 0)
 
-                    self.column_filters.clear()
-                    self._update_all_headings()
+                    self.column_filters_main.clear()
+                    self.column_filters_missing.clear()
+                    self._update_all_headings_main()
+                    self._update_all_headings_missing()
 
                     self._update_kpis()
-                    self._refresh_table()
+                    self._refresh_main_table()
+                    self._refresh_missing_table()
 
                     delay_cnt = sum(1 for r in self.analyzed_records if r["is_any_delay"])
-                    unmatched_cnt = sum(1 for r in self.analyzed_records if r["is_unmatched"])
+                    unmatched_cnt = sum(1 for r in self.analyzed_records if r.get("is_unmatched"))
+                    missing_cnt = len(self.missing_order_records)
+
                     self.progress_var.set(100.0)
                     self.progress_text_var.set(
-                        f"完了！ (対象注文書 {valid_order_files}ファイル・{order_items_count}明細を照合 / 管理表 {mgmt_rows_count}行・管理No {mgmt_no_count}種)"
+                        f"完了！ (注文書 {valid_order_files}ファイル / 管理表 {mgmt_rows_count}行・管理No {mgmt_no_count}種)"
                     )
                     self.status_var.set(
                         f"照合完了 (基準日: {base_date.strftime('%Y-%m-%d')}) — "
-                        f"対象注文書明細: {order_items_count}件 / 超過(遅れ): {delay_cnt}件 / 不一致(未記載): {unmatched_cnt}件 (※行をダブルクリックで不一致箇所の詳細比較を表示)"
+                        f"注文書明細: {len(self.analyzed_records)}件 (超過:{delay_cnt}件 / 管理表未記載:{unmatched_cnt}件) ｜ "
+                        f"【別タブ】注文書未検出(管理表のみ): {missing_cnt}件"
                     )
                     return
                 elif msg_type == "ERROR":
@@ -2003,15 +2073,10 @@ class StockMatchApp:
             self.root.after(40, self._poll_ui_queue)
 
     def _score_candidate_pair(self, o_item: dict, m_row: dict) -> float:
-        """
-        同一管理No内の注文書1明細と管理表1行の総合一致スコアを算出する。
-        ※単価・金額は照合から除外し、図番・品番・品名・仕様・数量・メーカーの一致度のみで評価します。
-        """
         o_sup = o_item.get("norm_supplier", "")
         o_mkr = o_item.get("norm_maker", "")
         m_mkr = m_row.get("norm_maker", "")
 
-        # 発注先/メーカーの判定
         sup_matched = False
         if o_sup and m_mkr:
             if o_sup == m_mkr or o_sup in m_mkr or m_mkr in o_sup:
@@ -2020,7 +2085,6 @@ class StockMatchApp:
             if o_mkr == m_mkr or o_mkr in m_mkr or m_mkr in o_mkr:
                 sup_matched = True
 
-        # 発注先が特定されており、管理表のメーカー・業者と全く異なる業者名の場合は大幅減点
         if o_sup and m_mkr and len(o_sup) >= 2 and len(m_mkr) >= 2 and not sup_matched:
             if not any(k in m_mkr for k in ("市販", "購入", "外注", "製作")) and not any(k in o_sup for k in ("市販", "購入")):
                 return -800.0
@@ -2042,7 +2106,6 @@ class StockMatchApp:
         if sup_matched:
             score += 250.0
 
-        # 図面番号の一致判定（完全一致のみ強力加点。先頭が似ていても末尾が異なる場合は不一致ペナルティ）
         if o_d and m_d:
             if o_d == m_d:
                 score += 500.0
@@ -2050,7 +2113,6 @@ class StockMatchApp:
             else:
                 score -= 300.0
 
-        # 品番の一致判定
         if o_p and m_p:
             if o_p == m_p:
                 score += 500.0
@@ -2062,7 +2124,6 @@ class StockMatchApp:
                 if len(o_p) >= 2 and len(m_p) >= 2:
                     score -= 150.0
 
-        # 型番・コードのクロス照合（注文書の仕様 ⇔ 管理表の品番 など）
         o_long_codes = [c for c in (o_d, o_p, o_s) if len(c) >= 4]
         m_long_codes = [c for c in (m_d, m_p, m_s) if len(c) >= 4]
 
@@ -2082,7 +2143,6 @@ class StockMatchApp:
             score += 450.0
             strong_evidence = True
 
-        # 品名の一致判定
         name_sim = 0.0
         if o_i and m_i:
             if o_i == m_i:
@@ -2102,7 +2162,6 @@ class StockMatchApp:
                 name_sim = 0.85
                 score += 180.0
 
-        # 仕様の一致判定
         spec_sim = 0.0
         if o_s and m_s:
             if o_s == m_s:
@@ -2136,7 +2195,6 @@ class StockMatchApp:
         elif comb_sim >= 0.75:
             strong_evidence = True
 
-        # 数量の一致判定
         if o_item["qty_num"] and m_row["qty_num"]:
             if o_item["qty_num"] == m_row["qty_num"]:
                 score += 150.0
@@ -2144,7 +2202,6 @@ class StockMatchApp:
             else:
                 score -= 40.0
 
-        # 図番または品番が完全一致していれば十分な証拠とする
         if (o_d and m_d and o_d == m_d) or (o_p and m_p and o_p == m_p):
             strong_evidence = True
 
@@ -2154,20 +2211,17 @@ class StockMatchApp:
         return score
 
     def _build_field_comparison_data(
-        self, o_item: dict, m_row: dict | None, reason_summary: str, extra_notes: str = ""
+        self, o_item: dict | None, m_row: dict | None, reason_summary: str, extra_notes: str = ""
     ) -> dict:
-        """
-        注文書の項目と管理表（照合行または最有力候補行）を1項目ずつ比較し、
-        どこが一致していてどこが不一致なのかを診断データとして生成する。
-        ※単価と金額は照合対象外（IGNORED）として明示。
-        """
         rows = []
 
         def _cmp_field(label: str, o_raw: str, m_raw: str, o_norm: str, m_norm: str):
             o_disp = o_raw if o_raw else "(空欄)"
             m_disp = m_raw if m_raw else "(空欄)"
             if not m_row:
-                return (label, o_disp, "— (該当行なし)", "対象なし", "DIFF")
+                return (label, o_disp, "— (該当行なし)", "管理表未記載", "DIFF")
+            if not o_item:
+                return (label, "— (注文書なし)", m_disp, "注文書未検出", "DIFF")
             if not o_norm and not m_norm:
                 return (label, o_disp, m_disp, "両方空欄 (-)", "INFO")
             if o_norm == m_norm:
@@ -2176,92 +2230,97 @@ class StockMatchApp:
                 return (label, o_disp, m_disp, "△ 部分一致", "PARTIAL")
             return (label, o_disp, m_disp, "× 不一致", "DIFF")
 
-        o_no = o_item.get("order_no_8") or o_item.get("order_no", "")
+        o_no = (o_item.get("order_no_8") or o_item.get("order_no", "")) if o_item else ""
         m_no = (m_row.get("order_no_8") or m_row.get("order_no", "")) if m_row else ""
         rows.append(_cmp_field("① 管理No (8桁)", o_no, m_no, o_no, m_no))
 
         rows.append(
             _cmp_field(
                 "② 図面番号",
-                o_item.get("drawing_no", ""),
+                o_item.get("drawing_no", "") if o_item else "",
                 m_row.get("drawing_no", "") if m_row else "",
-                o_item.get("norm_drawing", ""),
+                o_item.get("norm_drawing", "") if o_item else "",
                 m_row.get("norm_drawing", "") if m_row else "",
             )
         )
         rows.append(
             _cmp_field(
                 "③ 品番",
-                o_item.get("part_no", ""),
+                o_item.get("part_no", "") if o_item else "",
                 m_row.get("part_no", "") if m_row else "",
-                o_item.get("norm_part", ""),
+                o_item.get("norm_part", "") if o_item else "",
                 m_row.get("norm_part", "") if m_row else "",
             )
         )
         rows.append(
             _cmp_field(
                 "④ 品名",
-                o_item.get("item_name", ""),
+                o_item.get("item_name", "") if o_item else "",
                 m_row.get("item_name", "") if m_row else "",
-                o_item.get("norm_item", ""),
+                o_item.get("norm_item", "") if o_item else "",
                 m_row.get("norm_item", "") if m_row else "",
             )
         )
         rows.append(
             _cmp_field(
                 "⑤ 仕様・規格",
-                o_item.get("spec", ""),
+                o_item.get("spec", "") if o_item else "",
                 m_row.get("spec", "") if m_row else "",
-                o_item.get("norm_spec", ""),
+                o_item.get("norm_spec", "") if o_item else "",
                 m_row.get("norm_spec", "") if m_row else "",
             )
         )
         rows.append(
             _cmp_field(
                 "⑥ メーカー",
-                o_item.get("maker", ""),
+                o_item.get("maker", "") if o_item else "",
                 m_row.get("maker", "") if m_row else "",
-                o_item.get("norm_maker", ""),
+                o_item.get("norm_maker", "") if o_item else "",
                 m_row.get("norm_maker", "") if m_row else "",
             )
         )
         rows.append(
             _cmp_field(
                 "⑦ 購入数 (数量)",
-                o_item.get("qty", ""),
+                o_item.get("qty", "") if o_item else "",
                 m_row.get("qty", "") if m_row else "",
-                o_item.get("qty_num", ""),
+                o_item.get("qty_num", "") if o_item else "",
                 m_row.get("qty_num", "") if m_row else "",
             )
         )
 
-        # 単価と金額は照合対象外（参考表示）
-        o_p_disp = o_item.get("unit_price", "") or "(空欄)"
+        o_p_disp = (o_item.get("unit_price", "") if o_item else "") or "(空欄)"
         m_p_disp = (m_row.get("unit_price", "") if m_row else "") or "(空欄)"
         rows.append(("⑧ 単価", o_p_disp, m_p_disp, "— (照合対象外)", "IGNORED"))
 
-        o_a_disp = o_item.get("amount", "") or "(空欄)"
+        o_a_disp = (o_item.get("amount", "") if o_item else "") or "(空欄)"
         m_a_disp = (m_row.get("amount", "") if m_row else "") or "(空欄)"
         rows.append(("⑨ 金額", o_a_disp, m_a_disp, "— (照合対象外)", "IGNORED"))
 
         cross_notes = []
-        if m_row:
+        if o_item and m_row:
             if o_item["norm_spec"] and m_row["norm_part"] and o_item["norm_spec"] == m_row["norm_part"]:
                 cross_notes.append("・注文書の『仕様』と管理表の『品番』が一致しています。")
             if o_item["norm_part"] and m_row["norm_spec"] and o_item["norm_part"] == m_row["norm_spec"]:
                 cross_notes.append("・注文書の『品番』と管理表の『仕様』が一致しています。")
             if m_row.get("line_name"):
-                cross_notes.append(f"・管理表D列の『品名、ライン名等』: {m_row['line_name']}")
+                cross_notes.append(f"・管理表の『製品詳細 / ライン名等』: {m_row['line_name']}")
 
-        detail_lines = [
-            f"【診断結果サマリー】\n  {reason_summary}",
-            "",
-            f"【注文書データ元】\n  ファイル: {o_item['file']} (シート: {o_item['sheet']} / 行: {o_item['row']}) / 依頼区分: {o_item['req_type_label']}",
-        ]
+        detail_lines = [f"【診断結果サマリー】\n  {reason_summary}", ""]
+        if o_item:
+            detail_lines.append(
+                f"【注文書データ元】\n  ファイル: {o_item['file']} (シート: {o_item['sheet']} / 行: {o_item['row']}) / 依頼区分: {o_item['req_type_label']}"
+            )
+        else:
+            detail_lines.append("【注文書データ元】\n  （注文書フォルダ内に該当する注文書が見当たりません）")
+
         if m_row:
             detail_lines.append(
-                f"【管理表の比較対象行】\n  シート: {m_row['sheet']} (行: {m_row['row']}) / 管理No: {m_row.get('order_no_8') or m_row.get('order_no')}"
+                f"【管理表の登録データ】\n  シート: {m_row['sheet']} (行: {m_row['row']}) / 管理No: {m_row.get('order_no_8') or m_row.get('order_no')} / AB列購入数: {m_row.get('qty') or '未記載'} / 納期: {m_row.get('mgmt_due_raw') or '未記載'}"
             )
+        else:
+            detail_lines.append("【管理表の登録データ】\n  （管理表内に該当する明細が登録されていません）")
+
         if cross_notes:
             detail_lines.append("\n【追加情報・列構造】\n" + "\n".join(cross_notes))
         if extra_notes:
@@ -2277,7 +2336,6 @@ class StockMatchApp:
         o_item: dict,
         mgmt_rows: list[dict],
     ) -> tuple[str, dict]:
-        """なぜ注文書明細が管理表と一致しなかったのかを診断"""
         o_no = o_item.get("order_no_8", "")
 
         same_no_rows = [
@@ -2310,7 +2368,7 @@ class StockMatchApp:
             _check_diff("品番", o_item["part_no"], best_cand["part_no"], o_item["norm_part"], best_cand["norm_part"])
             _check_diff("品名", o_item["item_name"], best_cand["item_name"], o_item["norm_item"], best_cand["norm_item"])
             _check_diff("仕様", o_item["spec"], best_cand["spec"], o_item["norm_spec"], best_cand["norm_spec"])
-            _check_diff("数量", o_item["qty"], best_cand["qty"], o_item["qty_num"], best_cand["qty_num"])
+            _check_diff("購入数", o_item["qty"], best_cand["qty"], o_item["qty_num"], best_cand["qty_num"])
 
             m_str = f"一致:{','.join(matched_parts)} / " if matched_parts else ""
             d_str = "不一致:" + ", ".join(diff_parts) if diff_parts else "全項目不一致"
@@ -2326,7 +2384,7 @@ class StockMatchApp:
             for idx_c, r_c in enumerate(same_no_rows[:15], start=1):
                 used_mark = " (照合済)" if r_c.get("matched") else " (未照合)"
                 cand_list_lines.append(
-                    f"   {idx_c}. {r_c['sheet']}(行{r_c['row']}){used_mark} | 業者:{r_c.get('maker')} | 図番:{r_c['drawing_no']} | 品番:{r_c['part_no']} | 品名:{r_c['item_name']} | 仕様:{r_c['spec']} | 数量:{r_c['qty']}"
+                    f"   {idx_c}. {r_c['sheet']}(行{r_c['row']}){used_mark} | 業者:{r_c.get('maker')} | 図番:{r_c['drawing_no']} | 品番:{r_c['part_no']} | 品名:{r_c['item_name']} | 仕様:{r_c['spec']} | 購入数:{r_c['qty']}"
                 )
 
             diag = self._build_field_comparison_data(
@@ -2344,22 +2402,26 @@ class StockMatchApp:
         order_items: list[dict],
         base_date: datetime.date,
         progress_cb=None,
-    ) -> list[dict]:
+    ) -> tuple[list[dict], list[dict]]:
         """
-        注文品管理表にある管理Noの項目のみを対象として、
-        同一管理No内で全明細と管理表行を同時に評価し、全体最適ペアを決定する。
+        注文書明細と管理表行を照合し、
+        1. main_results: 注文書由来の照合・遅延一覧（タブ1用）
+        2. missing_order_results: 注文書未検出・未手配の管理表明細一覧（タブ2用 / ※AB列購入数0は完全除外）
+        の2つに完全に分離して返す。
         """
-        results = []
+        main_results = []
+        missing_order_results = []
 
         all_mgmt_order_nos_8 = set()
         mgmt_by_no = {}
         for m in mgmt_rows:
+            m["matched"] = False
+            m["matched_by"] = ""
             no8 = m.get("order_no_8") or m.get("norm_order_no")
             if no8:
                 all_mgmt_order_nos_8.add(no8)
                 mgmt_by_no.setdefault(no8, []).append(m)
 
-        # 注文品管理表に存在する管理Noの注文書明細のみをグループ化（管理表にない管理Noは除外）
         orders_by_no = {}
         for o_item in order_items:
             o_no = o_item.get("order_no_8", "")
@@ -2369,7 +2431,7 @@ class StockMatchApp:
         total_orders = sum(len(l) for l in orders_by_no.values())
         processed_orders = 0
 
-        # 管理Noごとに全体最適マッチングを実施
+        # 1. 注文書明細ベースの照合（タブ1用）
         for o_no, o_list in orders_by_no.items():
             m_list = mgmt_by_no.get(o_no, [])
 
@@ -2382,7 +2444,6 @@ class StockMatchApp:
                 req_code = o.get("req_type_code", "UNKNOWN")
                 for m in m_list:
                     base_sc = self._score_candidate_pair(o, m)
-                    # 依頼区分（購入 vs 外注）の一致によるボーナス
                     if req_code == "PURCHASE" and m.get("sheet_cat") == "PURCHASE":
                         base_sc += 150.0
                     elif req_code == "OUTSOURCE" and m.get("sheet_cat") == "OUTSOURCE":
@@ -2416,11 +2477,10 @@ class StockMatchApp:
                             matched_pairs[r_idx] = (c_idx, sc)
                             used_cols.add(c_idx)
 
-            # 結果レコードの生成
             for r_idx, o_item in enumerate(o_list):
                 processed_orders += 1
                 if progress_cb and (processed_orders == 1 or processed_orders % 5 == 0 or processed_orders == total_orders):
-                    pct = 75.0 + (23.0 * processed_orders / max(1, total_orders))
+                    pct = 75.0 + (18.0 * processed_orders / max(1, total_orders))
                     progress_cb(pct, f"[3/3] 注文書明細と管理表を照合・診断中 ({processed_orders}/{total_orders} 件目)...")
 
                 if r_idx in matched_pairs:
@@ -2480,9 +2540,46 @@ class StockMatchApp:
                         mismatch_reason=reason_txt,
                         diagnostic_data=diag_data,
                     )
-                results.append(rec)
+                main_results.append(rec)
 
-        results.sort(
+        # 2. 注文書未検出（管理表にあるのに注文書が見当たらない）明細の抽出（タブ2用）
+        # ★ 管理表のAB列「購入数」が 0（または0.0、全角０等）の項目は未発注一覧から完全除外
+        for m in mgmt_rows:
+            if m.get("matched"):
+                continue
+
+            raw_qty = m.get("qty", "")
+            qty_num_str = m.get("qty_num", "")
+            if self._is_zero_quantity(raw_qty) or self._is_zero_quantity(qty_num_str):
+                continue
+
+            m_no = m.get("order_no_8") or m.get("order_no", "")
+            reason_txt = f"管理表『{m['sheet']}』(行{m['row']})に記載ありますが、対応する注文書ファイルが作成・手配されていません"
+
+            diag_data = self._build_field_comparison_data(None, m, reason_txt)
+
+            rec_missing = {
+                "status_badge": "未発注 (注文書なし)",
+                "mgmt_sheet": m["sheet"],
+                "mgmt_row": str(m["row"]),
+                "order_no": m_no,
+                "supplier": m.get("supplier") or m.get("maker", ""),
+                "maker": m.get("maker", ""),
+                "item_name": m.get("item_name", ""),
+                "model_spec": m.get("model_spec", ""),
+                "qty": m.get("qty", ""),
+                "due_date": m.get("mgmt_due_raw") or (m["mgmt_due_date"].strftime("%Y-%m-%d") if m.get("mgmt_due_date") else "-"),
+                "actual_date": m["actual_date"].strftime("%Y-%m-%d") if m.get("actual_date") else (m.get("actual_raw") or "未入力"),
+                "invoice_date": m["invoice_date"].strftime("%Y-%m-%d") if m.get("invoice_date") else (m.get("invoice_raw") or "未入力"),
+                "person": m.get("person", ""),
+                "mismatch_reason": reason_txt,
+                "source_info": f"管理表:{m['sheet']}(行{m['row']})",
+                "row_tag": "MISSING_ORDER",
+                "diagnostic_data": diag_data,
+            }
+            missing_order_results.append(rec_missing)
+
+        main_results.sort(
             key=lambda r: (
                 not (r["is_unmatched"] or r["is_any_delay"]),
                 not r["is_unmatched"],
@@ -2490,7 +2587,16 @@ class StockMatchApp:
                 r["order_no"],
             )
         )
-        return results
+
+        missing_order_results.sort(
+            key=lambda r: (
+                r["order_no"],
+                r["mgmt_sheet"],
+                int(r["mgmt_row"]) if r["mgmt_row"].isdigit() else 0,
+            )
+        )
+
+        return main_results, missing_order_results
 
     def _evaluate_single_record(
         self,
@@ -2516,7 +2622,6 @@ class StockMatchApp:
         mismatch_reason: str = "",
         diagnostic_data: dict | None = None,
     ) -> dict:
-        """1明細に対する現品・請求の判定処理"""
         actual_overdue = False
         invoice_overdue = False
         overdue_days_num = None
@@ -2646,7 +2751,6 @@ class StockMatchApp:
         }
 
     def _update_kpis(self):
-        """上部KPI集計カードの数値更新"""
         total = len(self.analyzed_records)
         unmatched_cnt = sum(1 for r in self.analyzed_records if r.get("is_unmatched"))
         both_cnt = sum(
@@ -2669,18 +2773,25 @@ class StockMatchApp:
             for r in self.analyzed_records
             if not r.get("is_unmatched") and not r["actual_overdue"] and not r["invoice_overdue"]
         )
+        missing_cnt = len(self.missing_order_records)
 
-        self.kpi_vars["total"].set(f"{total} 件")
+        self.kpi_vars["order_total"].set(f"{total} 件")
         self.kpi_vars["unmatched"].set(f"{unmatched_cnt} 件")
         self.kpi_vars["both_delay"].set(f"{both_cnt} 件")
         self.kpi_vars["actual_delay"].set(f"{actual_cnt} 件")
         self.kpi_vars["invoice_delay"].set(f"{invoice_cnt} 件")
         self.kpi_vars["ok"].set(f"{ok_cnt} 件")
+        self.kpi_vars["missing_order"].set(f"{missing_cnt} 件")
 
-    def _refresh_table(self):
-        """フィルタ条件・検索キーワードに基づいてTreeviewを再描画"""
-        for item in self.tree.get_children():
-            self.tree.delete(item)
+        # タブのタイトルと件数・選択インジケーターを同期更新
+        self._on_tab_changed()
+
+    # =========================================================================
+    # テーブル描画＆フィルター処理（タブ1: メイン照合一覧）
+    # =========================================================================
+    def _refresh_main_table(self):
+        for item in self.tree_main.get_children():
+            self.tree_main.delete(item)
 
         mode = self.filter_mode.get()
         kw = self.search_keyword.get().strip().lower()
@@ -2703,7 +2814,7 @@ class StockMatchApp:
                     continue
 
             skip_by_col = False
-            for col_id, allowed_values in self.column_filters.items():
+            for col_id, allowed_values in self.column_filters_main.items():
                 val = str(rec.get(col_id, "") or "").strip()
                 if not val:
                     val = "(空白)"
@@ -2732,7 +2843,7 @@ class StockMatchApp:
                 if kw not in searchable:
                     continue
 
-            self.tree.insert(
+            self.tree_main.insert(
                 "",
                 tk.END,
                 iid=f"rec_{idx}",
@@ -2758,47 +2869,170 @@ class StockMatchApp:
                 tags=(rec["row_tag"],),
             )
 
-    def _update_heading_display(self, col_id: str):
-        """列ヘッダーのテキストを更新"""
-        orig_title = self.col_titles.get(col_id, col_id)
-        if col_id in self.column_filters:
+    def _update_heading_display_main(self, col_id: str):
+        orig_title = self.col_titles_main.get(col_id, col_id)
+        if col_id in self.column_filters_main:
             display_title = f"{orig_title} [▼]"
         else:
             display_title = f"{orig_title} ▾"
-        self.tree.heading(col_id, text=display_title)
+        self.tree_main.heading(col_id, text=display_title)
 
-    def _update_all_headings(self):
-        """全列のヘッダー表示を更新"""
-        for col_id, _, _, _ in self.col_configs:
-            self._update_heading_display(col_id)
+    def _update_all_headings_main(self):
+        for col_id, _, _, _ in self.col_configs_main:
+            self._update_heading_display_main(col_id)
 
-    def _on_tree_click(self, event):
-        """ヘッダークリックでExcel風フィルターを開く"""
-        region = self.tree.identify_region(event.x, event.y)
+    def _on_tree_main_click(self, event):
+        region = self.tree_main.identify_region(event.x, event.y)
         if region == "heading":
-            col = self.tree.identify_column(event.x)
+            col = self.tree_main.identify_column(event.x)
             col_index = int(col.replace("#", "")) - 1
-            if 0 <= col_index < len(self.col_configs):
-                col_id = self.col_configs[col_index][0]
-                self._open_excel_column_filter(col_id, event.x_root, event.y_root)
+            if 0 <= col_index < len(self.col_configs_main):
+                col_id = self.col_configs_main[col_index][0]
+                self._open_column_filter_dialog(
+                    col_id=col_id,
+                    title=self.col_titles_main.get(col_id, col_id),
+                    records=self.analyzed_records,
+                    filter_dict=self.column_filters_main,
+                    refresh_func=self._refresh_main_table,
+                    update_heading_func=self._update_heading_display_main,
+                    sort_func=lambda c, r: self._sort_tree(self.tree_main, c, r),
+                    x=event.x_root,
+                    y=event.y_root,
+                )
 
-    def _open_excel_column_filter(self, col_id: str, x: int, y: int):
-        """Excel風ドロップダウンフィルター・ソートウィンドウを表示"""
-        if not self.analyzed_records:
+    def _clear_all_main_column_filters(self):
+        self.column_filters_main.clear()
+        self._update_all_headings_main()
+        self._refresh_main_table()
+
+    # =========================================================================
+    # テーブル描画＆フィルター処理（タブ2: 注文書未検出一覧）
+    # =========================================================================
+    def _refresh_missing_table(self):
+        for item in self.tree_missing.get_children():
+            self.tree_missing.delete(item)
+
+        kw = self.missing_search_keyword.get().strip().lower()
+
+        for idx, rec in enumerate(self.missing_order_records):
+            skip_by_col = False
+            for col_id, allowed_values in self.column_filters_missing.items():
+                val = str(rec.get(col_id, "") or "").strip()
+                if not val:
+                    val = "(空白)"
+                if val not in allowed_values:
+                    skip_by_col = True
+                    break
+            if skip_by_col:
+                continue
+
+            if kw:
+                searchable = " ".join(
+                    [
+                        rec["status_badge"],
+                        rec["mgmt_sheet"],
+                        rec["mgmt_row"],
+                        rec["order_no"],
+                        rec["supplier"],
+                        rec["maker"],
+                        rec["item_name"],
+                        rec["model_spec"],
+                        rec["person"],
+                        rec["mismatch_reason"],
+                    ]
+                ).lower()
+                if kw not in searchable:
+                    continue
+
+            self.tree_missing.insert(
+                "",
+                tk.END,
+                iid=f"mis_{idx}",
+                values=(
+                    rec["status_badge"],
+                    rec["mgmt_sheet"],
+                    rec["mgmt_row"],
+                    rec["order_no"],
+                    rec["supplier"],
+                    rec["maker"],
+                    rec["item_name"],
+                    rec["model_spec"],
+                    rec["qty"],
+                    rec["due_date"],
+                    rec["actual_date"],
+                    rec["invoice_date"],
+                    rec["person"],
+                    rec["mismatch_reason"],
+                ),
+                tags=(rec["row_tag"],),
+            )
+
+    def _update_heading_display_missing(self, col_id: str):
+        orig_title = self.col_titles_missing.get(col_id, col_id)
+        if col_id in self.column_filters_missing:
+            display_title = f"{orig_title} [▼]"
+        else:
+            display_title = f"{orig_title} ▾"
+        self.tree_missing.heading(col_id, text=display_title)
+
+    def _update_all_headings_missing(self):
+        for col_id, _, _, _ in self.col_configs_missing:
+            self._update_heading_display_missing(col_id)
+
+    def _on_tree_missing_click(self, event):
+        region = self.tree_missing.identify_region(event.x, event.y)
+        if region == "heading":
+            col = self.tree_missing.identify_column(event.x)
+            col_index = int(col.replace("#", "")) - 1
+            if 0 <= col_index < len(self.col_configs_missing):
+                col_id = self.col_configs_missing[col_index][0]
+                self._open_column_filter_dialog(
+                    col_id=col_id,
+                    title=self.col_titles_missing.get(col_id, col_id),
+                    records=self.missing_order_records,
+                    filter_dict=self.column_filters_missing,
+                    refresh_func=self._refresh_missing_table,
+                    update_heading_func=self._update_heading_display_missing,
+                    sort_func=lambda c, r: self._sort_tree(self.tree_missing, c, r),
+                    x=event.x_root,
+                    y=event.y_root,
+                )
+
+    def _clear_all_missing_column_filters(self):
+        self.column_filters_missing.clear()
+        self._update_all_headings_missing()
+        self._refresh_missing_table()
+
+    # =========================================================================
+    # 共通Excel風列フィルターダイアログ
+    # =========================================================================
+    def _open_column_filter_dialog(
+        self,
+        col_id: str,
+        title: str,
+        records: list[dict],
+        filter_dict: dict,
+        refresh_func,
+        update_heading_func,
+        sort_func,
+        x: int,
+        y: int,
+    ):
+        if not records:
             return
 
         all_unique_vals = set()
-        for rec in self.analyzed_records:
+        for rec in records:
             val = str(rec.get(col_id, "") or "").strip()
             if not val:
                 val = "(空白)"
             all_unique_vals.add(val)
 
         sorted_vals = sorted(all_unique_vals, key=lambda s: (s == "(空白)", s))
-        currently_selected = set(self.column_filters.get(col_id, all_unique_vals))
+        currently_selected = set(filter_dict.get(col_id, all_unique_vals))
 
         win = tk.Toplevel(self.root)
-        win.title(f"フィルター: {self.col_titles.get(col_id, col_id)}")
+        win.title(f"フィルター: {title}")
         self._apply_window_icon(win)
 
         win_w, win_h = 320, 440
@@ -2825,7 +3059,7 @@ class StockMatchApp:
             anchor="w",
             padx=8,
             pady=3,
-            command=lambda: [self._sort_tree(col_id, False), win.destroy()],
+            command=lambda: [sort_func(col_id, False), win.destroy()],
         )
         btn_sort_asc.pack(fill=tk.X, pady=(0, 4))
 
@@ -2840,7 +3074,7 @@ class StockMatchApp:
             anchor="w",
             padx=8,
             pady=3,
-            command=lambda: [self._sort_tree(col_id, True), win.destroy()],
+            command=lambda: [sort_func(col_id, True), win.destroy()],
         )
         btn_sort_desc.pack(fill=tk.X)
 
@@ -2958,17 +3192,17 @@ class StockMatchApp:
         def _apply_filter():
             selected = {v for v, var in val_vars.items() if var.get()}
             if len(selected) == len(sorted_vals):
-                self.column_filters.pop(col_id, None)
+                filter_dict.pop(col_id, None)
             else:
-                self.column_filters[col_id] = selected
-            self._update_heading_display(col_id)
-            self._refresh_table()
+                filter_dict[col_id] = selected
+            update_heading_func(col_id)
+            refresh_func()
             _cleanup_and_destroy()
 
         def _clear_filter():
-            self.column_filters.pop(col_id, None)
-            self._update_heading_display(col_id)
-            self._refresh_table()
+            filter_dict.pop(col_id, None)
+            update_heading_func(col_id)
+            refresh_func()
             _cleanup_and_destroy()
 
         btn_ok = tk.Button(
@@ -3012,22 +3246,15 @@ class StockMatchApp:
         )
         btn_clear.pack(side=tk.LEFT)
 
-    def _clear_all_column_filters(self):
-        """すべての列フィルターを一括解除"""
-        self.column_filters.clear()
-        self._update_all_headings()
-        self._refresh_table()
-
-    def _sort_tree(self, col: str, reverse: bool):
-        """Treeview列ヘッダークリック時のソート処理"""
-        items = [(self.tree.set(k, col), k) for k in self.tree.get_children("")]
+    def _sort_tree(self, tree: ttk.Treeview, col: str, reverse: bool):
+        items = [(tree.set(k, col), k) for k in tree.get_children("")]
         items.sort(reverse=reverse)
         for index, (_, k) in enumerate(items):
-            self.tree.move(k, "", index)
+            tree.move(k, "", index)
 
     def _export_results(self):
-        """検査結果をExcelまたはCSVに出力する"""
-        if not self.analyzed_records:
+        """検査結果をExcel（2シート構成）またはCSVに出力する"""
+        if not self.analyzed_records and not self.missing_order_records:
             messagebox.showinfo("出力対象なし", "先に「照合・遅延チェック実行」を行ってください。")
             return
 
@@ -3035,14 +3262,15 @@ class StockMatchApp:
             title="超過一覧レポートの保存",
             defaultextension=".xlsx",
             initialfile=f"納期超過チェック結果_{self.base_date_str.get()}.xlsx",
-            filetypes=[("Excelファイル", "*.xlsx"), ("CSVファイル", "*.csv")],
+            filetypes=[("Excelファイル (2シート出力)", "*.xlsx"), ("CSVファイル (照合結果のみ)", "*.csv")],
         )
         if not save_path:
             return
 
-        export_rows = []
+        # 1. 注文書照合結果行
+        export_main = []
         for r in self.analyzed_records:
-            export_rows.append(
+            export_main.append(
                 {
                     "総合判定": r["status_badge"],
                     "不一致理由・照合診断": r["mismatch_reason"],
@@ -3061,25 +3289,50 @@ class StockMatchApp:
                     "請求状況": r["invoice_status"],
                     "現品超過フラグ": "超過" if r["actual_overdue"] else "正常",
                     "請求超過フラグ": "超過" if r["invoice_overdue"] else "正常",
-                    "管理表不一致フラグ": "不一致" if r.get("is_unmatched") else "一致",
+                    "管理表不一致フラグ": "管理表なし" if r.get("is_unmatched") else "-",
                     "担当": r["person"],
                     "照合元情報": r["source_info"],
                 }
             )
 
-        df = pd.DataFrame(export_rows)
+        # 2. 注文書未検出（管理表のみ）行
+        export_missing = []
+        for r in self.missing_order_records:
+            export_missing.append(
+                {
+                    "状態判定": r["status_badge"],
+                    "管理表シート": r["mgmt_sheet"],
+                    "行番号": r["mgmt_row"],
+                    "管理No(8桁)": r["order_no"],
+                    "業者 / 発注先": r["supplier"],
+                    "メーカー": r["maker"],
+                    "品名": r["item_name"],
+                    "型番・規格・図番": r["model_spec"],
+                    "購入数": r["qty"],
+                    "管理表納期": r["due_date"],
+                    "現品確認日": r["actual_date"],
+                    "請求日": r["invoice_date"],
+                    "担当": r["person"],
+                    "未検出診断内容": r["mismatch_reason"],
+                }
+            )
+
+        df_main = pd.DataFrame(export_main)
+        df_missing = pd.DataFrame(export_missing)
+
         try:
             if save_path.lower().endswith(".csv"):
-                df.to_csv(save_path, index=False, encoding="utf-8-sig")
+                df_main.to_csv(save_path, index=False, encoding="utf-8-sig")
             else:
-                df.to_excel(save_path, index=False)
+                with pd.ExcelWriter(save_path, engine="openpyxl") as writer:
+                    df_main.to_excel(writer, sheet_name="納期超過・照合結果", index=False)
+                    df_missing.to_excel(writer, sheet_name="注文書未検出(管理表のみ)", index=False)
             messagebox.showinfo("出力完了", f"検査結果を保存しました:\n{save_path}")
         except Exception as e:
             messagebox.showerror("保存エラー", f"ファイルの保存に失敗しました:\n{e}")
 
 
 def main():
-    # WindowsタスクバーのアイコンをPython標準ではなく本アプリの icon.ico として独立認識させる設定
     try:
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("StockMatch.Miya.v1.0.0")
     except Exception:
