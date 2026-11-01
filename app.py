@@ -10,20 +10,23 @@ import threading
 import queue
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
-import pandas as pd
-import openpyxl
+import pandas as pd  # type: ignore
+import openpyxl  # type: ignore
 
 try:
-    from scipy.optimize import linear_sum_assignment
+    from scipy.optimize import linear_sum_assignment  # type: ignore
     HAS_SCIPY = True
 except ImportError:
+    linear_sum_assignment = None
     HAS_SCIPY = False
 
 try:
-    import win32com.client
-    import pythoncom
+    import win32com.client  # type: ignore
+    import pythoncom  # type: ignore
     HAS_WIN32COM = True
 except ImportError:
+    win32com = None
+    pythoncom = None
     HAS_WIN32COM = False
 
 
@@ -239,11 +242,11 @@ class StockMatchApp:
 
         self.root.config(menu=menubar)
 
-        self.root.bind_all("<F1>", lambda e: self._show_help_guide(tab_index=0))
-        self.root.bind_all("<F5>", lambda e: self.run_analysis())
-        self.root.bind_all("<Control-o>", lambda e: self._select_mgmt_file())
-        self.root.bind_all("<Control-d>", lambda e: self._select_order_dir())
-        self.root.bind_all("<Control-s>", lambda e: self._open_in_excel_direct())
+        self.root.bind_all("<F1>", lambda _e: self._show_help_guide(tab_index=0))
+        self.root.bind_all("<F5>", lambda _e: self.run_analysis())
+        self.root.bind_all("<Control-o>", lambda _e: self._select_mgmt_file())
+        self.root.bind_all("<Control-d>", lambda _e: self._select_order_dir())
+        self.root.bind_all("<Control-s>", lambda _e: self._open_in_excel_direct())
 
     def _build_ui(self):
         """メイン画面レイアウトの構築"""
@@ -465,7 +468,7 @@ class StockMatchApp:
         )
         status_bar.pack(fill=tk.X, side=tk.BOTTOM)
 
-    def _on_tab_changed(self, event=None):
+    def _on_tab_changed(self, _event=None):
         """タブが切り替わったときにタイトル文言を更新し、選択中を強調表示する"""
         try:
             curr_tab_idx = self.notebook.index("current")
@@ -509,7 +512,7 @@ class StockMatchApp:
         ttk.Label(filter_frame, text="キーワード:").pack(side=tk.LEFT, padx=(10, 4))
         search_entry = ttk.Entry(filter_frame, textvariable=self.search_keyword, width=18)
         search_entry.pack(side=tk.LEFT)
-        search_entry.bind("<KeyRelease>", lambda e: self._refresh_main_table())
+        search_entry.bind("<KeyRelease>", lambda _e: self._refresh_main_table())
 
         clear_col_btn = ttk.Button(
             filter_frame,
@@ -613,7 +616,7 @@ class StockMatchApp:
         ttk.Label(filter_frame, text="キーワード:").pack(side=tk.LEFT, padx=(10, 4))
         missing_search_entry = ttk.Entry(filter_frame, textvariable=self.missing_search_keyword, width=20)
         missing_search_entry.pack(side=tk.LEFT)
-        missing_search_entry.bind("<KeyRelease>", lambda e: self._refresh_missing_table())
+        missing_search_entry.bind("<KeyRelease>", lambda _e: self._refresh_missing_table())
 
         clear_missing_col_btn = ttk.Button(
             filter_frame,
@@ -1145,7 +1148,7 @@ class StockMatchApp:
         mgmt_abspath = os.path.normcase(os.path.realpath(os.path.abspath(mgmt_filepath))) if mgmt_filepath else ""
 
         file_list = []
-        for root_dir, dirs, files in os.walk(folder_path):
+        for root_dir, _dirs, files in os.walk(folder_path):
             for file_name in files:
                 file_list.append((root_dir, file_name))
 
@@ -1204,7 +1207,7 @@ class StockMatchApp:
     # 日付・文字列正規化ユーティリティ
     # =========================================================================
     @staticmethod
-    def _parse_flexible_date(val, default_year: int = None) -> datetime.date | None:
+    def _parse_flexible_date(val, default_year: int | None = None) -> datetime.date | None:
         if val is None or pd.isna(val):
             return None
 
@@ -2465,7 +2468,7 @@ class StockMatchApp:
             if o_no and o_no in all_mgmt_order_nos_8:
                 orders_by_no.setdefault(o_no, []).append(o_item)
 
-        total_orders = sum(len(l) for l in orders_by_no.values())
+        total_orders = sum(len(order_list) for order_list in orders_by_no.values())
         processed_orders = 0
 
         # 1. 注文書明細ベースの照合（タブ1用）
@@ -3137,7 +3140,7 @@ class StockMatchApp:
         def _on_canvas_configure(e):
             canvas.itemconfig(window_id, width=e.width)
 
-        def _on_frame_configure(e):
+        def _on_frame_configure(_e):
             canvas.configure(scrollregion=canvas.bbox("all"))
 
         canvas.bind("<Configure>", _on_canvas_configure)
@@ -3632,7 +3635,7 @@ def main():
         pass
 
     root = tk.Tk()
-    app = StockMatchApp(root)
+    _app = StockMatchApp(root)
     root.mainloop()
 
 
