@@ -19,10 +19,17 @@ try:
 except ImportError:
     HAS_SCIPY = False
 
+try:
+    import win32com.client
+    import pythoncom
+    HAS_WIN32COM = True
+except ImportError:
+    HAS_WIN32COM = False
+
 
 class StockMatchApp:
     """
-    StockMatch_Miya-v1.0.0
+    StockMatch_Miya-v1.1.0
     注文品管理表（1つのファイル）と注文書フォルダ内（サブフォルダ含む全階層）の全注文書Excelを双方向照合し、
     ・納期超過（現品確認日・請求日）および管理表未記載の注文書
     ・注文書未検出（管理表にあるのに注文書が見当たらない未発注明細 / ※AB列購入数0は自動除外）
@@ -41,7 +48,7 @@ class StockMatchApp:
 
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("StockMatch_Miya-v1.0.0 - 注文品納期・現品/請求照合システム")
+        self.root.title("StockMatch_Miya-v1.1.0 - 注文品納期・現品/請求照合システム")
 
         # メインウィンドウおよび全Toplevelウィンドウに icon.ico を適用
         self._apply_window_icon(self.root, is_main=True)
@@ -131,6 +138,19 @@ class StockMatchApp:
             foreground=[("disabled", "#e2e8f0")],
         )
 
+        style.configure(
+            "Excel.TButton",
+            font=("Meiryo UI", 9, "bold"),
+            background="#166534",
+            foreground="#ffffff",
+            padding=(10, 6),
+        )
+        style.map(
+            "Excel.TButton",
+            background=[("active", "#15803d"), ("disabled", "#94a3b8")],
+            foreground=[("disabled", "#e2e8f0")],
+        )
+
         style.configure("Action.TButton", font=("Meiryo UI", 9), padding=(8, 4))
         style.configure(
             "Horizontal.TProgressbar",
@@ -155,7 +175,7 @@ class StockMatchApp:
             padding=(4, 6),
         )
 
-        # --- タブウィジェット (Notebook) の視認性強化スタイル ---
+        # タブウィジェット (Notebook) スタイル
         style.configure(
             "TNotebook",
             background="#f8fafc",
@@ -199,7 +219,7 @@ class StockMatchApp:
         file_menu.add_command(label="注文書フォルダを選択...", command=self._select_order_dir, accelerator="Ctrl+D")
         file_menu.add_separator()
         file_menu.add_command(label="照合・遅延チェックを実行", command=self.run_analysis, accelerator="F5")
-        file_menu.add_command(label="CSV/Excel出力...", command=self._export_results, accelerator="Ctrl+S")
+        file_menu.add_command(label="Excelで直接開く (一時ファイルなし)", command=self._open_in_excel_direct, accelerator="Ctrl+S")
         file_menu.add_separator()
         file_menu.add_command(label="終了", command=self.root.quit, accelerator="Alt+F4")
         menubar.add_cascade(label="ファイル(F)", menu=file_menu)
@@ -223,7 +243,7 @@ class StockMatchApp:
         self.root.bind_all("<F5>", lambda e: self.run_analysis())
         self.root.bind_all("<Control-o>", lambda e: self._select_mgmt_file())
         self.root.bind_all("<Control-d>", lambda e: self._select_order_dir())
-        self.root.bind_all("<Control-s>", lambda e: self._export_results())
+        self.root.bind_all("<Control-s>", lambda e: self._open_in_excel_direct())
 
     def _build_ui(self):
         """メイン画面レイアウトの構築"""
@@ -233,7 +253,7 @@ class StockMatchApp:
         header_frame = tk.Frame(self.root, bg="#1e293b", height=56, padx=16, pady=10)
         header_frame.pack(fill=tk.X)
 
-        title_lbl = ttk.Label(header_frame, text="StockMatch_Miya-v1.0.0", style="Header.TLabel")
+        title_lbl = ttk.Label(header_frame, text="StockMatch_Miya-v1.1.0", style="Header.TLabel")
         title_lbl.pack(side=tk.LEFT)
 
         sub_lbl = ttk.Label(
@@ -332,10 +352,13 @@ class StockMatchApp:
             font=("Meiryo UI", 8),
         ).pack(side=tk.LEFT, padx=(0, 12))
 
-        self.export_btn = ttk.Button(
-            row3, text="CSV/Excel出力", style="Action.TButton", command=self._export_results
+        self.excel_open_btn = ttk.Button(
+            row3,
+            text="📊 Excelで直接開く",
+            style="Excel.TButton",
+            command=self._open_in_excel_direct,
         )
-        self.export_btn.pack(side=tk.RIGHT, padx=(8, 0))
+        self.excel_open_btn.pack(side=tk.RIGHT, padx=(8, 0))
 
         self.run_btn = ttk.Button(
             row3, text="照合・遅延チェック実行", style="Primary.TButton", command=self.run_analysis
@@ -423,7 +446,7 @@ class StockMatchApp:
         self.notebook.add(tab2, text="  ▷ ② 【未発注・注文書なし】管理表のみ記載 一覧 (0件)  ")
         self._build_missing_order_tab(tab2)
 
-        # タブ切り替えイベントをバインドして視覚的タイトルを同期更新
+        # タブ切り替えイベント
         self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
 
         # 5. ステータスバー
@@ -795,6 +818,26 @@ class StockMatchApp:
     # =========================================================================
     # ヘルプ・ガイドダイアログ
     # =========================================================================
+    def _create_scrollable_text(self, parent) -> tk.Text:
+        container = ttk.Frame(parent)
+        container.pack(fill=tk.BOTH, expand=True)
+        txt = tk.Text(
+            container,
+            wrap="word",
+            font=("Meiryo UI", 9),
+            padx=14,
+            pady=12,
+            relief="flat",
+            bg="#ffffff",
+            fg="#0f172a",
+        )
+        vsb = ttk.Scrollbar(container, orient="vertical", command=txt.yview)
+        txt.configure(yscrollcommand=vsb.set)
+        txt.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        self._configure_rich_text_tags(txt)
+        return txt
+
     def _configure_rich_text_tags(self, txt: tk.Text):
         txt.tag_configure(
             "h1",
@@ -868,7 +911,7 @@ class StockMatchApp:
 
     def _show_help_guide(self, tab_index: int = 0):
         win = tk.Toplevel(self.root)
-        win.title("StockMatch_Miya-v1.0.0 - ヘルプ＆操作ガイド")
+        win.title("StockMatch_Miya-v1.1.0 - ヘルプ＆操作ガイド")
         self._apply_window_icon(win)
         win.geometry("880x680")
         win.minsize(720, 520)
@@ -878,7 +921,7 @@ class StockMatchApp:
         banner.pack(fill=tk.X)
         tk.Label(
             banner,
-            text="📖 StockMatch_Miya-v1.0.0  取扱説明書・操作ガイド",
+            text="📖 StockMatch_Miya-v1.1.0  取扱説明書・操作ガイド",
             bg="#1e293b",
             fg="#ffffff",
             font=("Meiryo UI", 12, "bold"),
@@ -959,7 +1002,7 @@ class StockMatchApp:
         txt3.insert(tk.END, "・ F5 キー        :  照合・遅延チェックを実行する\n", "body")
         txt3.insert(tk.END, "・ Ctrl + O       :  ① 注文品管理表ファイルを選択する\n", "body")
         txt3.insert(tk.END, "・ Ctrl + D       :  ② 注文書フォルダを選択する\n", "body")
-        txt3.insert(tk.END, "・ Ctrl + S       :  検査結果を CSV / Excel ファイルに出力する (2シート出力)\n", "body")
+        txt3.insert(tk.END, "・ Ctrl + S       :  一時ファイルを作成せずExcel新規ブックで開く\n", "body")
         txt3.insert(tk.END, "・ Alt + F4       :  アプリケーションを終了する\n", "body")
         txt3.configure(state="disabled")
 
@@ -975,13 +1018,13 @@ class StockMatchApp:
     def _show_about(self):
         messagebox.showinfo(
             "バージョン情報",
-            "StockMatch_Miya-v1.0.0\n"
+            "StockMatch_Miya-v1.1.0\n"
             "注文書 ⇔ 管理表 双方向照合・現品/請求超過システム\n\n"
+            "・Excel直接起動: 一時ファイルなしで未保存新規ブックとして開く\n"
             "・タブ完全分離: 「①納期超過・照合一覧」と「②注文書未検出(管理表のみ)」を別一覧で確認可能\n"
             "・未発注一覧フィルタ: 注文品管理表のAB列「購入数」が0の明細は自動除外\n"
             "・照合方式: 全体最適1対1マッチング（※単価・金額は照合対象外）\n"
             "・自動分別: 2行目の記載により「見積依頼書」を除外し「注文書」のみ照合\n"
-            "・品名参照: 管理表の個別「品名」列（T列/O列）を正確に参照\n"
             "・探索範囲: 指定フォルダおよび配下の全サブフォルダを一括検査\n"
             f"・設定保存先: {self.CONFIG_FILE_PATH}\n\n"
             "© StockMatch_Miya System All Rights Reserved.",
@@ -1439,7 +1482,6 @@ class StockMatchApp:
                         elif "ライン名" in v_comb or "品名、ライン名" in v_comb or "品名・ライン名" in v_comb:
                             col_map["line_name"] = c_idx
                         elif ("品名" in v_comb or "名称" in v_comb or "商品名" in v_comb) and "品名、ライン名" not in v_comb:
-                            # T列(20列目)またはO列(15列目)付近の個別品名
                             if c_idx >= 15:
                                 col_map["item_name"] = c_idx
                             elif "item_name" not in col_map:
@@ -1449,7 +1491,6 @@ class StockMatchApp:
                         elif "仕様" in v_comb or "規格" in v_comb or "材質" in v_comb or "寸法" in v_comb:
                             col_map.setdefault("spec", c_idx)
                         elif "購入数" in v_comb or v_curr == "購入数":
-                            # ★ AB列（28列目付近）の購入数を最優先で設定
                             col_map["qty"] = c_idx
                         elif "必要数" in v_comb or v_curr == "必要数":
                             col_map.setdefault("req_qty", c_idx)
@@ -1470,14 +1511,12 @@ class StockMatchApp:
             if header_pos_in_list is None:
                 continue
 
-            # AB列（28列目）が購入数であるケースを確実に優先
-            # A=1, ..., Z=26, AA=27, AB=28, AI=35
             col_map.setdefault("actual_date", 1)    # A列: 現品確認日
             col_map.setdefault("order_no", 13)      # M列: 管理No
-            col_map.setdefault("item_name", 20)     # T列: 品名 (または15列目)
+            col_map.setdefault("item_name", 20)     # T列: 品名
             col_map.setdefault("maker", 21)         # U列: メーカー
             col_map.setdefault("spec", 23)          # W列: 仕様
-            col_map["qty"] = 28                     # AB列: ★購入数を強制・優先固定
+            col_map["qty"] = 28                     # AB列: 購入数
             col_map.setdefault("invoice_date", 35)  # AI列: 請求日
 
             data_slice = raw_rows[header_pos_in_list + 1 :]
@@ -1498,7 +1537,6 @@ class StockMatchApp:
                 line_val = _get_col(row_tuple, col_map.get("line_name"))
                 order_no_val = _get_col(row_tuple, col_map.get("order_no"))
 
-                # AB列の購入数を取得（万が一AB列が範囲外の場合はmapped qty）
                 qty_val = _get_col(row_tuple, 28)
                 if qty_val is None:
                     qty_val = _get_col(row_tuple, col_map.get("qty"))
@@ -1628,7 +1666,6 @@ class StockMatchApp:
         filename = os.path.basename(filepath)
         norm_fname = unicodedata.normalize("NFKC", filename)
 
-        file_order_no_8 = ""
         prefix_match = re.match(r"^\s*(\d{8})", norm_fname)
         if prefix_match:
             file_order_no_8 = prefix_match.group(1)
@@ -1958,7 +1995,7 @@ class StockMatchApp:
 
         self.is_running = True
         self.run_btn.configure(state=tk.DISABLED, text="照合処理中...")
-        self.export_btn.configure(state=tk.DISABLED)
+        self.excel_open_btn.configure(state=tk.DISABLED)
         self.progress_var.set(2.0)
         self.progress_text_var.set("解析を開始しています...")
         self.status_var.set("実行中: 注文品管理表と注文書フォルダを照合しています...")
@@ -2025,7 +2062,7 @@ class StockMatchApp:
                 elif msg_type == "DONE":
                     self.is_running = False
                     self.run_btn.configure(state=tk.NORMAL, text="照合・遅延チェック実行")
-                    self.export_btn.configure(state=tk.NORMAL)
+                    self.excel_open_btn.configure(state=tk.NORMAL)
 
                     self.analyzed_records = payload["main_records"]
                     self.missing_order_records = payload["missing_records"]
@@ -2060,7 +2097,7 @@ class StockMatchApp:
                 elif msg_type == "ERROR":
                     self.is_running = False
                     self.run_btn.configure(state=tk.NORMAL, text="照合・遅延チェック実行")
-                    self.export_btn.configure(state=tk.NORMAL)
+                    self.excel_open_btn.configure(state=tk.NORMAL)
                     self.progress_var.set(0.0)
                     self.progress_text_var.set("エラーが発生しました")
                     self.status_var.set(f"エラー: {payload}")
@@ -2543,7 +2580,6 @@ class StockMatchApp:
                 main_results.append(rec)
 
         # 2. 注文書未検出（管理表にあるのに注文書が見当たらない）明細の抽出（タブ2用）
-        # ★ 管理表のAB列「購入数」が 0（または0.0、全角０等）の項目は未発注一覧から完全除外
         for m in mgmt_rows:
             if m.get("matched"):
                 continue
@@ -2783,7 +2819,6 @@ class StockMatchApp:
         self.kpi_vars["ok"].set(f"{ok_cnt} 件")
         self.kpi_vars["missing_order"].set(f"{missing_cnt} 件")
 
-        # タブのタイトルと件数・選択インジケーターを同期更新
         self._on_tab_changed()
 
     # =========================================================================
@@ -3252,89 +3287,347 @@ class StockMatchApp:
         for index, (_, k) in enumerate(items):
             tree.move(k, "", index)
 
-    def _export_results(self):
-        """検査結果をExcel（2シート構成）またはCSVに出力する"""
+    # =========================================================================
+    # Excel直接展開機能（一時ファイル非作成・新規ブック展開）
+    # =========================================================================
+    @staticmethod
+    def _rgb_to_bgr_int(hex_color: str) -> int:
+        """#RRGGBB 形式の文字列を Excel COM の BGR 整数に変換"""
+        hex_color = hex_color.lstrip("#")
+        r = int(hex_color[0:2], 16)
+        g = int(hex_color[2:4], 16)
+        b = int(hex_color[4:6], 16)
+        return (b << 16) | (g << 8) | r
+
+    def _open_in_excel_direct(self):
+        """
+        一時ファイルを一切作成せず、ExcelのCOMオートメーション経由で
+        新規ブック（未保存）を作成し、書式・フィルター・判定色を再現して直接展開する
+        """
         if not self.analyzed_records and not self.missing_order_records:
-            messagebox.showinfo("出力対象なし", "先に「照合・遅延チェック実行」を行ってください。")
+            messagebox.showinfo("データなし", "先に「照合・遅延チェック実行」を行ってください。")
             return
 
-        save_path = filedialog.asksaveasfilename(
-            title="超過一覧レポートの保存",
-            defaultextension=".xlsx",
-            initialfile=f"納期超過チェック結果_{self.base_date_str.get()}.xlsx",
-            filetypes=[("Excelファイル (2シート出力)", "*.xlsx"), ("CSVファイル (照合結果のみ)", "*.csv")],
-        )
-        if not save_path:
+        if not HAS_WIN32COM:
+            messagebox.showerror(
+                "モジュール未検出",
+                "Excelを直接起動するには 'pywin32' パッケージが必要です。\n"
+                "ターミナルまたはコマンドプロンプトで以下を実行してください:\n"
+                "pip install pywin32",
+            )
             return
 
-        # 1. 注文書照合結果行
-        export_main = []
-        for r in self.analyzed_records:
-            export_main.append(
-                {
-                    "総合判定": r["status_badge"],
-                    "不一致理由・照合診断": r["mismatch_reason"],
-                    "依頼区分": r["req_type"],
-                    "管理No(注文番号)": r["order_no"],
-                    "発注先": r["supplier"],
-                    "メーカー": r["maker"],
-                    "品名": r["item_name"],
-                    "型番・規格": r["model_spec"],
-                    "数量": r["qty"],
-                    "注文書納期": r["due_date_str"],
-                    "基準日超過": r["days_overdue_str"],
-                    "現品確認日(物)": r["actual_date_str"],
-                    "現品状況": r["actual_status"],
-                    "請求日(伝票)": r["invoice_date_str"],
-                    "請求状況": r["invoice_status"],
-                    "現品超過フラグ": "超過" if r["actual_overdue"] else "正常",
-                    "請求超過フラグ": "超過" if r["invoice_overdue"] else "正常",
-                    "管理表不一致フラグ": "管理表なし" if r.get("is_unmatched") else "-",
-                    "担当": r["person"],
-                    "照合元情報": r["source_info"],
+        self.excel_open_btn.configure(state=tk.DISABLED, text="Excel生成中...")
+        self.status_var.set("Excelを起動し、新規ブックにデータを転送しています（一時ファイルなし）...")
+
+        def _excel_worker():
+            try:
+                pythoncom.CoInitialize()
+
+                try:
+                    excel = win32com.client.GetActiveObject("Excel.Application")
+                except Exception:
+                    excel = win32com.client.Dispatch("Excel.Application")
+
+                excel.Visible = True
+                excel.ScreenUpdating = False
+                excel.DisplayAlerts = False
+
+                # 新規ブックの作成（一時ファイルはディスク上に作成されない）
+                wb = excel.Workbooks.Add()
+
+                # シートの準備（2シート構成）
+                while wb.Sheets.Count < 2:
+                    wb.Sheets.Add(After=wb.Sheets(wb.Sheets.Count))
+
+                ws1 = wb.Sheets(1)
+                ws1.Name = "納期超過・照合結果"
+
+                ws2 = wb.Sheets(2)
+                ws2.Name = "注文書未検出(管理表のみ)"
+
+                # カラー定義（BGR int）
+                header_bg = self._rgb_to_bgr_int("1E293B")
+                header_fg = self._rgb_to_bgr_int("FFFFFF")
+                border_color = self._rgb_to_bgr_int("CBD5E1")
+
+                color_map = {
+                    "UNMATCHED": {
+                        "bg": self._rgb_to_bgr_int("EDE9FE"),
+                        "fg": self._rgb_to_bgr_int("4C1D95"),
+                    },
+                    "BOTH_DELAY": {
+                        "bg": self._rgb_to_bgr_int("FEE2E2"),
+                        "fg": self._rgb_to_bgr_int("7F1D1D"),
+                    },
+                    "ACTUAL_DELAY": {
+                        "bg": self._rgb_to_bgr_int("FFEDD5"),
+                        "fg": self._rgb_to_bgr_int("7C2D12"),
+                    },
+                    "INVOICE_DELAY": {
+                        "bg": self._rgb_to_bgr_int("FEF9C3"),
+                        "fg": self._rgb_to_bgr_int("713F12"),
+                    },
+                    "OK": {
+                        "bg": self._rgb_to_bgr_int("FFFFFF"),
+                        "fg": self._rgb_to_bgr_int("334155"),
+                    },
+                    "MISSING_ORDER": {
+                        "bg": self._rgb_to_bgr_int("FEF3C7"),
+                        "fg": self._rgb_to_bgr_int("92400E"),
+                    },
                 }
-            )
 
-        # 2. 注文書未検出（管理表のみ）行
-        export_missing = []
-        for r in self.missing_order_records:
-            export_missing.append(
-                {
-                    "状態判定": r["status_badge"],
-                    "管理表シート": r["mgmt_sheet"],
-                    "行番号": r["mgmt_row"],
-                    "管理No(8桁)": r["order_no"],
-                    "業者 / 発注先": r["supplier"],
-                    "メーカー": r["maker"],
-                    "品名": r["item_name"],
-                    "型番・規格・図番": r["model_spec"],
-                    "購入数": r["qty"],
-                    "管理表納期": r["due_date"],
-                    "現品確認日": r["actual_date"],
-                    "請求日": r["invoice_date"],
-                    "担当": r["person"],
-                    "未検出診断内容": r["mismatch_reason"],
-                }
-            )
+                # -------------------------------------------------------------
+                # 1. シート1: 納期超過・照合結果
+                # -------------------------------------------------------------
+                headers_main = [
+                    "総合判定",
+                    "不一致理由・照合診断",
+                    "依頼区分",
+                    "管理No(注文番号)",
+                    "発注先",
+                    "メーカー",
+                    "品名",
+                    "型番・規格(図番)",
+                    "数量",
+                    "注文書納期",
+                    "基準日超過",
+                    "現品確認日(物)",
+                    "現品状況",
+                    "請求日(伝票)",
+                    "請求状況",
+                    "担当",
+                    "照合元情報",
+                ]
 
-        df_main = pd.DataFrame(export_main)
-        df_missing = pd.DataFrame(export_missing)
+                rows_main_data = []
+                tags_main = []
+                for r in self.analyzed_records:
+                    rows_main_data.append(
+                        [
+                            r["status_badge"],
+                            r["mismatch_reason"],
+                            r["req_type"],
+                            r["order_no"],
+                            r["supplier"],
+                            r["maker"],
+                            r["item_name"],
+                            r["model_spec"],
+                            r["qty"],
+                            r["due_date_str"],
+                            r["days_overdue_str"],
+                            r["actual_date_str"],
+                            r["actual_status"],
+                            r["invoice_date_str"],
+                            r["invoice_status"],
+                            r["person"],
+                            r["source_info"],
+                        ]
+                    )
+                    tags_main.append(r["row_tag"])
 
+                num_main_rows = len(rows_main_data)
+                num_main_cols = len(headers_main)
+
+                # ヘッダー書き込み
+                ws1.Range(ws1.Cells(1, 1), ws1.Cells(1, num_main_cols)).Value = headers_main
+                h_rng1 = ws1.Range(ws1.Cells(1, 1), ws1.Cells(1, num_main_cols))
+                h_rng1.Font.Bold = True
+                h_rng1.Font.Name = "Meiryo UI"
+                h_rng1.Font.Size = 10
+                h_rng1.Font.Color = header_fg
+                h_rng1.Interior.Color = header_bg
+                h_rng1.RowHeight = 26
+                h_rng1.VerticalAlignment = -4108  # xlCenter
+
+                if num_main_rows > 0:
+                    data_rng1 = ws1.Range(ws1.Cells(2, 1), ws1.Cells(num_main_rows + 1, num_main_cols))
+                    data_rng1.Value = rows_main_data
+                    data_rng1.Font.Name = "Meiryo UI"
+                    data_rng1.Font.Size = 9
+                    data_rng1.RowHeight = 22
+                    data_rng1.VerticalAlignment = -4108  # xlCenter
+
+                    # 行ごとのハイライト適用
+                    for idx, tag in enumerate(tags_main, start=2):
+                        if tag in color_map:
+                            row_rng = ws1.Range(ws1.Cells(idx, 1), ws1.Cells(idx, num_main_cols))
+                            row_rng.Interior.Color = color_map[tag]["bg"]
+                            row_rng.Font.Color = color_map[tag]["fg"]
+
+                    # 罫線の設定
+                    all_rng1 = ws1.Range(ws1.Cells(1, 1), ws1.Cells(num_main_rows + 1, num_main_cols))
+                    for border_id in [7, 8, 9, 10, 11, 12]:  # xlEdgeLeft, Right, Top, Bottom, InsideV, InsideH
+                        try:
+                            all_rng1.Borders(border_id).LineStyle = 1  # xlContinuous
+                            all_rng1.Borders(border_id).Color = border_color
+                        except Exception:
+                            pass
+
+                    # オートフィルター設定
+                    ws1.Range(ws1.Cells(1, 1), ws1.Cells(num_main_rows + 1, num_main_cols)).AutoFilter(Field=1)
+                else:
+                    ws1.Range(ws1.Cells(1, 1), ws1.Cells(1, num_main_cols)).AutoFilter(Field=1)
+
+                ws1.Columns.AutoFit()
+
+                # シート1の見出し（1行目）をスクロール時も隠れないようにウィンドウ枠固定
+                ws1.Activate()
+                excel.ActiveWindow.SplitRow = 1
+                excel.ActiveWindow.SplitColumn = 0
+                ws1.Range("A2").Select()
+                excel.ActiveWindow.FreezePanes = True
+
+                # -------------------------------------------------------------
+                # 2. シート2: 注文書未検出(管理表のみ)
+                # -------------------------------------------------------------
+                headers_missing = [
+                    "状態判定",
+                    "管理表シート",
+                    "行番号",
+                    "管理No(8桁)",
+                    "業者 / 発注先",
+                    "メーカー",
+                    "品名",
+                    "型番・規格・図番",
+                    "購入数",
+                    "管理表納期",
+                    "現品確認日",
+                    "請求日",
+                    "担当",
+                    "未検出診断内容",
+                ]
+
+                rows_missing_data = []
+                for r in self.missing_order_records:
+                    rows_missing_data.append(
+                        [
+                            r["status_badge"],
+                            r["mgmt_sheet"],
+                            r["mgmt_row"],
+                            r["order_no"],
+                            r["supplier"],
+                            r["maker"],
+                            r["item_name"],
+                            r["model_spec"],
+                            r["qty"],
+                            r["due_date"],
+                            r["actual_date"],
+                            r["invoice_date"],
+                            r["person"],
+                            r["mismatch_reason"],
+                        ]
+                    )
+
+                num_missing_rows = len(rows_missing_data)
+                num_missing_cols = len(headers_missing)
+
+                ws2.Range(ws2.Cells(1, 1), ws2.Cells(1, num_missing_cols)).Value = headers_missing
+                h_rng2 = ws2.Range(ws2.Cells(1, 1), ws2.Cells(1, num_missing_cols))
+                h_rng2.Font.Bold = True
+                h_rng2.Font.Name = "Meiryo UI"
+                h_rng2.Font.Size = 10
+                h_rng2.Font.Color = header_fg
+                h_rng2.Interior.Color = header_bg
+                h_rng2.RowHeight = 26
+                h_rng2.VerticalAlignment = -4108  # xlCenter
+
+                if num_missing_rows > 0:
+                    data_rng2 = ws2.Range(ws2.Cells(2, 1), ws2.Cells(num_missing_rows + 1, num_missing_cols))
+                    data_rng2.Value = rows_missing_data
+                    data_rng2.Font.Name = "Meiryo UI"
+                    data_rng2.Font.Size = 9
+                    data_rng2.RowHeight = 22
+                    data_rng2.VerticalAlignment = -4108  # xlCenter
+
+                    # 未発注行の配色
+                    m_bg = color_map["MISSING_ORDER"]["bg"]
+                    m_fg = color_map["MISSING_ORDER"]["fg"]
+                    for idx in range(2, num_missing_rows + 2):
+                        row_rng = ws2.Range(ws2.Cells(idx, 1), ws2.Cells(idx, num_missing_cols))
+                        row_rng.Interior.Color = m_bg
+                        row_rng.Font.Color = m_fg
+
+                    # 罫線の設定
+                    all_rng2 = ws2.Range(ws2.Cells(1, 1), ws2.Cells(num_missing_rows + 1, num_missing_cols))
+                    for border_id in [7, 8, 9, 10, 11, 12]:
+                        try:
+                            all_rng2.Borders(border_id).LineStyle = 1
+                            all_rng2.Borders(border_id).Color = border_color
+                        except Exception:
+                            pass
+
+                    ws2.Range(ws2.Cells(1, 1), ws2.Cells(num_missing_rows + 1, num_missing_cols)).AutoFilter(Field=1)
+                else:
+                    ws2.Range(ws2.Cells(1, 1), ws2.Cells(1, num_missing_cols)).AutoFilter(Field=1)
+
+                ws2.Columns.AutoFit()
+
+                # シート2の見出し（1行目）をスクロール時も隠れないようにウィンドウ枠固定
+                ws2.Activate()
+                excel.ActiveWindow.SplitRow = 1
+                excel.ActiveWindow.SplitColumn = 0
+                ws2.Range("A2").Select()
+                excel.ActiveWindow.FreezePanes = True
+
+                # 最終的に第1シートをアクティブにし、A1セルを選択
+                ws1.Activate()
+                ws1.Range("A1").Select()
+
+                excel.ScreenUpdating = True
+                excel.DisplayAlerts = True
+
+                # Excelウィンドウを最前面に表示
+                try:
+                    excel.WindowState = -4137  # xlMaximized
+                except Exception:
+                    pass
+
+                self.ui_queue.put(("EXCEL_OPENED_SUCCESS", None))
+
+            except Exception as e:
+                self.ui_queue.put(("EXCEL_OPENED_ERROR", str(e)))
+            finally:
+                pythoncom.CoUninitialize()
+
+        worker = threading.Thread(target=_excel_worker, daemon=True)
+        worker.start()
+        self.root.after(50, self._poll_excel_queue)
+
+    def _poll_excel_queue(self):
         try:
-            if save_path.lower().endswith(".csv"):
-                df_main.to_csv(save_path, index=False, encoding="utf-8-sig")
-            else:
-                with pd.ExcelWriter(save_path, engine="openpyxl") as writer:
-                    df_main.to_excel(writer, sheet_name="納期超過・照合結果", index=False)
-                    df_missing.to_excel(writer, sheet_name="注文書未検出(管理表のみ)", index=False)
-            messagebox.showinfo("出力完了", f"検査結果を保存しました:\n{save_path}")
-        except Exception as e:
-            messagebox.showerror("保存エラー", f"ファイルの保存に失敗しました:\n{e}")
+            while True:
+                msg_type, payload = self.ui_queue.get_nowait()
+                if msg_type == "EXCEL_OPENED_SUCCESS":
+                    self.excel_open_btn.configure(state=tk.NORMAL, text="📊 Excelで直接開く")
+                    self.status_var.set("新規Excelブックに照合結果を展開しました（未保存の新規ブックとして開いています）。")
+                    messagebox.showinfo(
+                        "Excel起動完了",
+                        "一時ファイルを作成せず、Excelの新規ブックとして直接展開しました。\n\n"
+                        "・シート1: 納期超過・照合結果\n"
+                        "・シート2: 注文書未検出(管理表のみ)\n"
+                        "※アプリと同じ色分け・書式・オートフィルターが設定されています。\n"
+                        "保存が必要な場合は、Excel側で「名前を付けて保存」を行ってください。",
+                    )
+                    return
+                elif msg_type == "EXCEL_OPENED_ERROR":
+                    self.excel_open_btn.configure(state=tk.NORMAL, text="📊 Excelで直接開く")
+                    self.status_var.set(f"Excel展開エラー: {payload}")
+                    messagebox.showerror("Excel展開エラー", f"Excelの起動またはデータ転送中にエラーが発生しました:\n{payload}")
+                    return
+                else:
+                    self.ui_queue.put((msg_type, payload))
+                    break
+        except queue.Empty:
+            pass
+
+        self.root.after(50, self._poll_excel_queue)
 
 
 def main():
     try:
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("StockMatch.Miya.v1.0.0")
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("StockMatch.Miya.v1.1.0")
     except Exception:
         pass
 
