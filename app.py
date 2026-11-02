@@ -9,6 +9,7 @@ import datetime
 import difflib
 import threading
 import queue
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import pandas as pd  # type: ignore
@@ -92,6 +93,11 @@ class StockMatchApp:
         self.analyzed_records = []       # タブ1: 注文書由来の照合・遅延レコード
         self.missing_order_records = []   # タブ2: 注文書未検出（管理表のみ）レコード
         self.cached_mgmt_rows = []       # 注文品管理表の全行キャッシュ（プレビュー参照用）
+
+        # 高速化用インメモリキャッシュ（更新日時・ファイルサイズベースで未変更ファイルの再読込を省略）
+        self._mgmt_file_cache = None     # (norm_path, mtime, size, mgmt_rows)
+        self._order_file_cache = {}      # norm_path -> (mtime, size, extracted_items)
+        self._cache_lock = threading.Lock()
 
         # 各タブの列フィルター保持用辞書
         self.column_filters_main = {}
@@ -2011,10 +2017,11 @@ class StockMatchApp:
         txt1.insert(tk.END, "・管理表に登録されているすべての「管理No（8桁）」を自動抽出し、一致する注文書を照合します。\n", "point")
         txt1.insert(tk.END, "・管理表のAB列（28列目）にある「購入数」列を正確に参照します。\n", "sub_note")
 
-        txt1.insert(tk.END, "② 注文書フォルダパスの選択（サブフォルダ自動対応）\n", "h2")
+        txt1.insert(tk.END, "② 注文書フォルダパスの選択（サブフォルダ自動対応・高速枝刈りスキャン）\n", "h2")
         txt1.insert(tk.END, "・『フォルダを参照...』ボタンから注文書Excelが保管されている親フォルダを選択します。\n", "body")
-        txt1.insert(tk.END, "★【サブフォルダ一括探索】指定したフォルダ直下だけでなく、配下の全サブフォルダ内も漏れなく自動スキャンします。\n", "point")
-        txt1.insert(tk.END, "★【見積依頼書の自動除外】Excelシートの2行目を自動検査し、「見積」の記載があるシートは除外して「注文」シートのみを照合します。\n", "point")
+        txt1.insert(tk.END, "★【サブフォルダ一括探索＆管理Noフォルダ自動スキップ】配下の全サブフォルダを探索する際、フォルダ名に8桁の管理Noが記載されており、それが注文品管理表に存在しない場合はフォルダごと丸ごとスキップ（枝刈り）して高速化します。\n", "point")
+        txt1.insert(tk.END, "★【並列読み込み＆メモリキャッシュ高速化】対象の注文書Excelはマルチスレッド並列で高速に読み込まれ、変更のないファイルは2回目以降の照合時にメモリキャッシュから瞬時に復元されます。\n", "point")
+        txt1.insert(tk.END, "★【見積依頼書の自動除外】ファイル名およびExcelシートの2行目を自動検査し、「見積」の記載があるシートは即座に除外して「注文」シートのみを照合します。\n", "point")
 
         txt1.insert(tk.END, "\n  STEP 2 : 判定基準日・超過日数の設定と保存  \n", "h1")
         txt1.insert(tk.END, "■ 判定基準日（今日）と設定の保存\n", "h2")
@@ -2114,7 +2121,7 @@ class StockMatchApp:
             "・納期未記載対応: 注文書納期が空欄時、注文日(4行目)から指定日数(初期値7日)経過で超過判定\n"
             "・照合方式: 全体最適1対1マッチング（※単価・金額は照合対象外）\n"
             "・自動分別: 2行目の記載により「見積依頼書」を除外し「注文書」のみ照合\n"
-            "・探索範囲: 指定フォルダおよび配下の全サブフォルダを一括検査\n"
+            "・高速探索: 管理表にない管理Noフォルダの丸ごとスキップ＋並列読込＋キャッシュ対応\n"
             f"・設定保存先: {self.CONFIG_FILE_PATH}\n\n"
             "© StockMatch_Miya System All Rights Reserved.",
         )
@@ -2249,68 +2256,213 @@ class StockMatchApp:
     def _collect_valid_order_files(
         self, folder_path: str, mgmt_filepath: str, valid_mgmt_order_nos: set[str], progress_cb=None
     ) -> tuple[list[dict], int, int]:
+        """
+        指定フォルダ配下を高速探索し、注文品管理表に存在する管理Noに対応する注文書のみを抽出する。
+        1. サブフォルダ名に8桁の管理Noが含まれ、それが管理表に存在しない場合はフォルダごと丸ごとスキップ（枝刈り）
+        2. ファイル名段階で拡張子・一時ファイル・見積書・管理No不一致を高速判定し、不要なI/Oを完全排除
+        3. 未変更ファイルはメモリキャッシュから即座に復元し、新規・更新ファイルはマルチスレッド並列で高速解析
+        """
         order_items = []
         valid_file_count = 0
         ignored_file_count = 0
+        skipped_dir_count = 0
 
-        mgmt_abspath = os.path.normcase(os.path.realpath(os.path.abspath(mgmt_filepath))) if mgmt_filepath else ""
+        mgmt_abspath = os.path.normcase(os.path.abspath(mgmt_filepath)) if mgmt_filepath else ""
+        re_8digit = re.compile(r"(?<!\d)(\d{8})(?!\d)")
 
-        file_list = []
-        for root_dir, _dirs, files in os.walk(folder_path):
+        candidate_files = []  # (full_path, rel_display, hint_order_no_8, mtime, size)
+
+        # スタックを用いた os.scandir 枝刈り探索（不要なサブフォルダへのアクセス自体を遮断）
+        scan_stack = [(folder_path, "")]
+        scanned_dirs = 0
+
+        while scan_stack:
             if self.cancel_event.is_set():
                 raise AnalysisCancelledException("照合処理がユーザーによって中止されました。")
-            for file_name in files:
-                file_list.append((root_dir, file_name))
 
-        file_list.sort(key=lambda item: os.path.join(item[0], item[1]))
-        total_entries = len(file_list)
+            curr_dir, inherited_no_8 = scan_stack.pop()
+            scanned_dirs += 1
 
-        for idx, (root_dir, entry_name) in enumerate(file_list, start=1):
-            if self.cancel_event.is_set():
-                raise AnalysisCancelledException("照合処理がユーザーによって中止されました。")
-            full_path = os.path.join(root_dir, entry_name)
-
-            if progress_cb:
-                pct = 35.0 + (40.0 * idx / max(1, total_entries))
-                rel_display = os.path.relpath(full_path, folder_path)
+            if progress_cb and (scanned_dirs == 1 or scanned_dirs % 15 == 0):
                 progress_cb(
-                    pct,
-                    f"[2/3] 注文書フォルダを確認中 ({idx}/{total_entries}): {rel_display}",
+                    36.0,
+                    f"[2/3] フォルダ構造を高速フィルタリング中 (対象候補: {len(candidate_files)}件 / 不要フォルダスキップ: {skipped_dir_count}件)...",
                 )
 
-            if entry_name.startswith("~$") or entry_name.startswith("."):
-                ignored_file_count += 1
+            try:
+                with os.scandir(curr_dir) as it:
+                    entries = list(it)
+            except Exception:
                 continue
 
-            if not entry_name.lower().endswith((".xlsx", ".xlsm")):
-                ignored_file_count += 1
-                continue
+            sub_dirs_to_push = []
+            for entry in entries:
+                if self.cancel_event.is_set():
+                    raise AnalysisCancelledException("照合処理がユーザーによって中止されました。")
 
-            full_abspath = os.path.normcase(os.path.realpath(os.path.abspath(full_path)))
-            if (
-                full_abspath == mgmt_abspath
-                or "管理表" in entry_name
-                or "納期超過チェック結果" in entry_name
-            ):
-                ignored_file_count += 1
-                continue
-
-            norm_entry = unicodedata.normalize("NFKC", entry_name)
-            m_pre = re.match(r"^\s*(\d{8})", norm_entry)
-            if m_pre:
-                file_no_8 = m_pre.group(1)
-                if file_no_8 not in valid_mgmt_order_nos:
+                entry_name = entry.name
+                if entry_name.startswith("~$") or entry_name.startswith("."):
                     ignored_file_count += 1
                     continue
 
-            try:
-                extracted = self._parse_order_book(full_path, valid_mgmt_order_nos)
-                if extracted:
-                    order_items.extend(extracted)
-                    valid_file_count += 1
+                try:
+                    is_dir = entry.is_dir(follow_symlinks=False)
+                except Exception:
+                    is_dir = False
+
+                if is_dir:
+                    norm_dname = unicodedata.normalize("NFKC", entry_name).strip()
+                    dir_8_list = re_8digit.findall(norm_dname)
+                    matched_in_dir = [d for d in dir_8_list if d in valid_mgmt_order_nos]
+                    non_date_in_dir = [d for d in dir_8_list if not d.startswith(("19", "20"))]
+
+                    if matched_in_dir:
+                        # 管理表に存在する管理Noのフォルダ → 探索対象として中へ入る
+                        sub_dirs_to_push.append((entry.path, matched_in_dir[0]))
+                    elif non_date_in_dir or dir_8_list:
+                        # フォルダ名に8桁の管理Noがあるが管理表に一切存在しない → フォルダごと丸ごとスキップ！
+                        skipped_dir_count += 1
+                        ignored_file_count += 1
+                        continue
+                    else:
+                        # 分類用フォルダ（8桁番号なし）→ 親の管理Noを引き継いで中へ入る
+                        sub_dirs_to_push.append((entry.path, inherited_no_8))
                 else:
-                    ignored_file_count += 1
-            except Exception:
+                    if not entry_name.lower().endswith((".xlsx", ".xlsm")):
+                        ignored_file_count += 1
+                        continue
+
+                    if "管理表" in entry_name or "納期超過チェック結果" in entry_name:
+                        ignored_file_count += 1
+                        continue
+
+                    norm_fname = unicodedata.normalize("NFKC", entry_name).strip()
+
+                    # ファイル名に「見積」が含まれ「注文」「発注」が含まれない場合は開かずに即スキップ
+                    if "見積" in norm_fname and not any(k in norm_fname for k in ("注文", "発注")):
+                        ignored_file_count += 1
+                        continue
+
+                    file_8_list = re_8digit.findall(norm_fname)
+                    matched_in_file = [d for d in file_8_list if d in valid_mgmt_order_nos]
+                    non_date_in_file = [d for d in file_8_list if not d.startswith(("19", "20"))]
+
+                    if matched_in_file:
+                        hint_no_8 = matched_in_file[0]
+                    elif non_date_in_file or file_8_list:
+                        # ファイル名に8桁番号があるが管理表に存在しない → Excelを開かずに即スキップ！
+                        ignored_file_count += 1
+                        continue
+                    else:
+                        hint_no_8 = inherited_no_8
+
+                    full_path = entry.path
+                    if os.path.normcase(os.path.abspath(full_path)) == mgmt_abspath:
+                        ignored_file_count += 1
+                        continue
+
+                    try:
+                        st = entry.stat(follow_symlinks=False)
+                        mtime = st.st_mtime
+                        fsize = st.st_size
+                    except Exception:
+                        mtime = 0.0
+                        fsize = 0
+
+                    rel_display = os.path.relpath(full_path, folder_path)
+                    candidate_files.append((full_path, rel_display, hint_no_8, mtime, fsize))
+
+            # フォルダ順を綺麗に保つため逆順でスタックに積む
+            for sub_item in reversed(sorted(sub_dirs_to_push, key=lambda x: x[0])):
+                scan_stack.append(sub_item)
+
+        candidate_files.sort(key=lambda item: item[0])
+        total_candidates = len(candidate_files)
+
+        if total_candidates == 0:
+            return [], 0, ignored_file_count
+
+        # キャッシュヒット判定と新規解析対象の振り分け
+        results_by_index: dict[int, list[dict]] = {}
+        to_parse_tasks = []  # (idx, full_path, rel_display, hint_no_8, norm_path, mtime, fsize)
+
+        for idx, (full_path, rel_display, hint_no_8, mtime, fsize) in enumerate(candidate_files):
+            norm_path = os.path.normcase(os.path.abspath(full_path))
+            cached_entry = self._order_file_cache.get(norm_path)
+            if cached_entry is not None and mtime > 0 and cached_entry[0] == mtime and cached_entry[1] == fsize:
+                cached_items = cached_entry[2]
+                # キャッシュ内のアイテムのうち現在の管理表に含まれる管理Noのみ抽出
+                valid_cached = [
+                    dict(item)
+                    for item in cached_items
+                    if item.get("order_no_8") in valid_mgmt_order_nos
+                ]
+                results_by_index[idx] = valid_cached
+            else:
+                to_parse_tasks.append((idx, full_path, rel_display, hint_no_8, norm_path, mtime, fsize))
+
+        # 未キャッシュ（初回または更新済み）の注文書Excelをマルチスレッド並列で高速読み込み
+        if to_parse_tasks:
+            total_to_parse = len(to_parse_tasks)
+            completed_parse = 0
+
+            def _worker_parse(task_tuple):
+                t_idx, t_full_path, t_rel, t_hint_no, t_norm_path, t_mtime, t_fsize = task_tuple
+                if self.cancel_event.is_set():
+                    raise AnalysisCancelledException("照合処理がユーザーによって中止されました。")
+                parsed = self._parse_order_book(
+                    t_full_path, valid_mgmt_order_nos, folder_order_no_8=t_hint_no
+                )
+                return t_idx, t_rel, t_norm_path, t_mtime, t_fsize, parsed
+
+            max_workers = min(6, max(1, total_to_parse))
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                future_to_task = {executor.submit(_worker_parse, t): t for t in to_parse_tasks}
+                for future in as_completed(future_to_task):
+                    if self.cancel_event.is_set():
+                        for f in future_to_task:
+                            f.cancel()
+                        raise AnalysisCancelledException("照合処理がユーザーによって中止されました。")
+
+                    completed_parse += 1
+                    try:
+                        t_idx, t_rel, t_norm_path, t_mtime, t_fsize, parsed_items = future.result()
+                        results_by_index[t_idx] = parsed_items
+                        if t_mtime > 0:
+                            with self._cache_lock:
+                                self._order_file_cache[t_norm_path] = (t_mtime, t_fsize, parsed_items)
+                    except AnalysisCancelledException:
+                        for f in future_to_task:
+                            f.cancel()
+                        raise
+                    except Exception:
+                        t_orig = future_to_task[future]
+                        results_by_index[t_orig[0]] = []
+
+                    if progress_cb and (
+                        completed_parse == 1
+                        or completed_parse % 3 == 0
+                        or completed_parse == total_to_parse
+                    ):
+                        pct = 38.0 + (36.0 * completed_parse / max(1, total_to_parse))
+                        progress_cb(
+                            pct,
+                            f"[2/3] 対象の注文書を読み込み中 ({completed_parse}/{total_to_parse}件 / 不要フォルダ{skipped_dir_count}件スキップ済)",
+                        )
+        else:
+            if progress_cb:
+                progress_cb(
+                    74.0,
+                    f"[2/3] キャッシュから注文書データを高速復元しました ({total_candidates}件 / 不要フォルダ{skipped_dir_count}件スキップ済)",
+                )
+
+        # 元のファイル順序通りに結果を集約
+        for idx in range(total_candidates):
+            extracted = results_by_index.get(idx, [])
+            if extracted:
+                order_items.extend(extracted)
+                valid_file_count += 1
+            else:
                 ignored_file_count += 1
 
         return order_items, valid_file_count, ignored_file_count
@@ -2653,6 +2805,27 @@ class StockMatchApp:
     # Excel解析ロジック
     # =========================================================================
     def _parse_management_book(self, filepath: str, progress_cb=None) -> list[dict]:
+        norm_path = os.path.normcase(os.path.abspath(filepath))
+        mtime = 0.0
+        fsize = 0
+        try:
+            st = os.stat(filepath)
+            mtime = st.st_mtime
+            fsize = st.st_size
+        except Exception:
+            pass
+
+        if (
+            self._mgmt_file_cache is not None
+            and mtime > 0
+            and self._mgmt_file_cache[0] == norm_path
+            and self._mgmt_file_cache[1] == mtime
+            and self._mgmt_file_cache[2] == fsize
+        ):
+            if progress_cb:
+                progress_cb(33.0, "[1/3] 注文品管理表をメモリキャッシュから高速復元しました...")
+            return [dict(r, matched=False, matched_by="") for r in self._mgmt_file_cache[3]]
+
         wb = openpyxl.load_workbook(filepath, data_only=True, read_only=True)
         mgmt_rows = []
         sheet_names = wb.sheetnames
@@ -2685,10 +2858,10 @@ class StockMatchApp:
             ws = wb[sheet_name]
             raw_rows = []
             empty_streak = 0
-            for r_idx, row_tuple in enumerate(ws.iter_rows(max_col=60, values_only=True), start=1):
+            for r_idx, row_tuple in enumerate(ws.iter_rows(max_col=42, values_only=True), start=1):
                 if not row_tuple or not any(v is not None and str(v).strip() != "" for v in row_tuple):
                     empty_streak += 1
-                    if r_idx > 20 and empty_streak >= 100:
+                    if r_idx > 20 and empty_streak >= 60:
                         break
                     continue
                 empty_streak = 0
@@ -2920,9 +3093,18 @@ class StockMatchApp:
                 )
 
         wb.close()
+        if mtime > 0:
+            self._mgmt_file_cache = (
+                norm_path,
+                mtime,
+                fsize,
+                [dict(r) for r in mgmt_rows],
+            )
         return mgmt_rows
 
-    def _parse_order_book(self, filepath: str, valid_mgmt_order_nos: set[str]) -> list[dict]:
+    def _parse_order_book(
+        self, filepath: str, valid_mgmt_order_nos: set[str], folder_order_no_8: str = ""
+    ) -> list[dict]:
         if self.cancel_event.is_set():
             raise AnalysisCancelledException("照合処理がユーザーによって中止されました。")
         wb = openpyxl.load_workbook(filepath, data_only=True, read_only=True)
@@ -2935,6 +3117,9 @@ class StockMatchApp:
             file_order_no_8 = prefix_match.group(1)
         else:
             file_order_no_8 = self._extract_8digit_no(norm_fname)
+
+        if not file_order_no_8 and folder_order_no_8:
+            file_order_no_8 = folder_order_no_8
 
         if file_order_no_8 and file_order_no_8 not in valid_mgmt_order_nos:
             wb.close()
@@ -2963,32 +3148,39 @@ class StockMatchApp:
 
             raw_rows = []
             empty_streak = 0
-            for r_idx, row_tuple in enumerate(ws.iter_rows(max_row=300, max_col=35, values_only=True), start=1):
+            row2_text = ""
+            skip_as_estimate = False
+
+            for r_idx, row_tuple in enumerate(ws.iter_rows(max_row=220, max_col=28, values_only=True), start=1):
                 if not row_tuple or not any(v is not None and str(v).strip() != "" for v in row_tuple):
                     empty_streak += 1
-                    if r_idx > 25 and empty_streak >= 30:
+                    if r_idx > 20 and empty_streak >= 18:
                         break
                     continue
                 empty_streak = 0
-                raw_rows.append((r_idx, row_tuple))
 
-            if not raw_rows:
-                continue
-
-            row2_text = ""
-            for r_idx, row_tuple in raw_rows:
+                # 2行目を読んだ瞬間に「見積依頼書」かどうかを判定し、見積なら3行目以降を一切読まず即座に打ち切る
                 if r_idx == 2:
                     row2_text = " ".join(
-                        unicodedata.normalize("NFKC", str(v or "")).strip() for v in row_tuple
+                        unicodedata.normalize("NFKC", str(v or "")).strip() for v in row_tuple if v is not None
                     )
-                    break
+                    if "見積" in row2_text:
+                        skip_as_estimate = True
+                        break
+                    if row2_text and not any(k in row2_text for k in ("注文", "発注")):
+                        if "見積" in filename or "見積" in sheet_name:
+                            skip_as_estimate = True
+                            break
 
-            if "見積" in row2_text:
+                raw_rows.append((r_idx, row_tuple))
+
+            if skip_as_estimate or not raw_rows:
                 continue
 
-            if row2_text and not any(k in row2_text for k in ("注文", "発注")):
-                if "見積" in row2_text or "見積" in filename or "見積" in sheet_name:
-                    continue
+            if not row2_text and ("見積" in filename or "見積" in sheet_name) and not any(
+                k in filename or k in sheet_name for k in ("注文", "発注")
+            ):
+                continue
 
             sheet_order_no = file_order_no_8
             sheet_supplier = file_supplier
