@@ -31,6 +31,11 @@ except ImportError:
     HAS_WIN32COM = False
 
 
+class AnalysisCancelledException(Exception):
+    """ユーザーによって照合処理が中断された場合のカスタム例外"""
+    pass
+
+
 class StockMatchApp:
     """
     StockMatch_Miya-v1.1.0
@@ -78,6 +83,9 @@ class StockMatchApp:
         self.progress_var = tk.DoubleVar(value=0.0)
         self.progress_text_var = tk.StringVar(value="待機中")
         self.is_running = False
+        self.is_excel_running = False
+        self.cancel_event = threading.Event()
+        self.excel_cancel_event = threading.Event()
         self.ui_queue = queue.Queue()
 
         # 解析結果データ保持（2系統に分離）
@@ -151,6 +159,19 @@ class StockMatchApp:
             "Primary.TButton",
             background=[("active", "#1e40af"), ("disabled", "#94a3b8")],
             foreground=[("disabled", "#e2e8f0")],
+        )
+
+        style.configure(
+            "Cancel.TButton",
+            font=("Meiryo UI", 10, "bold"),
+            background="#dc2626",
+            foreground="#ffffff",
+            padding=(14, 7),
+        )
+        style.map(
+            "Cancel.TButton",
+            background=[("active", "#b91c1c"), ("disabled", "#e2e8f0")],
+            foreground=[("disabled", "#94a3b8")],
         )
 
         style.configure(
@@ -235,6 +256,7 @@ class StockMatchApp:
         file_menu.add_separator()
         file_menu.add_command(label="照合・遅延チェックを実行", command=self.run_analysis, accelerator="F5")
         file_menu.add_command(label="Excelで直接開く (一時ファイルなし)", command=self._open_in_excel_direct, accelerator="Ctrl+S")
+        file_menu.add_command(label="実行中の処理を中止", command=self.cancel_active_task, accelerator="Esc")
         file_menu.add_separator()
         file_menu.add_command(label="終了", command=self.root.quit, accelerator="Alt+F4")
         menubar.add_cascade(label="ファイル(F)", menu=file_menu)
@@ -274,6 +296,7 @@ class StockMatchApp:
 
         self.root.bind_all("<F1>", lambda _e: self._show_help_guide(tab_index=0))
         self.root.bind_all("<F5>", lambda _e: self.run_analysis())
+        self.root.bind_all("<Escape>", lambda _e: self.cancel_active_task())
         self.root.bind_all("<Control-o>", lambda _e: self._select_mgmt_file())
         self.root.bind_all("<Control-d>", lambda _e: self._select_order_dir())
         self.root.bind_all("<Control-s>", lambda _e: self._open_in_excel_direct())
@@ -449,6 +472,15 @@ class StockMatchApp:
             command=self.run_analysis,
         )
         self.run_btn.pack(side=tk.RIGHT)
+
+        self.cancel_btn = ttk.Button(
+            row4,
+            text="⏹ 中止 (Esc)",
+            style="Cancel.TButton",
+            command=self.cancel_active_task,
+            state=tk.DISABLED,
+        )
+        self.cancel_btn.pack(side=tk.RIGHT, padx=(0, 8))
 
         # 3. サマリーKPIカード 兼 ワンクリック表示フィルタエリア
         kpi_section = ttk.Frame(self.root, padding=(16, 0, 16, 8))
@@ -672,7 +704,7 @@ class StockMatchApp:
             command=lambda: [self.search_keyword.set(""), self._refresh_main_table()],
         ).pack(side=tk.LEFT, padx=(4, 0))
 
-        # 右側アクションボタン群（右端に「Excelで直接開く」ボタンを配置）
+        # 右側アクションボタン群（右端に「Excelで直接開く」ボタン、その左に「中止」ボタンを配置）
         self.excel_open_btn = ttk.Button(
             filter_frame,
             text="📊 Excelで直接開く",
@@ -680,6 +712,15 @@ class StockMatchApp:
             command=self._open_in_excel_direct,
         )
         self.excel_open_btn.pack(side=tk.RIGHT, padx=(6, 0))
+
+        self.excel_cancel_btn = ttk.Button(
+            filter_frame,
+            text="⏹ 中止",
+            style="Cancel.TButton",
+            command=self.cancel_excel_open,
+            state=tk.DISABLED,
+        )
+        self.excel_cancel_btn.pack(side=tk.RIGHT, padx=(4, 0))
 
         clear_col_btn = ttk.Button(
             filter_frame,
@@ -1983,7 +2024,9 @@ class StockMatchApp:
         txt1.insert(tk.END, "・注文書明細の納期が空欄の場合、注文書4行目に記載されている「注文日」から指定日数（初期値: 7日）を経過した時点で超過とみなします。\n", "point")
         txt1.insert(tk.END, "■ 照合・遅延チェックの実行とExcel展開\n", "h2")
         txt1.insert(tk.END, "・進捗状況行の右端にあるひときわ目立つ青色ボタン『▶ 照合・遅延チェック実行 (F5)』を押す（または F5 キー）と、照合処理が開始されます。\n", "point")
+        txt1.insert(tk.END, "★【実行中の中止】照合の実行中は、実行ボタンの左隣にある赤色ボタン『⏹ 中止 (Esc)』を押すか、キーボードの Esc キーを押すことで、処理を安全かつ即座に中断できます。\n", "point")
         txt1.insert(tk.END, "・結果をExcelで確認したい場合は、一覧上部の現在の表示フィルタ行（右端）にある緑色ボタン『📊 Excelで直接開く』を押すと新規ブックで即座に展開されます。\n", "body")
+        txt1.insert(tk.END, "★【Excel展開中の中止】Excelで直接開く処理の実行中も、ボタンの左隣に現れる『⏹ 中止』ボタン、進捗行の『⏹ 中止 (Esc)』ボタン、または Esc キーで安全に中断できます。\n", "point")
 
         txt1.insert(tk.END, "\n  STEP 3 : 件数サマリーカード一体型フィルタと2つの独立タブによる確認  \n", "h1")
         txt1.insert(tk.END, "■ 件数サマリー ＆ ワンクリック表示フィルタカード\n", "h2")
@@ -2043,6 +2086,7 @@ class StockMatchApp:
         txt3.insert(tk.END, "\n  キーボードショートカット一覧  \n", "h1")
         txt3.insert(tk.END, "・ F1 キー        :  このヘルプ＆操作ガイドを開く\n", "body")
         txt3.insert(tk.END, "・ F5 キー        :  照合・遅延チェックを実行する\n", "body")
+        txt3.insert(tk.END, "・ Esc キー       :  実行中の処理（照合・遅延チェックまたはExcel直接展開）を中止する\n", "body")
         txt3.insert(tk.END, "・ Ctrl + O       :  ① 注文品管理表ファイルを選択する\n", "body")
         txt3.insert(tk.END, "・ Ctrl + D       :  ② 注文書フォルダを選択する\n", "body")
         txt3.insert(tk.END, "・ Ctrl + S       :  一時ファイルを作成せずExcel新規ブックで開く\n", "body")
@@ -2198,6 +2242,8 @@ class StockMatchApp:
             self.order_dir_path.set(folder)
 
     def _report_progress(self, percent: float, message: str):
+        if self.cancel_event.is_set():
+            raise AnalysisCancelledException("照合処理がユーザーによって中止されました。")
         self.ui_queue.put(("PROGRESS", (percent, message)))
 
     def _collect_valid_order_files(
@@ -2211,6 +2257,8 @@ class StockMatchApp:
 
         file_list = []
         for root_dir, _dirs, files in os.walk(folder_path):
+            if self.cancel_event.is_set():
+                raise AnalysisCancelledException("照合処理がユーザーによって中止されました。")
             for file_name in files:
                 file_list.append((root_dir, file_name))
 
@@ -2218,6 +2266,8 @@ class StockMatchApp:
         total_entries = len(file_list)
 
         for idx, (root_dir, entry_name) in enumerate(file_list, start=1):
+            if self.cancel_event.is_set():
+                raise AnalysisCancelledException("照合処理がユーザーによって中止されました。")
             full_path = os.path.join(root_dir, entry_name)
 
             if progress_cb:
@@ -2609,6 +2659,9 @@ class StockMatchApp:
         total_sheets = len(sheet_names)
 
         for s_idx, sheet_name in enumerate(sheet_names, start=1):
+            if self.cancel_event.is_set():
+                wb.close()
+                raise AnalysisCancelledException("照合処理がユーザーによって中止されました。")
             if progress_cb:
                 pct = 5.0 + (28.0 * s_idx / max(1, total_sheets))
                 progress_cb(
@@ -2870,6 +2923,8 @@ class StockMatchApp:
         return mgmt_rows
 
     def _parse_order_book(self, filepath: str, valid_mgmt_order_nos: set[str]) -> list[dict]:
+        if self.cancel_event.is_set():
+            raise AnalysisCancelledException("照合処理がユーザーによって中止されました。")
         wb = openpyxl.load_workbook(filepath, data_only=True, read_only=True)
         order_items = []
         filename = os.path.basename(filepath)
@@ -2901,6 +2956,9 @@ class StockMatchApp:
             file_supplier = m_fname_sup.group(1).strip()
 
         for sheet_name in wb.sheetnames:
+            if self.cancel_event.is_set():
+                wb.close()
+                raise AnalysisCancelledException("照合処理がユーザーによって中止されました。")
             ws = wb[sheet_name]
 
             raw_rows = []
@@ -3215,8 +3273,11 @@ class StockMatchApp:
             return
 
         self.is_running = True
+        self.cancel_event.clear()
         self.run_btn.configure(state=tk.DISABLED, text="照合処理中...")
+        self.cancel_btn.configure(state=tk.NORMAL, text="⏹ 中止 (Esc)")
         self.excel_open_btn.configure(state=tk.DISABLED)
+        self.excel_cancel_btn.configure(state=tk.DISABLED)
         self.progress_var.set(2.0)
         self.progress_text_var.set("解析を開始しています...")
         self.status_var.set("実行中: 注文品管理表と注文書フォルダを照合しています...")
@@ -3230,10 +3291,38 @@ class StockMatchApp:
         worker.start()
         self.root.after(40, self._poll_ui_queue)
 
+    def cancel_active_task(self):
+        """実行中のタスク（照合またはExcel直接展開）を安全に中断する"""
+        if self.is_running:
+            self.cancel_analysis()
+        elif self.is_excel_running:
+            self.cancel_excel_open()
+
+    def cancel_analysis(self):
+        """実行中の照合・遅延チェック処理を安全に中断する"""
+        if not self.is_running:
+            return
+        self.cancel_event.set()
+        self.cancel_btn.configure(state=tk.DISABLED, text="中止処理中...")
+        self.status_var.set("照合処理の中止を要求しました。安全に中断しています...")
+        self.progress_text_var.set("処理を中止しています...")
+
+    def cancel_excel_open(self):
+        """実行中のExcel直接展開処理を安全に中断する"""
+        if not self.is_excel_running:
+            return
+        self.excel_cancel_event.set()
+        self.excel_cancel_btn.configure(state=tk.DISABLED, text="中止中...")
+        self.cancel_btn.configure(state=tk.DISABLED, text="中止中...")
+        self.status_var.set("Excel展開処理の中止を要求しました。安全に中断しています...")
+        self.progress_text_var.set("Excel処理を中止しています...")
+
     def _analysis_worker(self, mgmt_path: str, order_dir: str, base_date: datetime.date, grace_days: int = 7):
         try:
             self._report_progress(5.0, "[1/3] 注文品管理表を開いています...")
             mgmt_rows = self._parse_management_book(mgmt_path, progress_cb=self._report_progress)
+            if self.cancel_event.is_set():
+                raise AnalysisCancelledException("照合処理がユーザーによって中止されました。")
 
             valid_mgmt_order_nos = set()
             for m in mgmt_rows:
@@ -3248,11 +3337,15 @@ class StockMatchApp:
             order_items, valid_order_files, ignored_files = self._collect_valid_order_files(
                 order_dir, mgmt_path, valid_mgmt_order_nos, progress_cb=self._report_progress
             )
+            if self.cancel_event.is_set():
+                raise AnalysisCancelledException("照合処理がユーザーによって中止されました。")
 
             self._report_progress(75.0, f"[3/3] 明細の双方向照合を実行中 ({len(order_items)} 件)...")
             main_records, missing_records = self._match_and_evaluate(
                 mgmt_rows, order_items, base_date, grace_days=grace_days, progress_cb=self._report_progress
             )
+            if self.cancel_event.is_set():
+                raise AnalysisCancelledException("照合処理がユーザーによって中止されました。")
 
             self.ui_queue.put(
                 (
@@ -3270,6 +3363,8 @@ class StockMatchApp:
                     },
                 )
             )
+        except AnalysisCancelledException:
+            self.ui_queue.put(("CANCELLED", None))
         except Exception as e:
             self.ui_queue.put(("ERROR", str(e)))
 
@@ -3285,6 +3380,8 @@ class StockMatchApp:
                 elif msg_type == "DONE":
                     self.is_running = False
                     self.run_btn.configure(state=tk.NORMAL, text="▶ 照合・遅延チェック実行 (F5)")
+                    self.cancel_btn.configure(state=tk.DISABLED, text="⏹ 中止 (Esc)")
+                    self.excel_cancel_btn.configure(state=tk.DISABLED, text="⏹ 中止")
                     self.excel_open_btn.configure(state=tk.NORMAL)
 
                     self.analyzed_records = payload["main_records"]
@@ -3318,10 +3415,29 @@ class StockMatchApp:
                         f"【別タブ】注文書未検出(管理表のみ): {missing_cnt}件"
                     )
                     return
+                elif msg_type == "CANCELLED":
+                    self.is_running = False
+                    self.run_btn.configure(state=tk.NORMAL, text="▶ 照合・遅延チェック実行 (F5)")
+                    self.cancel_btn.configure(state=tk.DISABLED, text="⏹ 中止 (Esc)")
+                    self.excel_cancel_btn.configure(state=tk.DISABLED, text="⏹ 中止")
+                    if self.analyzed_records or self.missing_order_records:
+                        self.excel_open_btn.configure(state=tk.NORMAL)
+                    else:
+                        self.excel_open_btn.configure(state=tk.DISABLED)
+                    self.progress_var.set(0.0)
+                    self.progress_text_var.set("照合が中止されました")
+                    self.status_var.set("ユーザーによって照合・遅延チェック処理が中止されました。")
+                    messagebox.showinfo("処理中止", "照合・遅延チェック処理を中止しました。")
+                    return
                 elif msg_type == "ERROR":
                     self.is_running = False
                     self.run_btn.configure(state=tk.NORMAL, text="▶ 照合・遅延チェック実行 (F5)")
-                    self.excel_open_btn.configure(state=tk.NORMAL)
+                    self.cancel_btn.configure(state=tk.DISABLED, text="⏹ 中止 (Esc)")
+                    self.excel_cancel_btn.configure(state=tk.DISABLED, text="⏹ 中止")
+                    if self.analyzed_records or self.missing_order_records:
+                        self.excel_open_btn.configure(state=tk.NORMAL)
+                    else:
+                        self.excel_open_btn.configure(state=tk.DISABLED)
                     self.progress_var.set(0.0)
                     self.progress_text_var.set("エラーが発生しました")
                     self.status_var.set(f"エラー: {payload}")
@@ -3702,6 +3818,8 @@ class StockMatchApp:
 
         # 1. 注文書明細ベースの照合（タブ1用）
         for o_no, o_list in orders_by_no.items():
+            if self.cancel_event.is_set():
+                raise AnalysisCancelledException("照合処理がユーザーによって中止されました。")
             m_list = mgmt_by_no.get(o_no, [])
 
             cost_matrix = []
@@ -3747,6 +3865,8 @@ class StockMatchApp:
                             used_cols.add(c_idx)
 
             for r_idx, o_item in enumerate(o_list):
+                if self.cancel_event.is_set():
+                    raise AnalysisCancelledException("照合処理がユーザーによって中止されました。")
                 processed_orders += 1
                 if progress_cb and (processed_orders == 1 or processed_orders % 5 == 0 or processed_orders == total_orders):
                     pct = 75.0 + (18.0 * processed_orders / max(1, total_orders))
@@ -3830,6 +3950,8 @@ class StockMatchApp:
 
         # 2. 注文書未検出（管理表にあるのに注文書が見当たらない）明細の抽出（タブ2用）
         for m in mgmt_rows:
+            if self.cancel_event.is_set():
+                raise AnalysisCancelledException("照合処理がユーザーによって中止されました。")
             if m.get("matched"):
                 continue
 
@@ -4611,6 +4733,9 @@ class StockMatchApp:
             messagebox.showinfo("データなし", "先に「照合・遅延チェック実行」を行ってください。")
             return
 
+        if self.is_running or self.is_excel_running:
+            return
+
         if not HAS_WIN32COM:
             messagebox.showerror(
                 "モジュール未検出",
@@ -4620,24 +4745,55 @@ class StockMatchApp:
             )
             return
 
+        self.is_excel_running = True
+        self.excel_cancel_event.clear()
         self.excel_open_btn.configure(state=tk.DISABLED, text="Excel生成中...")
+        self.excel_cancel_btn.configure(state=tk.NORMAL, text="⏹ 中止")
+        self.cancel_btn.configure(state=tk.NORMAL, text="⏹ 中止 (Esc)")
+        self.run_btn.configure(state=tk.DISABLED)
+        self.progress_var.set(10.0)
+        self.progress_text_var.set("Excelを起動しています...")
         self.status_var.set("Excelを起動し、新規ブックにデータを転送しています（一時ファイルなし）...")
 
         def _excel_worker():
+            excel = None
+            wb = None
             try:
+                def _check_cancelled():
+                    if self.excel_cancel_event.is_set():
+                        if wb is not None:
+                            try:
+                                wb.Close(SaveChanges=False)
+                            except Exception:
+                                pass
+                        if excel is not None:
+                            try:
+                                excel.ScreenUpdating = True
+                                excel.DisplayAlerts = True
+                                if excel.Workbooks.Count == 0:
+                                    excel.Quit()
+                            except Exception:
+                                pass
+                        raise AnalysisCancelledException("Excel直接展開処理がユーザーによって中止されました。")
+
                 pythoncom.CoInitialize()
+                _check_cancelled()
 
                 try:
                     excel = win32com.client.GetActiveObject("Excel.Application")
                 except Exception:
                     excel = win32com.client.Dispatch("Excel.Application")
 
+                _check_cancelled()
                 excel.Visible = True
                 excel.ScreenUpdating = False
                 excel.DisplayAlerts = False
 
+                self.ui_queue.put(("PROGRESS", (25.0, "新規Excelブックを生成しています...")))
+
                 # 新規ブックの作成（一時ファイルはディスク上に作成されない）
                 wb = excel.Workbooks.Add()
+                _check_cancelled()
 
                 # シートの準備（2シート構成）
                 while wb.Sheets.Count < 2:
@@ -4684,6 +4840,9 @@ class StockMatchApp:
                 # -------------------------------------------------------------
                 # 1. シート1: 納期超過・照合結果
                 # -------------------------------------------------------------
+                self.ui_queue.put(("PROGRESS", (45.0, "シート1 (納期超過・照合結果) にデータを書き込み中...")))
+                _check_cancelled()
+
                 headers_main = [
                     "総合判定",
                     "不一致理由・照合診断",
@@ -4733,6 +4892,8 @@ class StockMatchApp:
                 num_main_rows = len(rows_main_data)
                 num_main_cols = len(headers_main)
 
+                _check_cancelled()
+
                 # ヘッダー書き込み
                 ws1.Range(ws1.Cells(1, 1), ws1.Cells(1, num_main_cols)).Value = headers_main
                 h_rng1 = ws1.Range(ws1.Cells(1, 1), ws1.Cells(1, num_main_cols))
@@ -4751,6 +4912,8 @@ class StockMatchApp:
                     data_rng1.Font.Size = 9
                     data_rng1.RowHeight = 22
                     data_rng1.VerticalAlignment = -4108  # xlCenter
+
+                    _check_cancelled()
 
                     # 行ごとのハイライト適用
                     for idx, tag in enumerate(tags_main, start=2):
@@ -4785,9 +4948,14 @@ class StockMatchApp:
                 # シート1の印刷設定（A4横・横幅1ページ自動収まり・見出し行繰り返し等）
                 self._configure_excel_page_setup(ws1, excel, "納期超過・照合結果")
 
+                _check_cancelled()
+
                 # -------------------------------------------------------------
                 # 2. シート2: 注文書未検出(管理表のみ)
                 # -------------------------------------------------------------
+                self.ui_queue.put(("PROGRESS", (75.0, "シート2 (注文書未検出) にデータを書き込み中...")))
+                _check_cancelled()
+
                 headers_missing = [
                     "状態判定",
                     "管理表シート",
@@ -4829,6 +4997,8 @@ class StockMatchApp:
                 num_missing_rows = len(rows_missing_data)
                 num_missing_cols = len(headers_missing)
 
+                _check_cancelled()
+
                 ws2.Range(ws2.Cells(1, 1), ws2.Cells(1, num_missing_cols)).Value = headers_missing
                 h_rng2 = ws2.Range(ws2.Cells(1, 1), ws2.Cells(1, num_missing_cols))
                 h_rng2.Font.Bold = True
@@ -4846,6 +5016,8 @@ class StockMatchApp:
                     data_rng2.Font.Size = 9
                     data_rng2.RowHeight = 22
                     data_rng2.VerticalAlignment = -4108  # xlCenter
+
+                    _check_cancelled()
 
                     # 未発注行の配色
                     m_bg = color_map["MISSING_ORDER"]["bg"]
@@ -4880,6 +5052,8 @@ class StockMatchApp:
                 # シート2の印刷設定（A4横・横幅1ページ自動収まり・見出し行繰り返し等）
                 self._configure_excel_page_setup(ws2, excel, "注文書未検出(管理表のみ)")
 
+                _check_cancelled()
+
                 # 最終的に第1シートをアクティブにし、A1セルを選択
                 ws1.Activate()
                 ws1.Range("A1").Select()
@@ -4895,7 +5069,15 @@ class StockMatchApp:
 
                 self.ui_queue.put(("EXCEL_OPENED_SUCCESS", None))
 
+            except AnalysisCancelledException:
+                self.ui_queue.put(("EXCEL_OPENED_CANCELLED", None))
             except Exception as e:
+                if excel is not None:
+                    try:
+                        excel.ScreenUpdating = True
+                        excel.DisplayAlerts = True
+                    except Exception:
+                        pass
                 self.ui_queue.put(("EXCEL_OPENED_ERROR", str(e)))
             finally:
                 pythoncom.CoUninitialize()
@@ -4908,8 +5090,19 @@ class StockMatchApp:
         try:
             while True:
                 msg_type, payload = self.ui_queue.get_nowait()
-                if msg_type == "EXCEL_OPENED_SUCCESS":
+                if msg_type == "PROGRESS":
+                    pct, text = payload
+                    self.progress_var.set(pct)
+                    self.progress_text_var.set(text)
+                    self.status_var.set(f"実行中: {text}")
+                elif msg_type == "EXCEL_OPENED_SUCCESS":
+                    self.is_excel_running = False
                     self.excel_open_btn.configure(state=tk.NORMAL, text="📊 Excelで直接開く")
+                    self.excel_cancel_btn.configure(state=tk.DISABLED, text="⏹ 中止")
+                    self.cancel_btn.configure(state=tk.DISABLED, text="⏹ 中止 (Esc)")
+                    self.run_btn.configure(state=tk.NORMAL, text="▶ 照合・遅延チェック実行 (F5)")
+                    self.progress_var.set(100.0)
+                    self.progress_text_var.set("Excel展開完了！")
                     self.status_var.set("新規Excelブックに照合結果を展開しました（未保存の新規ブックとして開いています）。")
                     messagebox.showinfo(
                         "Excel起動完了",
@@ -4920,8 +5113,25 @@ class StockMatchApp:
                         "保存が必要な場合は、Excel側で「名前を付けて保存」を行ってください。",
                     )
                     return
-                elif msg_type == "EXCEL_OPENED_ERROR":
+                elif msg_type == "EXCEL_OPENED_CANCELLED":
+                    self.is_excel_running = False
                     self.excel_open_btn.configure(state=tk.NORMAL, text="📊 Excelで直接開く")
+                    self.excel_cancel_btn.configure(state=tk.DISABLED, text="⏹ 中止")
+                    self.cancel_btn.configure(state=tk.DISABLED, text="⏹ 中止 (Esc)")
+                    self.run_btn.configure(state=tk.NORMAL, text="▶ 照合・遅延チェック実行 (F5)")
+                    self.progress_var.set(0.0)
+                    self.progress_text_var.set("Excel展開が中止されました")
+                    self.status_var.set("ユーザーによってExcel直接展開処理が中止されました。")
+                    messagebox.showinfo("処理中止", "Excel直接展開処理を中止しました。")
+                    return
+                elif msg_type == "EXCEL_OPENED_ERROR":
+                    self.is_excel_running = False
+                    self.excel_open_btn.configure(state=tk.NORMAL, text="📊 Excelで直接開く")
+                    self.excel_cancel_btn.configure(state=tk.DISABLED, text="⏹ 中止")
+                    self.cancel_btn.configure(state=tk.DISABLED, text="⏹ 中止 (Esc)")
+                    self.run_btn.configure(state=tk.NORMAL, text="▶ 照合・遅延チェック実行 (F5)")
+                    self.progress_var.set(0.0)
+                    self.progress_text_var.set("Excel展開エラー")
                     self.status_var.set(f"Excel展開エラー: {payload}")
                     messagebox.showerror("Excel展開エラー", f"Excelの起動またはデータ転送中にエラーが発生しました:\n{payload}")
                     return
@@ -4931,7 +5141,8 @@ class StockMatchApp:
         except queue.Empty:
             pass
 
-        self.root.after(50, self._poll_excel_queue)
+        if self.is_excel_running:
+            self.root.after(50, self._poll_excel_queue)
 
 
 def main():
