@@ -2,5 +2,6 @@
   "mgmt_file_path": "G:/マイドライブ/自宅改良/注文品納期確認/注文品管理表.xlsx",
   "order_dir_path": "G:/マイドライブ/自宅改良/注文品納期確認/依頼ファイル",
   "blank_due_grace_days": 7,
-  "last_updated": "2026-11-01 16:13:12"
+  "excluded_order_nos": "",
+  "last_updated": "2026-11-02 23:03:06"
 }

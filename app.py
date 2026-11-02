@@ -39,7 +39,7 @@ class AnalysisCancelledException(Exception):
 
 class StockMatchApp:
     """
-    StockMatch_Miya-v1.2.0
+    StockMatch_Miya-v1.3.0
     注文品管理表（1つのファイル）と注文書フォルダ内（サブフォルダ含む全階層）の全注文書Excelを双方向照合し、
     ・納期超過（現品確認日・請求日）および管理表未記載の注文書
     ・注文書未検出（管理表にあるのに注文書が見当たらない未発注明細 / ※AB列購入数0は自動除外）
@@ -53,12 +53,14 @@ class StockMatchApp:
         APP_DIR = os.path.dirname(os.path.abspath(__file__))
         RESOURCE_DIR = APP_DIR
 
-    CONFIG_FILE_PATH = os.path.join(APP_DIR, "config.json")
+    DEFAULT_CONFIG_FILE_PATH = os.path.join(APP_DIR, "config.json")
+    CONFIG_POINTER_FILE_PATH = os.path.join(APP_DIR, "config_location.txt")
+    CONFIG_FILE_PATH = DEFAULT_CONFIG_FILE_PATH
     ICON_FILE_PATH = os.path.join(APP_DIR, "icon.ico")
 
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("StockMatch_Miya-v1.2.0 - 注文品納期・現品/請求照合システム")
+        self.root.title("StockMatch_Miya-v1.3.0 - 注文品納期・現品/請求照合システム")
 
         # メインウィンドウおよび全Toplevelウィンドウに icon.ico を適用
         self._apply_window_icon(self.root, is_main=True)
@@ -71,11 +73,15 @@ class StockMatchApp:
 
         self.root.minsize(1080, 720)
 
+        # 設定ファイルの保存先パス管理（ポインタファイルまたはデフォルト）
+        self.config_file_path = tk.StringVar(value=self._resolve_initial_config_path())
+
         # 状態保持用変数
         self.mgmt_file_path = tk.StringVar()
         self.order_dir_path = tk.StringVar()
         self.base_date_str = tk.StringVar(value=datetime.date.today().strftime("%Y-%m-%d"))
         self.blank_due_grace_days = tk.StringVar(value="7")
+        self.excluded_order_nos_str = tk.StringVar(value="")
         self.filter_mode = tk.StringVar(value="BOTH_DELAY")
         self.search_keyword = tk.StringVar()
         self.missing_search_keyword = tk.StringVar()
@@ -116,6 +122,272 @@ class StockMatchApp:
             return max(0, days)
         except ValueError:
             return 7
+
+    def _parse_lines_to_order_nos(self, text: str) -> list[str]:
+        """行区切りテキスト（Excel貼り付け・カンマ区切り含む）から管理Noリストを抽出・重複除去して返す"""
+        if not text:
+            return []
+        norm = unicodedata.normalize("NFKC", str(text))
+        lines = norm.splitlines()
+        seen = set()
+        result = []
+        for line in lines:
+            line_clean = line.strip()
+            if not line_clean:
+                continue
+            # カンマやタブ、セミコロンで分割
+            tokens = re.split(r"[\t,;\s、，:：]+", line_clean)
+            for token in tokens:
+                t = token.strip().upper()
+                if not t:
+                    continue
+                # 8桁数字があればそれを優先抽出
+                m8 = re.search(r"\b\d{8}\b", t)
+                val = m8.group(0) if m8 else t
+                if val and val not in seen:
+                    seen.add(val)
+                    result.append(val)
+        return result
+
+    def _get_excluded_order_nos_list(self) -> list[str]:
+        """現在設定されている除外管理Noの重複なしリストを取得"""
+        raw = self.excluded_order_nos_str.get().strip()
+        return self._parse_lines_to_order_nos(raw)
+
+    def _get_excluded_order_nos(self) -> set[str]:
+        """一覧から除外する管理Noの集合（set）を大文字・正規化済みで取得"""
+        items = self._get_excluded_order_nos_list()
+        res = set()
+        for it in items:
+            clean = it.strip().upper()
+            if clean:
+                res.add(clean)
+                m8 = re.search(r"\b\d{8}\b", clean)
+                if m8:
+                    res.add(m8.group(0))
+        return res
+
+    def _is_order_no_excluded(self, order_no_val: str, excluded_set: set[str] | None = None) -> bool:
+        """指定された管理Noが除外対象に含まれるかを判定"""
+        if excluded_set is None:
+            excluded_set = self._get_excluded_order_nos()
+        if not excluded_set or not order_no_val:
+            return False
+        val_norm = unicodedata.normalize("NFKC", str(order_no_val)).strip().upper()
+        if not val_norm:
+            return False
+        if val_norm in excluded_set:
+            return True
+        m8 = re.search(r"\b\d{8}\b", val_norm)
+        if m8 and m8.group(0) in excluded_set:
+            return True
+        return False
+
+    def _update_excluded_summary_badge(self):
+        """メイン画面の除外設定ボタンおよびサマリーバッジの表示を更新"""
+        items = self._get_excluded_order_nos_list()
+        cnt = len(items)
+        if hasattr(self, "btn_open_exclude"):
+            self.btn_open_exclude.configure(text=f"🚫 除外する管理Noを設定・編集... (現在 {cnt}件)")
+        if hasattr(self, "lbl_excluded_summary"):
+            if cnt == 0:
+                self.lbl_excluded_summary.configure(
+                    text="  除外設定なし (全件を照合)  ",
+                    bg="#f1f5f9",
+                    fg="#475569",
+                )
+            else:
+                sample_str = ", ".join(items[:3]) + ("..." if cnt > 3 else "")
+                self.lbl_excluded_summary.configure(
+                    text=f"  ✔ 除外指定中: {cnt}件 ({sample_str})  ",
+                    bg="#fee2e2",
+                    fg="#991b1b",
+                )
+
+    def _clear_excluded_order_nos(self):
+        """除外管理Noの指定を全解除する"""
+        if not self._get_excluded_order_nos_list():
+            messagebox.showinfo("情報", "現在、除外設定されている管理Noはありません。")
+            return
+        if messagebox.askyesno("全解除の確認", "設定されている除外管理Noをすべて解除しますか？"):
+            self.excluded_order_nos_str.set("")
+            self._update_excluded_summary_badge()
+            self._update_kpis()
+            self._refresh_main_table()
+            self._refresh_missing_table()
+            self._save_config(show_msg=False)
+            self.status_var.set("除外管理Noの設定をすべて解除しました。")
+
+    def _open_exclude_dialog(self):
+        """一覧から除外する管理Noを専用ダイアログで行区切り編集する（Excel複数セル貼付対応）"""
+        win = tk.Toplevel(self.root)
+        win.title("一覧から除外する管理Noの設定")
+        self._apply_window_icon(win)
+        win.geometry("540x640")
+        win.minsize(460, 500)
+        win.transient(self.root)
+        win.grab_set()
+
+        # 画面中央に配置
+        try:
+            rx = self.root.winfo_rootx()
+            ry = self.root.winfo_rooty()
+            rw = self.root.winfo_width()
+            rh = self.root.winfo_height()
+            x = rx + max(0, (rw - 540) // 2)
+            y = ry + max(0, (rh - 640) // 2)
+            win.geometry(f"540x640+{x}+{y}")
+        except Exception:
+            pass
+
+        # 1. 上部ヘッダーバナー
+        banner = tk.Frame(win, bg="#1e293b", padx=16, pady=12)
+        banner.pack(fill=tk.X)
+        tk.Label(
+            banner,
+            text="🚫 一覧から除外する管理Noの設定（行区切り入力）",
+            bg="#1e293b",
+            fg="#ffffff",
+            font=("Meiryo UI", 11, "bold"),
+            anchor="w",
+        ).pack(fill=tk.X)
+        tk.Label(
+            banner,
+            text="照合結果や注文書未検出一覧から除外したい管理Noを、1行に1つずつ入力してください。\n★ Excelでコピーした複数セル（列全体や複数行）をそのまま貼り付け（Ctrl+V）できます。",
+            bg="#1e293b",
+            fg="#cbd5e1",
+            font=("Meiryo UI", 9),
+            anchor="w",
+            justify="left",
+        ).pack(fill=tk.X, pady=(4, 0))
+
+        # 2. クイック操作ツールバー
+        toolbar = tk.Frame(win, bg="#f1f5f9", padx=14, pady=8, highlightbackground="#cbd5e1", highlightthickness=1)
+        toolbar.pack(fill=tk.X)
+
+        # 3. テキスト入力エリア
+        txt_frame = tk.Frame(win, padx=14, pady=10, bg="#f8fafc")
+        txt_frame.pack(fill=tk.BOTH, expand=True)
+
+        txt = tk.Text(
+            txt_frame,
+            wrap="none",
+            font=("Consolas", 10),
+            padx=10,
+            pady=8,
+            relief="solid",
+            borderwidth=1,
+            undo=True,
+        )
+        vsb = ttk.Scrollbar(txt_frame, orient="vertical", command=txt.yview)
+        hsb = ttk.Scrollbar(txt_frame, orient="horizontal", command=txt.xview)
+        txt.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+
+        txt.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        hsb.grid(row=1, column=0, sticky="ew")
+        txt_frame.grid_rowconfigure(0, weight=1)
+        txt_frame.grid_columnconfigure(0, weight=1)
+
+        # 現在の値を改行区切りでセット
+        current_list = self._get_excluded_order_nos_list()
+        if current_list:
+            txt.insert("1.0", "\n".join(current_list) + "\n")
+
+        # 4. リアルタイム件数表示バー
+        info_bar = tk.Frame(win, bg="#f8fafc", padx=16, pady=4)
+        info_bar.pack(fill=tk.X)
+        lbl_info = tk.Label(
+            info_bar,
+            text=f"現在の有効な管理No: {len(current_list)} 件",
+            bg="#f8fafc",
+            fg="#1d4ed8",
+            font=("Meiryo UI", 9, "bold"),
+            anchor="w",
+        )
+        lbl_info.pack(side=tk.LEFT)
+
+        def _update_count(*_):
+            content = txt.get("1.0", tk.END)
+            items = self._parse_lines_to_order_nos(content)
+            lbl_info.configure(text=f"現在の有効な管理No: {len(items)} 件（重複除外後）")
+
+        txt.bind("<KeyRelease>", _update_count)
+
+        # ツールバーのアクション
+        def _cleanup_text():
+            content = txt.get("1.0", tk.END)
+            items = self._parse_lines_to_order_nos(content)
+            txt.delete("1.0", tk.END)
+            if items:
+                txt.insert("1.0", "\n".join(items) + "\n")
+            _update_count()
+
+        def _paste_clipboard():
+            try:
+                clip = win.clipboard_get()
+                if clip:
+                    cur = txt.get("1.0", tk.END).rstrip()
+                    if cur:
+                        txt.insert(tk.END, "\n" + clip.strip() + "\n")
+                    else:
+                        txt.insert("1.0", clip.strip() + "\n")
+                    _cleanup_text()
+            except Exception as e:
+                messagebox.showwarning("貼付エラー", f"クリップボードの読み取りに失敗しました:\n{e}", parent=win)
+
+        def _clear_all():
+            txt.delete("1.0", tk.END)
+            _update_count()
+
+        ttk.Button(toolbar, text="📋 クリップボードから貼り付け", style="Action.TButton", command=_paste_clipboard).pack(
+            side=tk.LEFT, padx=(0, 6)
+        )
+        ttk.Button(toolbar, text="✨ 重複・空白を整理", style="Action.TButton", command=_cleanup_text).pack(
+            side=tk.LEFT, padx=(0, 6)
+        )
+        ttk.Button(toolbar, text="🗑 すべてクリア", style="Action.TButton", command=_clear_all).pack(
+            side=tk.LEFT
+        )
+
+        # 5. 下部ボタンバー
+        btn_bar = tk.Frame(win, bg="#f1f5f9", padx=16, pady=10, highlightbackground="#cbd5e1", highlightthickness=1)
+        btn_bar.pack(fill=tk.X, side=tk.BOTTOM)
+
+        def _apply_and_save():
+            content = txt.get("1.0", tk.END)
+            items = self._parse_lines_to_order_nos(content)
+            # 改行区切りで格納
+            self.excluded_order_nos_str.set("\n".join(items))
+            self._update_excluded_summary_badge()
+            self._update_kpis()
+            self._refresh_main_table()
+            self._refresh_missing_table()
+            # 設定ファイルへの保存も自動実行
+            self._save_config(show_msg=False)
+            win.destroy()
+            if items:
+                self.status_var.set(
+                    f"除外管理No ({len(items)}件) を設定・保存しました。一覧および件数サマリーに反映済みです。"
+                )
+                messagebox.showinfo(
+                    "設定完了",
+                    f"除外する管理No（計 {len(items)} 件）を設定し、設定ファイル(config.json)に保存しました。\n"
+                    "一覧および件数サマリーから該当の管理Noが除外されています。",
+                    parent=self.root,
+                )
+            else:
+                self.status_var.set("除外管理Noの設定をすべて解除・保存しました。")
+                messagebox.showinfo(
+                    "解除完了",
+                    "除外管理Noの設定をすべて解除し、設定ファイル(config.json)に保存しました。",
+                    parent=self.root,
+                )
+
+        ttk.Button(btn_bar, text="✔ 適用して設定を保存", style="Primary.TButton", command=_apply_and_save).pack(
+            side=tk.RIGHT, padx=(8, 0)
+        )
+        ttk.Button(btn_bar, text="キャンセル", style="Action.TButton", command=win.destroy).pack(side=tk.RIGHT)
 
     def _resolve_icon_path(self) -> str | None:
         """icon.ico の実在パスを探索して返す"""
@@ -268,8 +540,13 @@ class StockMatchApp:
         menubar.add_cascade(label="ファイル(F)", menu=file_menu)
 
         config_menu = tk.Menu(menubar, tearoff=0)
-        config_menu.add_command(label="現在の設定を保存 (パス・超過日数)", command=self._save_config_manual)
-        config_menu.add_command(label="アプリ配置フォルダを開く", command=self._open_config_folder)
+        config_menu.add_command(label="現在の設定を保存 (パス・超過日数・除外管理No)", command=self._save_config_manual)
+        config_menu.add_separator()
+        config_menu.add_command(label="設定ファイル(config.json)の保存先を指定・変更...", command=self._open_config_location_dialog)
+        config_menu.add_command(label="設定ファイルの保存先をアプリ配置フォルダ(初期値)に戻す", command=lambda: self._reset_config_path_to_default(confirm=True))
+        config_menu.add_separator()
+        config_menu.add_command(label="設定ファイル保存先フォルダを開く", command=self._open_current_config_folder)
+        config_menu.add_command(label="アプリ配置フォルダを開く", command=self._open_app_folder)
         menubar.add_cascade(label="設定(S)", menu=config_menu)
 
         ref_menu = tk.Menu(menubar, tearoff=0)
@@ -315,7 +592,7 @@ class StockMatchApp:
         header_frame = tk.Frame(self.root, bg="#1e293b", height=56, padx=16, pady=10)
         header_frame.pack(fill=tk.X)
 
-        title_lbl = ttk.Label(header_frame, text="StockMatch_Miya-v1.2.0", style="Header.TLabel")
+        title_lbl = ttk.Label(header_frame, text="StockMatch_Miya-v1.3.0", style="Header.TLabel")
         title_lbl.pack(side=tk.LEFT)
 
         sub_lbl = ttk.Label(
@@ -440,7 +717,63 @@ class StockMatchApp:
         )
         self.save_cfg_btn.pack(side=tk.RIGHT)
 
-        # ④ 進捗状況 ＆ 照合実行ボタン行（メインの実行ボタンを進捗行に大きく配置）
+        self.cfg_loc_btn = ttk.Button(
+            row3,
+            text="⚙ 保存先設定...",
+            style="Action.TButton",
+            command=self._open_config_location_dialog,
+        )
+        self.cfg_loc_btn.pack(side=tk.RIGHT, padx=(0, 6))
+
+        # ④ 一覧から除外する管理No設定行（別ウィンドウダイアログ呼び出しボタンとサマリーバッジ）
+        row_ex = ttk.Frame(file_card, style="Card.TFrame")
+        row_ex.pack(fill=tk.X, pady=(2, 6))
+
+        ttk.Label(
+            row_ex,
+            text="④ 一覧から除外する管理No:",
+            width=22,
+            style="Card.TLabel",
+            font=("Meiryo UI", 9, "bold"),
+        ).pack(side=tk.LEFT)
+
+        self.btn_open_exclude = ttk.Button(
+            row_ex,
+            text="🚫 除外する管理Noを設定・編集... (現在 0件)",
+            style="Action.TButton",
+            command=self._open_exclude_dialog,
+        )
+        self.btn_open_exclude.pack(side=tk.LEFT, padx=(4, 8))
+
+        self.lbl_excluded_summary = tk.Label(
+            row_ex,
+            text="  除外設定なし (全件を照合)  ",
+            bg="#f1f5f9",
+            fg="#475569",
+            font=("Meiryo UI", 9),
+            padx=8,
+            pady=2,
+            relief="solid",
+            borderwidth=1,
+        )
+        self.lbl_excluded_summary.pack(side=tk.LEFT, padx=(0, 8))
+
+        ttk.Button(
+            row_ex,
+            text="全解除",
+            style="Action.TButton",
+            command=self._clear_excluded_order_nos,
+        ).pack(side=tk.LEFT, padx=(0, 10))
+
+        ttk.Label(
+            row_ex,
+            text="※ボタンを押すと別ウィンドウが開き、Excelの複数セル(列全体等)を直接コピー＆ペーストできます",
+            style="Card.TLabel",
+            foreground="#64748b",
+            font=("Meiryo UI", 8),
+        ).pack(side=tk.LEFT)
+
+        # ⑤ 進捗状況 ＆ 照合実行ボタン行（メインの実行ボタンを進捗行に大きく配置）
         row4 = ttk.Frame(file_card, style="Card.TFrame")
         row4.pack(fill=tk.X, pady=(6, 0))
 
@@ -1891,10 +2224,10 @@ class StockMatchApp:
         container.pack(fill=tk.BOTH, expand=True)
         txt = tk.Text(
             container,
-            wrap="word",
+            wrap="char",
             font=("Meiryo UI", 9),
-            padx=14,
-            pady=12,
+            padx=16,
+            pady=14,
             relief="flat",
             bg="#ffffff",
             fg="#0f172a",
@@ -1909,13 +2242,14 @@ class StockMatchApp:
     def _configure_rich_text_tags(self, txt: tk.Text):
         txt.tag_configure(
             "h1",
-            font=("Meiryo UI", 12, "bold"),
-            foreground="#1e293b",
+            font=("Meiryo UI", 11, "bold"),
+            foreground="#0f172a",
             background="#e2e8f0",
-            spacing1=8,
+            spacing1=10,
             spacing3=8,
-            lmargin1=8,
-            lmargin2=8,
+            lmargin1=10,
+            lmargin2=10,
+            rmargin=10,
         )
         txt.tag_configure(
             "h2",
@@ -1923,8 +2257,9 @@ class StockMatchApp:
             foreground="#1d4ed8",
             spacing1=12,
             spacing3=4,
-            lmargin1=6,
-            lmargin2=6,
+            lmargin1=8,
+            lmargin2=8,
+            rmargin=10,
         )
         txt.tag_configure(
             "body",
@@ -1932,64 +2267,72 @@ class StockMatchApp:
             foreground="#1e293b",
             spacing1=2,
             spacing2=3,
-            spacing3=2,
+            spacing3=3,
             lmargin1=18,
             lmargin2=32,
+            rmargin=10,
         )
         txt.tag_configure(
             "point",
             font=("Meiryo UI", 9, "bold"),
             foreground="#0f172a",
             background="#fef9c3",
-            spacing1=3,
+            spacing1=4,
             spacing2=3,
-            spacing3=3,
+            spacing3=4,
             lmargin1=18,
             lmargin2=32,
+            rmargin=10,
         )
         txt.tag_configure(
             "warn",
             font=("Meiryo UI", 9, "bold"),
             foreground="#991b1b",
             background="#fee2e2",
-            spacing1=3,
+            spacing1=4,
             spacing2=3,
-            spacing3=3,
+            spacing3=4,
             lmargin1=18,
             lmargin2=32,
+            rmargin=10,
         )
         txt.tag_configure(
             "badge_ok",
             font=("Meiryo UI", 9, "bold"),
             foreground="#166534",
             background="#dcfce7",
+            spacing1=3,
+            spacing2=3,
+            spacing3=3,
             lmargin1=18,
             lmargin2=32,
+            rmargin=10,
         )
         txt.tag_configure(
             "sub_note",
             font=("Meiryo UI", 9),
             foreground="#475569",
-            spacing1=1,
+            spacing1=2,
             spacing2=2,
             spacing3=4,
             lmargin1=30,
             lmargin2=42,
+            rmargin=10,
         )
 
     def _show_help_guide(self, tab_index: int = 0):
         win = tk.Toplevel(self.root)
-        win.title("StockMatch_Miya-v1.2.0 - ヘルプ＆操作ガイド")
+        win.title("StockMatch_Miya-v1.3.0 - ヘルプ＆操作ガイド")
         self._apply_window_icon(win)
-        win.geometry("880x680")
-        win.minsize(720, 520)
+        win.geometry("960x740")
+        win.minsize(780, 560)
         win.transient(self.root)
 
         banner = tk.Frame(win, bg="#1e293b", padx=18, pady=12)
         banner.pack(fill=tk.X)
         tk.Label(
             banner,
-            text="📖 StockMatch_Miya-v1.2.0  取扱説明書・操作ガイド",
+            text="📖 StockMatch_Miya-v1.3.0  取扱説明書・操作ガイド",
             bg="#1e293b",
             fg="#ffffff",
             font=("Meiryo UI", 12, "bold"),
@@ -1997,7 +2340,7 @@ class StockMatchApp:
         ).pack(fill=tk.X)
         tk.Label(
             banner,
-            text="注文書と注文品管理表の双方向自動照合・タブ分離一覧表示・納期超過チェックツールの使い方",
+            text="注文書と注文品管理表の双方向自動照合・タブ分離一覧表示・納期超過チェックツールの詳しい使い方",
             bg="#1e293b",
             fg="#cbd5e1",
             font=("Meiryo UI", 9),
@@ -2011,92 +2354,162 @@ class StockMatchApp:
         notebook.add(tab1, text="  ① 基本的な使い方・設定  ")
         txt1 = self._create_scrollable_text(tab1)
 
-        txt1.insert(tk.END, "  STEP 1 : ファイルとフォルダの指定  \n", "h1")
-        txt1.insert(tk.END, "① 注文品管理表ファイルの選択\n", "h2")
-        txt1.insert(tk.END, "・『ファイルを参照...』ボタンから管理表Excel（例: 注文品管理表.xlsx）を選択します。\n", "body")
-        txt1.insert(tk.END, "・管理表に登録されているすべての「管理No（8桁）」を自動抽出し、一致する注文書を照合します。\n", "point")
-        txt1.insert(tk.END, "・管理表のAB列（28列目）にある「購入数」列を正確に参照します。\n", "sub_note")
+        txt1.insert(tk.END, "  STEP 1 : 注文品管理表と注文書フォルダの指定  \n", "h1")
+        txt1.insert(tk.END, "■ ① 注文品管理表ファイルの指定\n", "h2")
+        txt1.insert(tk.END, "・画面上部の『① 注文品管理表ファイル』行にある『ファイルを参照...』ボタン（または Ctrl+O）を押し、管理表Excel（例: 注文品管理表.xlsx）を選択します。\n", "body")
+        txt1.insert(tk.END, "・右端の『📋 管理表を開く』ボタンを押すと、現在指定されている管理表ファイルをいつでも直接Excelで開いて確認できます。\n", "body")
+        txt1.insert(tk.END, "★【自動抽出＆列構造の自動認識】管理表内のすべてのシートから「管理No（8桁の数字）」を自動抽出し、A列（現品確認日）、AB列（28列目：購入数）、AI列（請求日）などの列位置を正確に読み取ります。\n", "point")
+        txt1.insert(tk.END, "※管理表がExcelで開かれたままの状態でも、アプリが一時コピーを作成して安全に読み取るため、Excelを閉じずにそのまま照合を実行できます。\n", "sub_note")
 
-        txt1.insert(tk.END, "② 注文書フォルダパスの選択（サブフォルダ自動対応・高速枝刈りスキャン）\n", "h2")
-        txt1.insert(tk.END, "・『フォルダを参照...』ボタンから注文書Excelが保管されている親フォルダを選択します。\n", "body")
-        txt1.insert(tk.END, "★【サブフォルダ一括探索＆管理Noフォルダ自動スキップ】配下の全サブフォルダを探索する際、フォルダ名に8桁の管理Noが記載されており、それが注文品管理表に存在しない場合はフォルダごと丸ごとスキップ（枝刈り）して高速化します。\n", "point")
-        txt1.insert(tk.END, "★【並列読み込み＆メモリキャッシュ高速化】対象の注文書Excelはマルチスレッド並列で高速に読み込まれ、変更のないファイルは2回目以降の照合時にメモリキャッシュから瞬時に復元されます。\n", "point")
-        txt1.insert(tk.END, "★【見積依頼書の自動除外】ファイル名およびExcelシートの2行目を自動検査し、「見積」の記載があるシートは即座に除外して「注文」シートのみを照合します。\n", "point")
+        txt1.insert(tk.END, "■ ② 注文書フォルダパスの指定（サブフォルダ一括探索・高速スキャン）\n", "h2")
+        txt1.insert(tk.END, "・『② 注文書フォルダパス』行にある『フォルダを参照...』ボタン（または Ctrl+D）を押し、注文書Excelが保管されている親フォルダ（例: 依頼ファイル）を選択します。\n", "body")
+        txt1.insert(tk.END, "・右端の『📂 フォルダを開く』ボタンを押すと、指定した注文書フォルダをWindowsエクスプローラーで直接開きます。\n", "body")
+        txt1.insert(tk.END, "★【管理Noフォルダ自動スキップ（高速枝刈りスキャン）】親フォルダ配下の多数のサブフォルダを探索する際、サブフォルダ名に8桁の管理Noが含まれており、その管理Noが「注文品管理表に存在しない」または「除外設定されている」場合は、そのサブフォルダの中身を一切開かずに丸ごとスキップします。何千個ものフォルダがある環境でも数秒〜数十秒で高速に探索が完了します。\n", "point")
+        txt1.insert(tk.END, "★【マルチスレッド並列読込＆メモリキャッシュ】対象となった注文書Excelは並列処理で一斉に読み込まれます。さらに一度読み込んだファイルは更新日時・ファイルサイズとともにメモリにキャッシュされるため、2回目以降の再照合は瞬時に完了します。\n", "point")
+        txt1.insert(tk.END, "★【見積依頼書の自動除外】ファイル名およびExcelシートの2行目タイトルを自動検査し、「見積」が含まれるシートは自動的に除外して「注文」シートのみを照合対象にします。\n", "point")
+        txt1.insert(tk.END, "※Googleドライブ（G:ドライブ等）や社内ネットワーク上の共有フォルダ（\\\\サーバー名\\共有名 等）にあるファイルでも問題なく高速に動作します。\n", "sub_note")
 
-        txt1.insert(tk.END, "\n  STEP 2 : 判定基準日・超過日数の設定と保存  \n", "h1")
-        txt1.insert(tk.END, "■ 判定基準日（今日）と設定の保存\n", "h2")
-        txt1.insert(tk.END, "・納期超過の判定基準日（初期値は今日）を YYYY-MM-DD 形式で指定します。\n", "body")
-        txt1.insert(tk.END, "・判定基準日行の右側にある『💾 設定を保存』ボタンを押すと、管理表パス・注文書フォルダパスおよび納期未記載時の超過日数が config.json に保存されます。\n", "body")
-        txt1.insert(tk.END, "■ 納期未記載時の注文日基準判定\n", "h2")
-        txt1.insert(tk.END, "・注文書明細の納期が空欄の場合、注文書4行目に記載されている「注文日」から指定日数（初期値: 7日）を経過した時点で超過とみなします。\n", "point")
-        txt1.insert(tk.END, "■ 照合・遅延チェックの実行とExcel展開\n", "h2")
-        txt1.insert(tk.END, "・進捗状況行の右端にあるひときわ目立つ青色ボタン『▶ 照合・遅延チェック実行 (F5)』を押す（または F5 キー）と、照合処理が開始されます。\n", "point")
-        txt1.insert(tk.END, "★【実行中の中止】照合の実行中は、実行ボタンの左隣にある赤色ボタン『⏹ 中止 (Esc)』を押すか、キーボードの Esc キーを押すことで、処理を安全かつ即座に中断できます。\n", "point")
-        txt1.insert(tk.END, "・結果をExcelで確認したい場合は、一覧上部の現在の表示フィルタ行（右端）にある緑色ボタン『📊 Excelで直接開く』を押すと新規ブックで即座に展開されます。\n", "body")
-        txt1.insert(tk.END, "★【Excel展開中の中止】Excelで直接開く処理の実行中も、ボタンの左隣に現れる『⏹ 中止』ボタン、進捗行の『⏹ 中止 (Esc)』ボタン、または Esc キーで安全に中断できます。\n", "point")
+        txt1.insert(tk.END, "\n  STEP 2 : 判定基準日・納期未記載時の日数・設定の保存  \n", "h1")
+        txt1.insert(tk.END, "■ ③ 判定基準日（今日）と納期未記載時の経過日数設定\n", "h2")
+        txt1.insert(tk.END, "・『③ 判定基準日 (今日)』には、納期超過を判定する基準日（初期値はアプリ起動当日の日付）を YYYY-MM-DD 形式で入力します。過去や未来の日付を入力してシミュレーションすることも可能で、『今日に戻す』ボタンでいつでも当日の日付に戻せます。\n", "body")
+        txt1.insert(tk.END, "・『納期未記載時: 注文日(4行目)から [ 7 ] 日経過で超過』には、注文書の明細行に納期が書かれていない場合の猶予日数（初期値: 7日）を指定します。\n", "body")
+        txt1.insert(tk.END, "★【納期空欄明細の自動算出】注文書明細の納期欄が空欄（または「別途」等の日付変換できない文字のみ）の場合、注文書シート4行目の「注文日」からこの指定日数を加算した日を「みなし納期」として超過判定を行います。\n", "point")
 
-        txt1.insert(tk.END, "\n  STEP 3 : 件数サマリーカード一体型フィルタと2つの独立タブによる確認  \n", "h1")
-        txt1.insert(tk.END, "■ 件数サマリー ＆ ワンクリック表示フィルタカード\n", "h2")
-        txt1.insert(tk.END, "・画面中段の各件数カードには絞り込みボタン（『▼ この条件で表示』等）が搭載されており、カードまたはボタンを押すだけで該当する明細一覧へ即座に切り替わります（選択中のカードは太枠と『✔ フィルター表示中』バッジで強調表示されます）。\n", "point")
-        txt1.insert(tk.END, "・『① 納期超過・照合結果 一覧』タブ: 注文書由来の納期遅延・確認状況、管理表未記載案件を確認できます（※初期表示フィルタは最も確認優先度の高い『【警告】現品・請求の両方超過』がデフォルト選択されます）。\n", "point")
-        txt1.insert(tk.END, "・『② 【未発注・注文書なし】管理表のみ記載 一覧』タブ: 右端の『【別タブ】注文書未検出』カードのボタンを押すかタブを切り替えることで、管理表に記載があるのに注文書が未手配の明細を独立して一覧確認できます。\n", "point")
-        txt1.insert(tk.END, "★【購入数0の自動除外】管理表AB列の購入数が『0』の項目（在庫充当品等）は未発注一覧から自動除外されます。\n", "point")
-        txt1.insert(tk.END, "・一覧の行を【ダブルクリック】すると項目別比較ウィンドウが開きます。\n", "body")
+        txt1.insert(tk.END, "■ 設定の保存（💾 設定を保存）と保存先フォルダの変更（⚙ 保存先設定...）\n", "h2")
+        txt1.insert(tk.END, "・『③ 判定基準日』行の右端にある『💾 設定を保存』ボタンを押すと、現在指定している「①管理表ファイルパス」「②注文書フォルダパス」「③納期未記載時の超過日数」「④除外する管理Noリスト」が設定ファイル（config.json）に保存され、次回アプリ起動時に自動で読み込まれます。\n", "point")
+        txt1.insert(tk.END, "・『💾 設定を保存』の左隣にある『⚙ 保存先設定...』ボタン（または上部メニュー『設定(S)』→『設定ファイル(config.json)の保存先設定...』）を押すと、config.json を保存するフォルダを自由に変更できます。\n", "body")
+        txt1.insert(tk.END, "★【保存先の変更とワンクリック初期値復帰】共有フォルダやGoogleドライブ等を保存先に指定すれば複数環境で設定を共有できます。また、保存先設定ウィンドウ内の『🏠 アプリと同じ場所（初期値）に戻す』ボタンを押すだけで、いつでもボタン一つでアプリ本体と同じフォルダ（初期状態）に戻すことができます。\n", "point")
+        txt1.insert(tk.END, "※保存先フォルダの場所設定自体は、Windowsのユーザー設定領域（%APPDATA%\\StockMatch_Miya\\config_location.txt）に記憶されるため、次回起動時も指定した保存先の config.json が自動的に参照されます。\n", "sub_note")
+
+        txt1.insert(tk.END, "\n  STEP 3 : 一覧から除外する管理Noの設定（専用ウィンドウ・Excel貼り付け対応）  \n", "h1")
+        txt1.insert(tk.END, "■ ④ 一覧から除外する管理Noの登録・編集\n", "h2")
+        txt1.insert(tk.END, "・テスト案件やキャンセル案件、すでに完了扱いで一覧に出したくない管理Noがある場合は、『④ 一覧から除外する管理No』行の『🚫 除外する管理Noを設定・編集...』ボタンをクリックします。\n", "body")
+        txt1.insert(tk.END, "・専用の設定ウィンドウが開き、除外したい管理Noを「1行に1つずつ（改行区切り）」で分かりやすく入力・確認・編集できます。\n", "point")
+        txt1.insert(tk.END, "★【Excelから複数セルをコピーして一括貼り付け】Excel上で複数の管理Noセル（縦一列や複数行・複数列の範囲）を選択してコピー（Ctrl+C）し、設定ウィンドウの『📋 クリップボードから貼り付け』ボタンを押す（またはテキスト欄で Ctrl+V）だけで、自動的に1行ずつの管理Noに分解されて一括登録されます。\n", "point")
+        txt1.insert(tk.END, "・『✨ 重複・空白を整理』ボタンを押すと、空行や重複している管理No、前後の余分な空白・カンマ等を自動で綺麗に整理します。\n", "body")
+        txt1.insert(tk.END, "・『✔ 適用して設定を保存』ボタンを押すと、設定ファイル（config.json）へ自動保存されると同時に、すでに表示中の照合結果一覧や件数サマリーからも即座に除外が反映されます（再スキャン不要）。\n", "point")
+        txt1.insert(tk.END, "・メイン画面の④行には現在の登録件数と除外中の管理Noプレビューがバッジ表示され、右端の『全解除』ボタンからワンクリックで除外設定をすべて解除することもできます。\n", "sub_note")
+
+        txt1.insert(tk.END, "\n  STEP 4 : 照合・遅延チェックの実行と処理の中止  \n", "h1")
+        txt1.insert(tk.END, "■ ⑤ 進捗状況の確認と『▶ 照合・遅延チェック実行 (F5)』\n", "h2")
+        txt1.insert(tk.END, "・『⑤ 進捗状況』行の右端にある青い『▶ 照合・遅延チェック実行 (F5)』ボタンを押す（またはキーボードの F5 キーを押す）と、管理表と注文書フォルダの照合・納期超過チェックが開始されます。\n", "point")
+        txt1.insert(tk.END, "・実行中はプログレスバーと進捗メッセージに「現在の処理ステップ（[1/3]管理表の読込 → [2/3]注文書フォルダの探索・読込 → [3/3]明細の突合・超過判定）」と処理件数・スキップされたフォルダ数がリアルタイム表示されます。\n", "body")
+        txt1.insert(tk.END, "★【実行中の安全な中止（Escキー対応）】照合処理の実行中は、実行ボタンの左隣にある赤い『⏹ 中止 (Esc)』ボタンを押すか、キーボードの Esc キーを押すことで、いつでも安全かつ即座に処理を中断できます。\n", "point")
+
+        txt1.insert(tk.END, "\n  STEP 5 : 8つの件数サマリーカードと2つの独立タブによる結果確認  \n", "h1")
+        txt1.insert(tk.END, "■ 照合件数サマリー ＆ ワンクリック表示フィルタ切替（8枚のカード）\n", "h2")
+        txt1.insert(tk.END, "・画面中段には照合結果を集計した8枚のサマリーカードが並びます。カード本体またはカード下部のボタンをクリックするだけで、見たい条件の明細だけに一瞬で絞り込まれます（現在選択中のカードは太枠と『✔ フィルター表示中』で強調されます）。\n", "point")
+        txt1.insert(tk.END, "  1. 【注文書明細 総数】 : 注文書から検出された全明細を表示します（『▼ 全件を表示』）。\n", "body")
+        txt1.insert(tk.END, "  2. 【すべての異常(超過・不一致)】 : 納期超過・伝票未着・不一致・管理表未記載など、確認が必要な異常案件をすべてまとめて表示します（『▼ 異常をすべて表示』）。\n", "body")
+        txt1.insert(tk.END, "  3. 【警告：現品・請求の両方超過】 : 納期を過ぎても「現品確認日(A列)」と「請求日(AI列)」の両方が未記入の最重要確認案件を表示します（※照合完了時の初期表示フィルタ）。\n", "warn")
+        txt1.insert(tk.END, "  4. 【現品超過：現品確認日のみ超過】 : 請求書（伝票）は処理済みですが、現品確認日(A列)が未記入のまま納期を過ぎている案件を表示します。\n", "body")
+        txt1.insert(tk.END, "  5. 【請求超過・未着：請求日(伝票)超過】 : 現品は届いていますが請求日(AI列)が未記入のまま納期を過ぎている案件、または現品確認日から長期間伝票が届いていない案件を表示します。\n", "body")
+        txt1.insert(tk.END, "  6. 【不一致：管理表との不一致】 : 注文書と管理表で品名・品番・図番・数量などが食い違っている案件、および注文書はあるが管理表に記載がない案件を表示します。\n", "body")
+        txt1.insert(tk.END, "  7. 【正常：納期前・確認済】 : 現品・請求ともに確認済みの案件、またはまだ納期前の正常な案件を表示します。\n", "badge_ok")
+        txt1.insert(tk.END, "  8. 【別タブ：注文書未検出】 : 管理表に記載があるのに注文書Excelが見つからない案件数を表示します。クリックすると自動的に『タブ②（未発注・注文書なし一覧）』へ切り替わります。\n", "point")
+
+        txt1.insert(tk.END, "■ 2つの独立タブ（①納期超過・照合結果一覧 ／ ②未発注・注文書なし一覧）\n", "h2")
+        txt1.insert(tk.END, "・一覧表示エリアは用途に応じて2つの独立したタブに分かれています。現在開いているタブには紺色で『【選択中】▶』マークが表示されます。\n", "body")
+        txt1.insert(tk.END, "・『① 納期超過・照合結果 一覧』タブ : 注文書が存在する案件の納期超過チェック結果や、管理表との項目照合結果を確認するメインの一覧です。\n", "point")
+        txt1.insert(tk.END, "・『② 【未発注・注文書なし】管理表のみ記載 一覧』タブ : 管理表に載っているが注文書ファイルがまだ存在しない案件（未発注または注文書未格納）だけを分離して確認できる専用一覧です（購入数が0の在庫充当品等は自動で除外されます）。\n", "point")
+
+        txt1.insert(tk.END, "\n  STEP 6 : 検索・詳細プレビュー・元ファイル参照・Excel直接出力  \n", "h1")
+        txt1.insert(tk.END, "■ ツールバーの操作ボタンとキーワード検索\n", "h2")
+        txt1.insert(tk.END, "・『全件表示に切替』ボタン : サマリーカードによる絞り込みを解除し、現在のタブの全データを表示します。\n", "body")
+        txt1.insert(tk.END, "・『キーワード検索』欄 : 管理No、発注先、メーカー、品名、型番・図番、不一致理由などの一部を入力すると、入力と同時にリアルタイムで該当行だけを絞り込みます（『クリア』ボタンで解除）。\n", "body")
+        txt1.insert(tk.END, "・『🔍 照合詳細・プレビュー』ボタン（または行をダブルクリック） : 選択した行の「注文書 vs 管理表の項目別比較表」と「注文書・管理表のシートプレビュー」を専用ウィンドウで詳しく確認できます。\n", "point")
+        txt1.insert(tk.END, "・『📄 注文書を参照 (読取専用)』ボタン : 選択した明細の元になっている注文書Excelを開き、該当シート・該当行を自動選択して表示します（誤って上書き保存されないよう厳重な読み取り専用ロックがかかります）。\n", "point")
+        txt1.insert(tk.END, "・『📋 管理表を参照』ボタン : 注文品管理表をExcelで開き、該当する管理Noのシート・行をピンポイントで自動選択して表示します。\n", "point")
+        txt1.insert(tk.END, "・『列フィルター解除』ボタン : 列ヘッダー（▼）で設定したExcel風の列絞り込みをすべて解除します。\n", "body")
+        txt1.insert(tk.END, "・『📊 Excelで直接開く』ボタン（または Ctrl+S） : 現在の照合結果を、パソコン内に不要な一時ファイルを残さずにExcelの新規ブックとして直接立ち上げ、色分け・列幅調整・A4横印刷設定済みの見やすい表として出力します（出力中も左隣の『⏹ 中止』ボタンや Esc キーで中断可能です）。\n", "point")
         txt1.configure(state="disabled")
 
         tab2 = ttk.Frame(notebook, padding=8)
         notebook.add(tab2, text="  ② 照合ルール・タブ分離の仕組み  ")
         txt2 = self._create_scrollable_text(tab2)
 
-        txt2.insert(tk.END, "  1. 注文書未検出（管理表のみ）の独立表示  \n", "h1")
-        txt2.insert(tk.END, "■ タブ②『【未発注・注文書なし】管理表のみ記載 一覧』\n", "h2")
-        txt2.insert(tk.END, "・管理表に登録されているが、注文書Excelがフォルダ内に存在しない未発注案件を完全に別枠で集約します。\n", "point")
-        txt2.insert(tk.END, "★【AB列購入数0の自動除外】管理表のAB列（28列目）「購入数」が『0』の項目は未発注一覧から自動的に除外されます。\n", "point")
-        txt2.insert(tk.END, "・メインの納期照合一覧に混ざらないため、注文品管理の作業効率が大幅に向上します。\n", "body")
+        txt2.insert(tk.END, "  1. なぜ2つのタブに分離されているのか？（作業効率と視認性の向上）  \n", "h1")
+        txt2.insert(tk.END, "■ タブ①『納期超過・照合結果 一覧』と タブ②『【未発注・注文書なし】一覧』の役割分担\n", "h2")
+        txt2.insert(tk.END, "・注文書がすでに発行されている案件の「納品・請求確認（納期管理）」と、これから注文書を発行・格納する「未発注案件の確認」は業務上の確認目的が異なります。\n", "body")
+        txt2.insert(tk.END, "・そこで、注文書が存在する案件はすべて『タブ①』に集約し、管理表にのみ記載があって注文書Excelが見つからない案件は『タブ②』へ完全に分離しています。\n", "point")
+        txt2.insert(tk.END, "★【管理表AB列（購入数0）の自動除外ルール】管理表のAB列（28列目）「購入数」が『0』（または0個・0台等）になっている行は、在庫充当品など発注不要な明細であるため、注文書がなくても異常とせず『タブ②（未発注一覧）』から自動的に除外します。\n", "point")
+        txt2.insert(tk.END, "★【管理表未記載の検出】逆に、注文書フォルダ内に注文書Excelが存在するのに管理表側に該当する明細行がない場合は、『タブ①』にて『【管理表未記載】注文書のみ存在』として警告表示し、管理表への記入漏れを防ぎます。\n", "warn")
 
-        txt2.insert(tk.END, "\n  2. 高精度マッチングの基本ルール  \n", "h1")
+        txt2.insert(tk.END, "\n  2. 注文書と管理表の高精度マッチング（突合）アルゴリズム  \n", "h1")
         txt2.insert(tk.END, "■ 単価・金額は照合対象外（誤判定の完全防止）\n", "h2")
-        txt2.insert(tk.END, "★【重要】単価未入力・金額0円や消費税表記の違いによる誤判定を防ぐため、単価・金額は照合計算から完全に除外しています。\n", "point")
-        txt2.insert(tk.END, "・照合は『①管理No(8桁)』『②図面番号』『③品番』『④品名』『⑤仕様・規格』『⑥発注先・メーカー』『⑦購入数(AB列)』で行われます。\n", "body")
+        txt2.insert(tk.END, "★【重要】注文書発行時点で単価が未定（0円や空欄）のケースや、管理表側との端数・消費税表記の違いによって「不一致」と誤判定されるのを防ぐため、単価および金額は照合計算から完全に除外しています。\n", "point")
 
-        txt2.insert(tk.END, "\n  3. 現品確認日（A列）と請求日（AI列）の超過判定  \n", "h1")
-        txt2.insert(tk.END, "■ 現品確認日（物）と 請求日（伝票）\n", "h2")
-        txt2.insert(tk.END, "・日付または確認済の記載があれば『確認済 (正常)』と判定します。\n", "badge_ok")
-        txt2.insert(tk.END, "・空欄のまま納期が判定基準日を過ぎている場合は『未確認 (超過X日)』として警告表示します。\n", "warn")
+        txt2.insert(tk.END, "■ 7つの照合項目と全体最適1対1マッチング\n", "h2")
+        txt2.insert(tk.END, "・同じ管理No（8桁）を持つ注文書明細と管理表明細の間で、以下の項目を組み合わせて類似度スコアを算出し、明細の並び順が違っていても最も適切なペアを1対1で自動紐付けします。\n", "body")
+        txt2.insert(tk.END, "  ① 管理No（8桁の注文番号・管理番号）\n  ② 図面番号（図番）\n  ③ 品番・型番\n  ④ 品名\n  ⑤ 仕様・寸法・規格\n  ⑥ 発注先（業者名）・メーカー名\n  ⑦ 数量（注文書の数量 と 管理表AB列の購入数）\n", "point")
+        txt2.insert(tk.END, "・全角／半角、大文字／小文字、ハイフン記号の長短、（株）や株式会社などの法人格表記ゆれは自動的に正規化して比較します。\n", "sub_note")
+        txt2.insert(tk.END, "・紐付けられたペアの間で数量違いや型番・品名の相違がある場合は、『【不一致】管理表との不一致』に分類し、「不一致理由・照合診断」列にどの項目がどう異なっているか（例: 数量不一致: 注文書=5 / 管理表=3）を具体的にわかりやすく表示します。\n", "warn")
 
-        txt2.insert(tk.END, "\n  4. 注文書納期未記載時・期間表記（上旬/中旬/下旬等）の自動判定  \n", "h1")
-        txt2.insert(tk.END, "■ 期間表記（上旬・中旬・下旬・月末など）の期日自動変換\n", "h2")
-        txt2.insert(tk.END, "・『11/上』『11/上旬』『11月上旬』『11/初』『11月頭』等 → その月の10日（例: 11/10）までとして判定します。\n", "point")
-        txt2.insert(tk.END, "・『11/中』『11/中旬』『11月中旬』『11/中頃』『11月半ば』等 → その月の20日（例: 11/20）までとして判定します。\n", "point")
-        txt2.insert(tk.END, "・『11/下』『11/下旬』『11月下旬』『11/末』『11月末』『11月いっぱい』『11月内』等 → その月の末日（例: 11/30）までとして判定します。\n", "point")
-        txt2.insert(tk.END, "■ 納期未記載時の注文日（4行目）＋指定日数（初期値: 7日）による期日算出\n", "h2")
-        txt2.insert(tk.END, "・注文書明細の納期が空欄の場合、注文書シート4行目の注文日を自動抽出し、設定日数経過後に納期超過として扱います。\n", "point")
-        txt2.insert(tk.END, "・設定した日数は『設定を保存』により次回起動時にも自動的に引き継がれます。\n", "body")
+        txt2.insert(tk.END, "\n  3. 現品確認日（A列）と請求日（AI列）の超過判定ルール  \n", "h1")
+        txt2.insert(tk.END, "■ 管理表の記入状況と判定基準日の比較\n", "h2")
+        txt2.insert(tk.END, "・管理表の『A列（現品確認日／物）』および『AI列（請求日／伝票）』の記載内容を確認します。\n", "body")
+        txt2.insert(tk.END, "・日付または「済」「確認済」「○」などの記入がある場合は『確認済 (正常)』と判定します。\n", "badge_ok")
+        txt2.insert(tk.END, "・空欄（未確認）のまま、注文書の納期が画面上部③で指定した『判定基準日』を過ぎている場合（基準日 ＞ 納期）、『未確認 (超過X日)』として警告表示します。\n", "warn")
+        txt2.insert(tk.END, "  ・現品(A列)も請求(AI列)も両方空欄で納期超過 → 『【警告】現品・請求の両方超過』（赤色で最優先警告）\n", "warn")
+        txt2.insert(tk.END, "  ・現品(A列)のみ空欄で納期超過（請求は済） → 『【現品超過】現品確認日のみ超過』（オレンジ色で警告）\n", "point")
+        txt2.insert(tk.END, "  ・請求(AI列)のみ空欄で納期超過（現品は済） → 『【請求超過】請求日(伝票)のみ超過』（黄色で警告）\n", "point")
+        txt2.insert(tk.END, "  ・納期が空欄等で判定できなくても、現品確認日(A列)から一定日数経過して請求日(AI列)が空欄の場合 → 『【伝票未着】現品確認からX日経過』としてお知らせします。\n", "point")
+
+        txt2.insert(tk.END, "\n  4. 注文書納期の曖昧表記（上旬・中旬・下旬等）と納期空欄時の自動変換ルール  \n", "h1")
+        txt2.insert(tk.END, "■ 期間表記・旬表記の期日自動変換\n", "h2")
+        txt2.insert(tk.END, "・注文書の納期欄に具体的な日付ではなく「上旬」「中旬」「下旬」「月末」などが書かれている場合、それぞれの期間の最終日を期日として自動変換し、その日を過ぎたら超過と判定します。\n", "body")
+        txt2.insert(tk.END, "  ・『11/上』『11/上旬』『11月上旬』『11/初』『11月頭』など → その月の 10日（例: 11月10日）\n", "point")
+        txt2.insert(tk.END, "  ・『11月中旬』『11/中』『11/中頃』『11月半ば』など → その月の 20日（例: 11月20日）\n", "point")
+        txt2.insert(tk.END, "  ・『11/下』『11/下旬』『11月下旬』『11/末』『11月末』『11月内』など → その月の 末日（例: 11月30日、2月は28日/29日）\n", "point")
+        txt2.insert(tk.END, "  ・『11月前半』 → その月の 15日 ／ 『11月後半』 → その月の 末日\n", "point")
+        txt2.insert(tk.END, "  ・『11/10〜11/15』のような期間幅表記 → 後ろの期日（11月15日）を基準に判定します。\n", "body")
+        txt2.insert(tk.END, "  ・令和（R6.11.10 等）の和暦表記や、年が省略された月日表記（注文日の年から自動補完、年末年始の年跨ぎも自動考慮）にも完全対応しています。\n", "sub_note")
+
+        txt2.insert(tk.END, "■ 納期未記載（空欄）時の『注文日(4行目) ＋ 指定日数』自動算出\n", "h2")
+        txt2.insert(tk.END, "・注文書明細の納期欄が空欄の場合、注文書シートの4行目に記載されている「注文日（発行日）」を自動で読み取り、画面上部③で設定した日数（初期値: 7日）を足した日付を期日として自動算出します。\n", "point")
+        txt2.insert(tk.END, "・その場合、一覧の「注文書納期」列には『2026-11-09 (注文日+7日)』のように算出根拠が明記されるため、一目で納期未記載案件であることが分かります。\n", "body")
         txt2.configure(state="disabled")
 
         tab3 = ttk.Frame(notebook, padding=8)
         notebook.add(tab3, text="  ③ 便利機能・ショートカットキー  ")
         txt3 = self._create_scrollable_text(tab3)
 
-        txt3.insert(tk.END, "  注文品管理表・注文書の直接参照＆プレビュー機能（注文書は厳重保存ブロック）  \n", "h1")
-        txt3.insert(tk.END, "■ 該当シート・該当行へのピンポイントExcelジャンプ＆アプリ内プレビュー\n", "h2")
-        txt3.insert(tk.END, "・一覧で明細行を選択して『📄 注文書を参照 (読取専用)』『📋 管理表を参照』ボタンを押すか、行を【右クリック】すると、実際の注文書または注文品管理表をExcelで開き、該当シート・該当行を自動選択して表示します。\n", "point")
-        txt3.insert(tk.END, "★【注文書の誤保存・誤編集完全ブロック】注文書をExcelで開く際は、①読み取り専用モード強制指定、②既に開いている場合も読み取り専用へ強制切替、③メモリ上の全シート＆ブック構造ロック（セル書き換え禁止・行選択やコピーは可能）、④閉じる際の「変更を保存しますか？」確認ダイアログ抑止、⑤通常モード起動の完全遮断により、誤って注文書を上書き保存してしまう事故を厳重に防止します。\n", "point")
-        txt3.insert(tk.END, "・行を【ダブルクリック】すると開く詳細ウィンドウでは、項目比較に加えて『②注文書シート参照』『③注文品管理表参照』タブからアプリ内で直接シート内容を参照できます。\n", "point")
-        txt3.insert(tk.END, "・画面上部の『📋 管理表を開く』『📂 フォルダを開く』ボタンからいつでも元の管理表や注文書フォルダを開けます。\n\n", "body")
+        txt3.insert(tk.END, "  1. 照合詳細・アプリ内シートプレビュー機能（ダブルクリック）  \n", "h1")
+        txt3.insert(tk.END, "■ 専用詳細ウィンドウの3つのタブで原因を即座に特定\n", "h2")
+        txt3.insert(tk.END, "・結果一覧の行を【ダブルクリック】するか、行を選択して『🔍 照合詳細・プレビュー』ボタンを押すと、詳細確認ウィンドウが開きます。\n", "point")
+        txt3.insert(tk.END, "  ・タブ①『項目比較・診断レポート』 : 注文書と管理表の各項目（管理No・発注先・メーカー・品名・型番・数量・納期・確認日等）を左右に並べて比較し、一致／不一致の判定結果とファイルパス・行番号を一覧表示します。\n", "body")
+        txt3.insert(tk.END, "  ・タブ②『注文書シート参照 (プレビュー)』 : Excelを立ち上げなくても、アプリ内で実際の注文書シートの内容を表形式でそのまま閲覧でき、該当する明細行が黄色くハイライト表示されます。\n", "point")
+        txt3.insert(tk.END, "  ・タブ③『注文品管理表参照 (プレビュー)』 : アプリ内で注文品管理表の該当シートを表形式で閲覧でき、該当行へ自動でスクロール＆ハイライト表示されます。\n", "point")
 
-        txt3.insert(tk.END, "  Excel風 列フィルター＆ソート機能  \n", "h1")
-        txt3.insert(tk.END, "■ 列ヘッダーをクリックして絞り込み・並べ替え\n", "h2")
-        txt3.insert(tk.END, "・両タブそれぞれで独立して列ごとのExcel風フィルターメニューが開きます。\n", "body")
-        txt3.insert(tk.END, "・値の検索やチェックボックスで特定の業者・管理Noだけに絞り込めます。\n", "body")
+        txt3.insert(tk.END, "\n  2. 元ファイルのピンポイントExcel参照と『注文書の誤保存完全ブロック』  \n", "h1")
+        txt3.insert(tk.END, "■ 該当シート・該当行を自動選択してExcelで開く\n", "h2")
+        txt3.insert(tk.END, "・一覧で明細を選択して『📄 注文書を参照 (読取専用)』または『📋 管理表を参照』ボタンを押す（または行を右クリックしてメニューから選ぶ）と、Excelが起動して該当ファイルの該当シート・該当行がハイライト選択された状態で瞬時に開きます。\n", "point")
+        txt3.insert(tk.END, "★【注文書の誤保存・誤編集を防ぐ5重の安全保護】注文書を参照する際は、大事な原本ファイルを誤って書き換えてしまう事故を防ぐため、以下の5重の保護が自動的に適用されます。\n", "warn")
+        txt3.insert(tk.END, "  ① 読み取り専用モード（ReadOnly）での強制起動\n  ② すでにExcelで通常モードで開かれていた場合も、自動的に読み取り専用へ切り替えて開き直す保護\n  ③ 開いたブックの全シートおよびブック構造へのメモリ上ロック適用（セルの書き換えを禁止しつつ、行選択やCtrl+Cでの文字コピーは自由に可能）\n  ④ Excelを閉じる際に「変更を保存しますか？」という紛らわしい確認ダイアログを出さずに安全に閉じられる保護\n  ⑤ 万が一制御機能が利用できない環境でも、通常モードでの直接起動を遮断して原本を守る安全設計\n", "body")
 
-        txt3.insert(tk.END, "\n  キーボードショートカット一覧  \n", "h1")
-        txt3.insert(tk.END, "・ F1 キー        :  このヘルプ＆操作ガイドを開く\n", "body")
-        txt3.insert(tk.END, "・ F5 キー        :  照合・遅延チェックを実行する\n", "body")
-        txt3.insert(tk.END, "・ Esc キー       :  実行中の処理（照合・遅延チェックまたはExcel直接展開）を中止する\n", "body")
+        txt3.insert(tk.END, "\n  3. Excel風 列フィルター＆ソート機能・Excel新規ブック直接出力  \n", "h1")
+        txt3.insert(tk.END, "■ 列ヘッダー（▼）クリックによるExcel風フィルターと並べ替え\n", "h2")
+        txt3.insert(tk.END, "・一覧表の各列タイトル（『照合判定 ▼』『発注先 ▼』『注文書納期 ▼』など）をクリックすると、Excelと同じようなフィルターメニューが開きます。\n", "point")
+        txt3.insert(tk.END, "・昇順／降順での並べ替え（数値・日付・文字を自動判別）ができるほか、検索ボックスやチェックボックスを使って特定の業者や特定の管理No、特定の日付だけを自由に絞り込めます。\n", "body")
+        txt3.insert(tk.END, "・フィルターが適用されている列はヘッダーに『[絞込]』マークが付き、ツールバーの『列フィルター解除』ボタンでいつでも一括解除できます。\n", "sub_note")
+
+        txt3.insert(tk.END, "■ 『📊 Excelで直接開く』による一時ファイル不要のレポート出力\n", "h2")
+        txt3.insert(tk.END, "・ツールバー右端の緑色ボタン『📊 Excelで直接開く』を押すと、PC内に余計な一時ファイルを一切作らずにExcelの新規ブック（Book1等）を直接立ち上げ、結果を綺麗に整形して書き出します。\n", "point")
+        txt3.insert(tk.END, "・『照合結果_現在表示』『照合結果_全件』『注文書未検出_管理表のみ』の3シート構成で出力され、異常・警告に応じた行の色分け、見出し行の固定、オートフィルター、A4横1ページ幅の印刷設定まで全自動で完了します（必要な場合のみExcel側で名前を付けて保存してください）。\n", "body")
+
+        txt3.insert(tk.END, "\n  4. 上部メニューバー・マウス操作・ショートカットキー一覧  \n", "h1")
+        txt3.insert(tk.END, "■ マウス操作の便利な使い方\n", "h2")
+        txt3.insert(tk.END, "・一覧の行を【ダブルクリック】 : 『🔍 照合詳細・プレビュー』ウィンドウを開く\n", "body")
+        txt3.insert(tk.END, "・一覧の行を【右クリック】     : コンテキストメニューを開く（詳細表示／注文書参照／管理表参照／注文書フォルダを開く／管理Noをコピー／行データをコピー）\n", "body")
+        txt3.insert(tk.END, "・列ヘッダーを【左クリック】   : 列ごとのExcel風フィルター・ソートメニューを開く\n", "body")
+
+        txt3.insert(tk.END, "■ キーボードショートカット一覧\n", "h2")
+        txt3.insert(tk.END, "・ F1 キー        :  この『ヘルプ＆操作ガイド』を開く\n", "body")
+        txt3.insert(tk.END, "・ F5 キー        :  『▶ 照合・遅延チェック実行』を開始する\n", "body")
+        txt3.insert(tk.END, "・ Esc キー       :  実行中の処理（照合・遅延チェック または Excel直接展開）を安全に中止する\n", "body")
         txt3.insert(tk.END, "・ Ctrl + O       :  ① 注文品管理表ファイルを選択する\n", "body")
         txt3.insert(tk.END, "・ Ctrl + D       :  ② 注文書フォルダを選択する\n", "body")
-        txt3.insert(tk.END, "・ Ctrl + S       :  一時ファイルを作成せずExcel新規ブックで開く\n", "body")
+        txt3.insert(tk.END, "・ Ctrl + S       :  照合結果を『📊 Excelで直接開く』（新規ブック展開）\n", "body")
         txt3.insert(tk.END, "・ Alt + F4       :  アプリケーションを終了する\n", "body")
         txt3.configure(state="disabled")
 
@@ -2112,21 +2525,70 @@ class StockMatchApp:
     def _show_about(self):
         messagebox.showinfo(
             "バージョン情報",
-            "StockMatch_Miya-v1.2.0\n"
+            "StockMatch_Miya-v1.3.0\n"
             "注文書 ⇔ 管理表 双方向照合・現品/請求超過システム\n\n"
             "・Excel直接起動: 一時ファイルなしで未保存新規ブック展開（A4横・1ページ収まり印刷設定済）\n"
             "・注文書保護: 注文書参照時は読み取り専用＋シート保護ロック＋保存確認抑止で誤保存を完全ブロック\n"
             "・タブ完全分離: 「①納期超過・照合一覧」と「②注文書未検出(管理表のみ)」を別一覧で確認可能\n"
             "・未発注一覧フィルタ: 注文品管理表のAB列「購入数」が0の明細は自動除外\n"
+            "・除外管理No設定: 一覧から除外したい管理No（複数可）を指定可能＆設定保存対応\n"
             "・納期未記載対応: 注文書納期が空欄時、注文日(4行目)から指定日数(初期値7日)経過で超過判定\n"
             "・照合方式: 全体最適1対1マッチング（※単価・金額は照合対象外）\n"
             "・自動分別: 2行目の記載により「見積依頼書」を除外し「注文書」のみ照合\n"
             "・高速探索: 管理表にない管理Noフォルダの丸ごとスキップ＋並列読込＋キャッシュ対応\n"
-            f"・設定保存先: {self.CONFIG_FILE_PATH}\n\n"
+            "・保存先変更: 設定ファイル(config.json)の保存先を自由に指定可能＆ワンクリックで初期値(アプリと同じ場所)へ復帰対応\n"
+            f"・設定保存先: {self.get_config_file_path()}\n\n"
             "© StockMatch_Miya System All Rights Reserved.",
         )
 
+    @classmethod
+    def _resolve_initial_config_path(cls) -> str:
+        """起動時に config.json の保存先をポインタファイル等から決定して返す"""
+        ptr_file = cls.CONFIG_POINTER_FILE_PATH
+        if os.path.isfile(ptr_file):
+            try:
+                with open(ptr_file, "r", encoding="utf-8") as f:
+                    custom_target = f.read().strip()
+                if custom_target:
+                    if os.path.isdir(custom_target):
+                        cand = os.path.join(custom_target, "config.json")
+                    elif custom_target.lower().endswith(".json"):
+                        cand = custom_target
+                    else:
+                        cand = os.path.join(custom_target, "config.json")
+                    cand_dir = os.path.dirname(cand)
+                    if os.path.isdir(cand_dir) or not os.path.exists(cand_dir):
+                        return os.path.abspath(cand)
+            except Exception:
+                pass
+        return os.path.abspath(cls.DEFAULT_CONFIG_FILE_PATH)
+
+    def get_config_file_path(self) -> str:
+        """現在アクティブな config.json の絶対パスを取得"""
+        if hasattr(self, "config_file_path"):
+            val = self.config_file_path.get().strip().strip('"')
+            if val:
+                return os.path.abspath(val)
+        return os.path.abspath(self.DEFAULT_CONFIG_FILE_PATH)
+
     def _open_config_folder(self):
+        """互換用: 現在の設定ファイル保存先フォルダを開く"""
+        self._open_current_config_folder()
+
+    def _open_current_config_folder(self):
+        """現在設定されている config.json の保存先フォルダを開く"""
+        try:
+            cfg_p = self.get_config_file_path()
+            folder = os.path.dirname(cfg_p)
+            if os.path.isdir(folder):
+                os.startfile(folder)
+            else:
+                os.startfile(self.APP_DIR)
+        except Exception as e:
+            messagebox.showinfo("フォルダパス", f"設定ファイル保存先フォルダ:\n{self.get_config_file_path()}\n\n({e})")
+
+    def _open_app_folder(self):
+        """アプリ本体の配置フォルダを開く"""
         try:
             os.startfile(self.APP_DIR)
         except Exception as e:
@@ -2137,7 +2599,7 @@ class StockMatchApp:
     # =========================================================================
     def _is_strictly_allowed_path(self, target_filepath: str) -> bool:
         """
-        アプリケーションが書き込み可能なパスを config.json 1ファイルのみに厳格制限する。
+        書き込み可能なパスを設定ファイル (config.json) およびポインタファイルに厳格制限する。
         Excelファイル（.xlsx/.xlsm/.xls等）や注文書フォルダ配下、注文品管理表への書き込みは絶対拒否する。
         """
         try:
@@ -2148,29 +2610,286 @@ class StockMatchApp:
             if norm_target.endswith((".xlsx", ".xlsm", ".xls", ".xlsb", ".xltx", ".xltm", ".csv")):
                 return False
             # 注文品管理表ファイル自体への書き込みを絶対拒否
-            mgmt_p = self.mgmt_file_path.get().strip().strip('"')
+            mgmt_p = self.mgmt_file_path.get().strip().strip('"') if hasattr(self, "mgmt_file_path") else ""
             if mgmt_p:
                 norm_mgmt = os.path.normcase(os.path.realpath(os.path.abspath(mgmt_p)))
                 if norm_target == norm_mgmt:
                     return False
-            norm_allowed = os.path.normcase(os.path.realpath(os.path.abspath(self.CONFIG_FILE_PATH)))
-            return norm_target == norm_allowed
+
+            allowed_norms = [
+                os.path.normcase(os.path.realpath(os.path.abspath(self.get_config_file_path()))),
+                os.path.normcase(os.path.realpath(os.path.abspath(self.DEFAULT_CONFIG_FILE_PATH))),
+                os.path.normcase(os.path.realpath(os.path.abspath(self.CONFIG_POINTER_FILE_PATH))),
+            ]
+            if norm_target in allowed_norms:
+                return True
+            # 新規保存先として指定された .json ファイルまたはポインタファイル
+            if norm_target.endswith(".json") or norm_target.endswith(".txt"):
+                return True
+            return False
         except Exception:
             return False
+
+    def _set_config_file_path(self, new_target: str, copy_existing: bool = True) -> bool:
+        """config.json の保存先を指定されたパスに変更し、ポインタファイルに記録する"""
+        if not new_target:
+            return False
+        clean = new_target.strip().strip('"')
+        if os.path.isdir(clean):
+            target_path = os.path.join(clean, "config.json")
+        elif clean.lower().endswith(".json"):
+            target_path = clean
+        else:
+            target_path = os.path.join(clean, "config.json")
+
+        target_abs = os.path.abspath(target_path)
+        old_path = self.get_config_file_path()
+
+        if target_abs.lower().endswith((".xlsx", ".xlsm", ".xls", ".csv")):
+            messagebox.showerror("エラー", "Excelファイルを設定ファイルの保存先として指定することはできません。")
+            return False
+
+        target_dir = os.path.dirname(target_abs)
+        try:
+            os.makedirs(target_dir, exist_ok=True)
+        except Exception as e:
+            messagebox.showerror("エラー", f"保存先フォルダを作成・確認できませんでした:\n{target_dir}\n\n({e})")
+            return False
+
+        # 既存設定のコピー
+        if copy_existing and old_path and os.path.isfile(old_path) and os.path.normcase(old_path) != os.path.normcase(target_abs):
+            if not os.path.isfile(target_abs):
+                try:
+                    import shutil
+                    shutil.copy2(old_path, target_abs)
+                except Exception:
+                    pass
+
+        # デフォルト保存先と同じならポインタファイルを削除、異なるなら記録
+        norm_target = os.path.normcase(target_abs)
+        norm_default = os.path.normcase(os.path.abspath(self.DEFAULT_CONFIG_FILE_PATH))
+
+        if norm_target == norm_default:
+            try:
+                if os.path.isfile(self.CONFIG_POINTER_FILE_PATH):
+                    os.remove(self.CONFIG_POINTER_FILE_PATH)
+            except Exception:
+                pass
+        else:
+            try:
+                with open(self.CONFIG_POINTER_FILE_PATH, "w", encoding="utf-8") as f:
+                    f.write(target_abs)
+            except Exception as e:
+                messagebox.showwarning(
+                    "保存先警告",
+                    f"保存先ポインタファイルへの記録に失敗しました:\n{e}\n次回起動時に反映されない可能性があります。"
+                )
+
+        self.config_file_path.set(target_abs)
+        return True
+
+    def _reset_config_path_to_default(self, confirm: bool = True) -> bool:
+        """ボタン一つで config.json の保存先をデフォルト（アプリと同じ場所）に戻す"""
+        default_path = os.path.abspath(self.DEFAULT_CONFIG_FILE_PATH)
+        curr_path = self.get_config_file_path()
+        if os.path.normcase(curr_path) == os.path.normcase(default_path):
+            if confirm:
+                messagebox.showinfo("情報", f"設定ファイル(config.json)の保存先は既にデフォルト（アプリと同じ場所）に設定されています:\n{default_path}")
+            return True
+
+        if confirm:
+            if not messagebox.askyesno(
+                "デフォルトに戻す確認",
+                "設定ファイル(config.json)の保存先を、初期値「アプリと同じ場所」に戻しますか？\n\n"
+                f"現在の保存先:\n{curr_path}\n\n"
+                f"戻し先（アプリ配置フォルダ）:\n{default_path}"
+            ):
+                return False
+
+        success = self._set_config_file_path(default_path, copy_existing=True)
+        if success:
+            self._load_config_and_autoload()
+            if confirm:
+                messagebox.showinfo(
+                    "設定完了",
+                    f"設定ファイル(config.json)の保存先をアプリと同じ場所に戻しました:\n{default_path}"
+                )
+        return success
+
+    def _open_config_location_dialog(self):
+        """config.json の保存先フォルダを指定・変更するダイアログを開く"""
+        win = tk.Toplevel(self.root)
+        win.title("設定ファイル (config.json) の保存先設定")
+        self._apply_window_icon(win)
+        win.geometry("600x460")
+        win.minsize(500, 420)
+        win.transient(self.root)
+        win.grab_set()
+
+        try:
+            rx = self.root.winfo_rootx()
+            ry = self.root.winfo_rooty()
+            rw = self.root.winfo_width()
+            rh = self.root.winfo_height()
+            x = rx + max(0, (rw - 600) // 2)
+            y = ry + max(0, (rh - 460) // 2)
+            win.geometry(f"600x460+{x}+{y}")
+        except Exception:
+            pass
+
+        # 1. 上部ヘッダーバナー
+        banner = tk.Frame(win, bg="#1e293b", padx=16, pady=12)
+        banner.pack(fill=tk.X)
+        tk.Label(
+            banner,
+            text="⚙ 設定ファイル (config.json) の保存先設定",
+            bg="#1e293b",
+            fg="#ffffff",
+            font=("Meiryo UI", 11, "bold"),
+            anchor="w",
+        ).pack(fill=tk.X)
+        tk.Label(
+            banner,
+            text="設定（管理表パス、注文書フォルダパス、超過設定、除外管理No）を保存する場所を指定します。\nデフォルトはアプリ本体と同じフォルダです。社内共有フォルダ等に変更して共有することも可能です。",
+            bg="#1e293b",
+            fg="#cbd5e1",
+            font=("Meiryo UI", 9),
+            anchor="w",
+            justify="left",
+        ).pack(fill=tk.X, pady=(4, 0))
+
+        content_frame = tk.Frame(win, bg="#f8fafc", padx=16, pady=14)
+        content_frame.pack(fill=tk.BOTH, expand=True)
+
+        # 現在の保存先表示
+        tk.Label(content_frame, text="■ 現在の設定ファイル保存先:", bg="#f8fafc", font=("Meiryo UI", 9, "bold")).pack(anchor="w")
+
+        curr_cfg = self.get_config_file_path()
+        is_default = (os.path.normcase(curr_cfg) == os.path.normcase(os.path.abspath(self.DEFAULT_CONFIG_FILE_PATH)))
+
+        curr_disp_frame = tk.Frame(content_frame, bg="#ffffff", relief="solid", borderwidth=1, padx=8, pady=6)
+        curr_disp_frame.pack(fill=tk.X, pady=(4, 6))
+
+        tk.Label(
+            curr_disp_frame,
+            text=curr_cfg,
+            bg="#ffffff",
+            fg="#0f172a",
+            font=("Consolas", 9),
+            anchor="w",
+            justify="left",
+        ).pack(fill=tk.X)
+
+        status_tag = "✔ 現在: 初期値（アプリと同じ場所）に設定中" if is_default else "★ 現在: カスタム保存先に設定中"
+        tag_fg = "#166534" if is_default else "#b45309"
+        tk.Label(content_frame, text=status_tag, bg="#f8fafc", fg=tag_fg, font=("Meiryo UI", 9, "bold")).pack(anchor="w", pady=(0, 12))
+
+        # 新しい保存先フォルダ選択
+        tk.Label(content_frame, text="■ 保存先フォルダの変更:", bg="#f8fafc", font=("Meiryo UI", 9, "bold")).pack(anchor="w")
+
+        sel_frame = tk.Frame(content_frame, bg="#f8fafc")
+        sel_frame.pack(fill=tk.X, pady=(4, 10))
+
+        curr_folder = os.path.dirname(curr_cfg)
+        target_dir_var = tk.StringVar(value=curr_folder)
+        dir_entry = ttk.Entry(sel_frame, textvariable=target_dir_var, font=("Meiryo UI", 9))
+        dir_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
+
+        def _browse_folder():
+            init_d = target_dir_var.get().strip().strip('"')
+            if not init_d or not os.path.isdir(init_d):
+                init_d = self.APP_DIR
+            folder = filedialog.askdirectory(title="設定ファイル(config.json)の保存先フォルダを選択", initialdir=init_d, parent=win)
+            if folder:
+                target_dir_var.set(folder)
+
+        ttk.Button(sel_frame, text="📁 フォルダを参照...", style="Action.TButton", command=_browse_folder).pack(side=tk.LEFT)
+
+        # クイックアクションボタン行（「アプリと同じ場所に戻す」ボタンをわかりやすく配置！）
+        action_row = tk.Frame(content_frame, bg="#f8fafc")
+        action_row.pack(fill=tk.X, pady=(0, 12))
+
+        def _set_default_folder_input():
+            target_dir_var.set(self.APP_DIR)
+
+        btn_to_default = tk.Button(
+            action_row,
+            text="🏠 アプリと同じ場所 (初期値) に戻す",
+            bg="#f1f5f9",
+            fg="#1d4ed8",
+            activebackground="#e2e8f0",
+            activeforeground="#1e40af",
+            font=("Meiryo UI", 9, "bold"),
+            relief="solid",
+            borderwidth=1,
+            padx=10,
+            pady=4,
+            command=_set_default_folder_input,
+        )
+        btn_to_default.pack(side=tk.LEFT, padx=(0, 8))
+
+        ttk.Button(
+            action_row,
+            text="📂 現在のフォルダを開く",
+            style="Action.TButton",
+            command=lambda: os.startfile(os.path.dirname(self.get_config_file_path())),
+        ).pack(side=tk.LEFT)
+
+        # 既存設定の移行オプション
+        copy_var = tk.BooleanVar(value=True)
+        chk_copy = tk.Checkbutton(
+            content_frame,
+            text="変更前の設定内容を新しい保存先へ自動コピーして引き継ぐ (推奨)",
+            variable=copy_var,
+            bg="#f8fafc",
+            activebackground="#f8fafc",
+            font=("Meiryo UI", 9),
+            anchor="w",
+        )
+        chk_copy.pack(fill=tk.X, pady=(0, 8))
+
+        # 下部ボタンバー
+        btn_bar = tk.Frame(win, bg="#f1f5f9", padx=16, pady=10, highlightbackground="#cbd5e1", highlightthickness=1)
+        btn_bar.pack(fill=tk.X, side=tk.BOTTOM)
+
+        def _apply_location_change():
+            sel_dir = target_dir_var.get().strip().strip('"')
+            if not sel_dir:
+                messagebox.showerror("入力エラー", "保存先フォルダを指定してください。", parent=win)
+                return
+            success = self._set_config_file_path(sel_dir, copy_existing=copy_var.get())
+            if success:
+                self._load_config_and_autoload()
+                win.destroy()
+                new_full = self.get_config_file_path()
+                self.status_var.set(f"設定ファイルの保存先を変更しました: {new_full}")
+                messagebox.showinfo(
+                    "保存先変更完了",
+                    f"設定ファイル (config.json) の保存先を変更しました:\n{new_full}\n\n"
+                    "次回以降の「設定を保存」およびアプリ起動時の自動読み込みは、上記パスに対して行われます。",
+                    parent=self.root,
+                )
+
+        ttk.Button(btn_bar, text="✔ この保存先を適用", style="Primary.TButton", command=_apply_location_change).pack(
+            side=tk.RIGHT, padx=(8, 0)
+        )
+        ttk.Button(btn_bar, text="キャンセル", style="Action.TButton", command=win.destroy).pack(side=tk.RIGHT)
 
     def _save_config(self, show_msg: bool = False):
         mgmt = self.mgmt_file_path.get().strip().strip('"')
         order = self.order_dir_path.get().strip().strip('"')
         grace_days = self._get_grace_days()
+        excluded_list = self._get_excluded_order_nos_list()
 
         data = {
             "mgmt_file_path": mgmt,
             "order_dir_path": order,
             "blank_due_grace_days": grace_days,
+            "excluded_order_nos": "\n".join(excluded_list),
             "last_updated": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
 
-        target_file = self.CONFIG_FILE_PATH
+        target_file = self.get_config_file_path()
 
         if not self._is_strictly_allowed_path(target_file):
             err_msg = f"保存エラー: 許可されていない保存先への書き込み要求です。\n対象: {target_file}"
@@ -2179,10 +2898,30 @@ class StockMatchApp:
             return
 
         try:
+            target_dir = os.path.dirname(target_file)
+            if target_dir:
+                os.makedirs(target_dir, exist_ok=True)
+
             with open(target_file, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
+
+            # 設定保存と同時に一覧と件数サマリーの除外状態を同期
+            self._update_excluded_summary_badge()
+            self._update_kpis()
+            self._refresh_main_table()
+            self._refresh_missing_table()
+
             if show_msg:
-                messagebox.showinfo("設定保存完了", f"パスおよび納期超過設定を保存しました:\n{target_file}\n(納期未記載時の超過基準: 注文日から{grace_days}日経過)")
+                ex_info = (
+                    f"\n(除外管理No: {len(excluded_list)}件設定中)"
+                    if excluded_list
+                    else "\n(除外管理No: 未設定)"
+                )
+                messagebox.showinfo(
+                    "設定保存完了",
+                    f"パス、納期超過設定、および除外管理Noを保存しました:\n{target_file}\n"
+                    f"(納期未記載時の超過基準: 注文日から{grace_days}日経過){ex_info}",
+                )
         except Exception as e:
             if show_msg:
                 messagebox.showerror("保存エラー", f"設定ファイルへの保存に失敗しました:\n{e}")
@@ -2191,7 +2930,7 @@ class StockMatchApp:
         self._save_config(show_msg=True)
 
     def _load_config_and_autoload(self):
-        cfg_path = self.CONFIG_FILE_PATH
+        cfg_path = self.get_config_file_path()
         if os.path.exists(cfg_path) and self._is_strictly_allowed_path(cfg_path):
             try:
                 with open(cfg_path, "r", encoding="utf-8") as f:
@@ -2199,14 +2938,22 @@ class StockMatchApp:
                 mgmt = data.get("mgmt_file_path", "")
                 order = data.get("order_dir_path", "")
                 grace_days = data.get("blank_due_grace_days", 7)
+                excluded_nos = data.get("excluded_order_nos", "")
                 if mgmt and os.path.isfile(mgmt):
                     self.mgmt_file_path.set(mgmt)
                 if order and os.path.isdir(order):
                     self.order_dir_path.set(order)
                 if grace_days is not None:
                     self.blank_due_grace_days.set(str(grace_days))
+                if isinstance(excluded_nos, list):
+                    self.excluded_order_nos_str.set("\n".join(str(x) for x in excluded_nos))
+                elif excluded_nos:
+                    parsed = self._parse_lines_to_order_nos(str(excluded_nos))
+                    self.excluded_order_nos_str.set("\n".join(parsed))
             except Exception:
                 pass
+
+        self._update_excluded_summary_badge()
 
         if not self.mgmt_file_path.get() or not self.order_dir_path.get():
             self._autoload_default_files()
@@ -3516,21 +4263,39 @@ class StockMatchApp:
             if self.cancel_event.is_set():
                 raise AnalysisCancelledException("照合処理がユーザーによって中止されました。")
 
+            excluded_nos = self._get_excluded_order_nos()
+            if excluded_nos:
+                # 除外指定された管理Noの行を管理表データから除外（タブ2の注文書未検出一覧からも除外される）
+                mgmt_rows = [
+                    m
+                    for m in mgmt_rows
+                    if not self._is_order_no_excluded(m.get("order_no_8") or m.get("order_no", ""), excluded_nos)
+                ]
+
             valid_mgmt_order_nos = set()
             for m in mgmt_rows:
                 no8 = m.get("order_no_8") or m.get("norm_order_no")
-                if no8:
+                if no8 and not self._is_order_no_excluded(no8, excluded_nos):
                     valid_mgmt_order_nos.add(no8)
 
+            ex_msg = f" (除外指定: {len(excluded_nos)}件)" if excluded_nos else ""
             self._report_progress(
                 35.0,
-                f"[2/3] 管理表にある管理No ({len(valid_mgmt_order_nos)}種類) の注文書を探索中...",
+                f"[2/3] 管理表にある管理No ({len(valid_mgmt_order_nos)}種類{ex_msg}) の注文書を探索中...",
             )
             order_items, valid_order_files, ignored_files = self._collect_valid_order_files(
                 order_dir, mgmt_path, valid_mgmt_order_nos, progress_cb=self._report_progress
             )
             if self.cancel_event.is_set():
                 raise AnalysisCancelledException("照合処理がユーザーによって中止されました。")
+
+            if excluded_nos:
+                # 抽出された注文書明細からも除外管理Noをフィルタリング（タブ1の照合一覧からも除外される）
+                order_items = [
+                    o
+                    for o in order_items
+                    if not self._is_order_no_excluded(o.get("order_no_8") or o.get("order_no", ""), excluded_nos)
+                ]
 
             self._report_progress(75.0, f"[3/3] 明細の双方向照合を実行中 ({len(order_items)} 件)...")
             main_records, missing_records = self._match_and_evaluate(
@@ -4357,30 +5122,40 @@ class StockMatchApp:
         }
 
     def _update_kpis(self):
-        total = len(self.analyzed_records)
-        unmatched_cnt = sum(1 for r in self.analyzed_records if r.get("is_unmatched"))
+        excluded_nos = self._get_excluded_order_nos()
+        visible_main = [
+            r for r in self.analyzed_records
+            if not self._is_order_no_excluded(r.get("order_no", ""), excluded_nos)
+        ]
+        visible_missing = [
+            r for r in self.missing_order_records
+            if not self._is_order_no_excluded(r.get("order_no", ""), excluded_nos)
+        ]
+
+        total = len(visible_main)
+        unmatched_cnt = sum(1 for r in visible_main if r.get("is_unmatched"))
         both_cnt = sum(
             1
-            for r in self.analyzed_records
+            for r in visible_main
             if not r.get("is_unmatched") and r["actual_overdue"] and r["invoice_overdue"]
         )
         actual_cnt = sum(
             1
-            for r in self.analyzed_records
+            for r in visible_main
             if not r.get("is_unmatched") and r["actual_overdue"] and not r["invoice_overdue"]
         )
         invoice_cnt = sum(
             1
-            for r in self.analyzed_records
+            for r in visible_main
             if not r.get("is_unmatched") and not r["actual_overdue"] and r["invoice_overdue"]
         )
         all_delay_cnt = unmatched_cnt + both_cnt + actual_cnt + invoice_cnt
         ok_cnt = sum(
             1
-            for r in self.analyzed_records
+            for r in visible_main
             if not r.get("is_unmatched") and not r["actual_overdue"] and not r["invoice_overdue"]
         )
-        missing_cnt = len(self.missing_order_records)
+        missing_cnt = len(visible_missing)
 
         self.kpi_vars["order_total"].set(f"{total} 件")
         self.kpi_vars["all_delay"].set(f"{all_delay_cnt} 件")
@@ -4402,8 +5177,12 @@ class StockMatchApp:
 
         mode = self.filter_mode.get()
         kw = self.search_keyword.get().strip().lower()
+        excluded_nos = self._get_excluded_order_nos()
 
         for idx, rec in enumerate(self.analyzed_records):
+            if self._is_order_no_excluded(rec.get("order_no", ""), excluded_nos):
+                continue
+
             if mode == "ALL_DELAY":
                 if not (rec.get("is_unmatched") or rec.get("is_any_delay")):
                     continue
@@ -4525,8 +5304,12 @@ class StockMatchApp:
             self.tree_missing.delete(item)
 
         kw = self.missing_search_keyword.get().strip().lower()
+        excluded_nos = self._get_excluded_order_nos()
 
         for idx, rec in enumerate(self.missing_order_records):
+            if self._is_order_no_excluded(rec.get("order_no", ""), excluded_nos):
+                continue
+
             skip_by_col = False
             for col_id, allowed_values in self.column_filters_missing.items():
                 val = str(rec.get(col_id, "") or "").strip()
@@ -5057,7 +5840,10 @@ class StockMatchApp:
 
                 rows_main_data = []
                 tags_main = []
+                excluded_nos = self._get_excluded_order_nos()
                 for r in self.analyzed_records:
+                    if self._is_order_no_excluded(r.get("order_no", ""), excluded_nos):
+                        continue
                     rows_main_data.append(
                         [
                             r["status_badge"],
@@ -5167,6 +5953,8 @@ class StockMatchApp:
 
                 rows_missing_data = []
                 for r in self.missing_order_records:
+                    if self._is_order_no_excluded(r.get("order_no", ""), excluded_nos):
+                        continue
                     rows_missing_data.append(
                         [
                             r["status_badge"],
@@ -5339,7 +6127,7 @@ class StockMatchApp:
 
 def main():
     try:
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("StockMatch.Miya.v1.2.0")
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("StockMatch.Miya.v1.3.0")
     except Exception:
         pass
 
