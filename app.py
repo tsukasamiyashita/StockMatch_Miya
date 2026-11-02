@@ -39,7 +39,7 @@ class AnalysisCancelledException(Exception):
 
 class StockMatchApp:
     """
-    StockMatch_Miya-v1.1.0
+    StockMatch_Miya-v1.2.0
     注文品管理表（1つのファイル）と注文書フォルダ内（サブフォルダ含む全階層）の全注文書Excelを双方向照合し、
     ・納期超過（現品確認日・請求日）および管理表未記載の注文書
     ・注文書未検出（管理表にあるのに注文書が見当たらない未発注明細 / ※AB列購入数0は自動除外）
@@ -58,7 +58,7 @@ class StockMatchApp:
 
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("StockMatch_Miya-v1.1.0 - 注文品納期・現品/請求照合システム")
+        self.root.title("StockMatch_Miya-v1.2.0 - 注文品納期・現品/請求照合システム")
 
         # メインウィンドウおよび全Toplevelウィンドウに icon.ico を適用
         self._apply_window_icon(self.root, is_main=True)
@@ -315,7 +315,7 @@ class StockMatchApp:
         header_frame = tk.Frame(self.root, bg="#1e293b", height=56, padx=16, pady=10)
         header_frame.pack(fill=tk.X)
 
-        title_lbl = ttk.Label(header_frame, text="StockMatch_Miya-v1.1.0", style="Header.TLabel")
+        title_lbl = ttk.Label(header_frame, text="StockMatch_Miya-v1.2.0", style="Header.TLabel")
         title_lbl.pack(side=tk.LEFT)
 
         sub_lbl = ttk.Label(
@@ -1979,7 +1979,7 @@ class StockMatchApp:
 
     def _show_help_guide(self, tab_index: int = 0):
         win = tk.Toplevel(self.root)
-        win.title("StockMatch_Miya-v1.1.0 - ヘルプ＆操作ガイド")
+        win.title("StockMatch_Miya-v1.2.0 - ヘルプ＆操作ガイド")
         self._apply_window_icon(win)
         win.geometry("880x680")
         win.minsize(720, 520)
@@ -1989,7 +1989,7 @@ class StockMatchApp:
         banner.pack(fill=tk.X)
         tk.Label(
             banner,
-            text="📖 StockMatch_Miya-v1.1.0  取扱説明書・操作ガイド",
+            text="📖 StockMatch_Miya-v1.2.0  取扱説明書・操作ガイド",
             bg="#1e293b",
             fg="#ffffff",
             font=("Meiryo UI", 12, "bold"),
@@ -2112,7 +2112,7 @@ class StockMatchApp:
     def _show_about(self):
         messagebox.showinfo(
             "バージョン情報",
-            "StockMatch_Miya-v1.1.0\n"
+            "StockMatch_Miya-v1.2.0\n"
             "注文書 ⇔ 管理表 双方向照合・現品/請求超過システム\n\n"
             "・Excel直接起動: 一時ファイルなしで未保存新規ブック展開（A4横・1ページ収まり印刷設定済）\n"
             "・注文書保護: 注文書参照時は読み取り専用＋シート保護ロック＋保存確認抑止で誤保存を完全ブロック\n"
@@ -5339,7 +5339,7 @@ class StockMatchApp:
 
 def main():
     try:
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("StockMatch.Miya.v1.1.0")
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("StockMatch.Miya.v1.2.0")
     except Exception:
         pass
 
