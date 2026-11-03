@@ -39,7 +39,7 @@ class AnalysisCancelledException(Exception):
 
 class StockMatchApp:
     """
-    StockMatch_Miya-v1.3.0
+    StockMatch_Miya-v1.4.0
     注文品管理表（1つのファイル）と注文書フォルダ内（サブフォルダ含む全階層）の全注文書Excelを双方向照合し、
     ・納期超過（現品確認日・請求日）および管理表未記載の注文書
     ・注文書未検出（管理表にあるのに注文書が見当たらない未発注明細 / ※AB列購入数0は自動除外）
@@ -58,9 +58,18 @@ class StockMatchApp:
     CONFIG_FILE_PATH = DEFAULT_CONFIG_FILE_PATH
     ICON_FILE_PATH = os.path.join(APP_DIR, "icon.ico")
 
+    INSTRUCTION_FILTER_OPTIONS = [
+        ("HAS_ONLY", "「有り」のみ"),
+        ("HAS_OR_BLANK", "有り または 空白 のみ"),
+        ("BLANK_ONLY", "「空白」のみ"),
+        ("ALL", "すべて表示 (フィルタなし)"),
+    ]
+    INSTRUCTION_CODE_TO_LABEL = dict(INSTRUCTION_FILTER_OPTIONS)
+    INSTRUCTION_LABEL_TO_CODE = {lbl: code for code, lbl in INSTRUCTION_FILTER_OPTIONS}
+
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("StockMatch_Miya-v1.3.0 - 注文品納期・現品/請求照合システム")
+        self.root.title("StockMatch_Miya-v1.4.0 - 注文品納期・現品/請求照合システム")
 
         # メインウィンドウおよび全Toplevelウィンドウに icon.ico を適用
         self._apply_window_icon(self.root, is_main=True)
@@ -81,7 +90,10 @@ class StockMatchApp:
         self.order_dir_path = tk.StringVar()
         self.base_date_str = tk.StringVar(value=datetime.date.today().strftime("%Y-%m-%d"))
         self.blank_due_grace_days = tk.StringVar(value="7")
+        self.exclude_after_months = tk.StringVar(value="12")
         self.excluded_order_nos_str = tk.StringVar(value="")
+        self.instruction_filter_mode = tk.StringVar(value="HAS_ONLY")
+        self.instruction_filter_label_var = tk.StringVar(value=self.INSTRUCTION_CODE_TO_LABEL["HAS_ONLY"])
         self.filter_mode = tk.StringVar(value="BOTH_DELAY")
         self.search_keyword = tk.StringVar()
         self.missing_search_keyword = tk.StringVar()
@@ -116,12 +128,106 @@ class StockMatchApp:
 
     def _get_grace_days(self) -> int:
         """納期未記載時に注文日を基準とする猶予日数（デフォルト7日）を整数で取得"""
-        val = self.blank_due_grace_days.get().strip()
+        val = unicodedata.normalize("NFKC", self.blank_due_grace_days.get().strip())
         try:
             days = int(val)
             return max(0, days)
         except ValueError:
             return 7
+
+    def _get_exclude_months(self) -> int:
+        """注文日から何ヶ月経過したら除外するか（デフォルト12ヶ月、0は除外しない）を整数で取得"""
+        val = unicodedata.normalize("NFKC", self.exclude_after_months.get().strip())
+        if not val:
+            return 12
+        try:
+            months = int(val)
+            return max(0, months)
+        except ValueError:
+            return 12
+
+    @staticmethod
+    def _add_months(d: datetime.date, months: int) -> datetime.date:
+        """指定された日付 d に months ヶ月を加算した日付を返す（月末日補正あり）"""
+        total_months = (d.year * 12 + (d.month - 1)) + months
+        target_year = total_months // 12
+        target_month = (total_months % 12) + 1
+        max_day = calendar.monthrange(target_year, target_month)[1]
+        return datetime.date(target_year, target_month, min(d.day, max_day))
+
+    def _is_order_date_expired(
+        self,
+        order_date: datetime.date | None,
+        base_date: datetime.date | None = None,
+        exclude_months: int | None = None,
+    ) -> bool:
+        """注文日(order_date)から指定ヶ月数(exclude_months)以上が経過しているかを判定"""
+        if order_date is None:
+            return False
+        if exclude_months is None:
+            exclude_months = self._get_exclude_months()
+        if exclude_months <= 0:
+            return False
+        if base_date is None:
+            base_date = self._parse_flexible_date(self.base_date_str.get()) or datetime.date.today()
+        cutoff_date = self._add_months(order_date, exclude_months)
+        return base_date >= cutoff_date
+
+    @staticmethod
+    def _classify_instruction_col(raw_val: str) -> str:
+        """
+        注文品管理表の指示書列(J列)の値を判定する:
+          - "BLANK": 空白（未記入）
+          - "HAS"  : 有り（「有」「有り」「あり」「○」「済」等）
+          - "NONE" : 無し・その他（「無」「無し」「なし」「不要」「-」「×」等）
+        """
+        s = unicodedata.normalize("NFKC", str(raw_val or "")).strip()
+        if not s:
+            return "BLANK"
+        s_clean = re.sub(r"\s+", "", s).upper()
+        if not s_clean:
+            return "BLANK"
+        if any(k in s_clean for k in ("無", "なし", "ナシ", "不要", "対象外", "否", "×", "✕", "✗")):
+            return "NONE"
+        if s_clean in ("-", "ー", "―", "‐", "NO", "NONE", "N/A", "0", "FALSE"):
+            return "NONE"
+        if any(k in s_clean for k in ("有", "あり", "アリ", "○", "◯", "◎", "済", "完", "YES", "OK")):
+            return "HAS"
+        return "NONE"
+
+    def _get_instruction_filter_mode(self) -> str:
+        """現在の指示書列(J列)フィルターモードコードを取得"""
+        lbl = self.instruction_filter_label_var.get().strip()
+        if lbl in self.INSTRUCTION_LABEL_TO_CODE:
+            code = self.INSTRUCTION_LABEL_TO_CODE[lbl]
+            self.instruction_filter_mode.set(code)
+            return code
+        code = self.instruction_filter_mode.get().strip().upper()
+        if code in self.INSTRUCTION_CODE_TO_LABEL:
+            return code
+        return "HAS_ONLY"
+
+    def _set_instruction_filter_mode(self, mode_code: str):
+        """指示書列(J列)フィルターモードコードをセットし、UI表示ラベルと同期する"""
+        code = str(mode_code or "").strip().upper()
+        if code not in self.INSTRUCTION_CODE_TO_LABEL:
+            code = "HAS_ONLY"
+        self.instruction_filter_mode.set(code)
+        self.instruction_filter_label_var.set(self.INSTRUCTION_CODE_TO_LABEL[code])
+
+    @staticmethod
+    def _is_instruction_matched(inst_state: str, filter_mode: str) -> bool:
+        """レコードの指示書列状態(inst_state)がフィルター条件(filter_mode)に一致するか判定"""
+        state = (inst_state or "BLANK").upper()
+        if filter_mode == "ALL":
+            return True
+        if filter_mode == "HAS_OR_BLANK":
+            return state in ("HAS", "BLANK")
+        if filter_mode == "HAS_ONLY":
+            return state == "HAS"
+        if filter_mode == "BLANK_ONLY":
+            return state == "BLANK"
+        return state == "HAS"
 
     def _parse_lines_to_order_nos(self, text: str) -> list[str]:
         """行区切りテキスト（Excel貼り付け・カンマ区切り含む）から管理Noリストを抽出・重複除去して返す"""
@@ -182,6 +288,55 @@ class StockMatchApp:
         if m8 and m8.group(0) in excluded_set:
             return True
         return False
+
+    def _is_record_excluded(
+        self,
+        rec: dict,
+        excluded_nos: set[str] | None = None,
+        base_date: datetime.date | None = None,
+        exclude_months: int | None = None,
+        inst_filter_mode: str | None = None,
+    ) -> bool:
+        """レコードが除外管理No・注文日経過月数除外・指示書列(J列)フィルターにより除外されるかを判定"""
+        if self._is_order_no_excluded(rec.get("order_no", ""), excluded_nos):
+            return True
+        if self._is_order_date_expired(rec.get("order_date"), base_date=base_date, exclude_months=exclude_months):
+            return True
+        if inst_filter_mode is None:
+            inst_filter_mode = self._get_instruction_filter_mode()
+        if not self._is_instruction_matched(rec.get("instruction_state", "BLANK"), inst_filter_mode):
+            return True
+        return False
+
+    def _get_visible_main_records(self) -> list[dict]:
+        """除外設定（除外管理No・注文日経過月数・指示書列フィルター）を反映したタブ1の有効レコード一覧を取得"""
+        excluded_nos = self._get_excluded_order_nos()
+        base_date = self._parse_flexible_date(self.base_date_str.get()) or datetime.date.today()
+        exclude_months = self._get_exclude_months()
+        inst_mode = self._get_instruction_filter_mode()
+        return [
+            r for r in self.analyzed_records
+            if not self._is_record_excluded(r, excluded_nos, base_date, exclude_months, inst_mode)
+        ]
+
+    def _get_visible_missing_records(self) -> list[dict]:
+        """除外設定（除外管理No・注文日経過月数・指示書列フィルター）を反映したタブ2の有効レコード一覧を取得"""
+        excluded_nos = self._get_excluded_order_nos()
+        base_date = self._parse_flexible_date(self.base_date_str.get()) or datetime.date.today()
+        exclude_months = self._get_exclude_months()
+        inst_mode = self._get_instruction_filter_mode()
+        return [
+            r for r in self.missing_order_records
+            if not self._is_record_excluded(r, excluded_nos, base_date, exclude_months, inst_mode)
+        ]
+
+    def _on_date_or_month_filter_changed(self, _event=None):
+        """判定基準日・経過除外月数・指示書列(J列)フィルターが変更された際に一覧と件数サマリーを即時更新する"""
+        self._get_instruction_filter_mode()
+        if self.analyzed_records or self.missing_order_records:
+            self._update_kpis()
+            self._refresh_main_table()
+            self._refresh_missing_table()
 
     def _update_excluded_summary_badge(self):
         """メイン画面の除外設定ボタンおよびサマリーバッジの表示を更新"""
@@ -540,7 +695,10 @@ class StockMatchApp:
         menubar.add_cascade(label="ファイル(F)", menu=file_menu)
 
         config_menu = tk.Menu(menubar, tearoff=0)
-        config_menu.add_command(label="現在の設定を保存 (パス・超過日数・除外管理No)", command=self._save_config_manual)
+        config_menu.add_command(
+            label="現在の設定を保存 (パス・超過日数・経過除外月数・指示書フィルタ・除外管理No)",
+            command=self._save_config_manual,
+        )
         config_menu.add_separator()
         config_menu.add_command(label="設定ファイル(config.json)の保存先を指定・変更...", command=self._open_config_location_dialog)
         config_menu.add_command(label="設定ファイルの保存先をアプリ配置フォルダ(初期値)に戻す", command=lambda: self._reset_config_path_to_default(confirm=True))
@@ -592,7 +750,7 @@ class StockMatchApp:
         header_frame = tk.Frame(self.root, bg="#1e293b", height=56, padx=16, pady=10)
         header_frame.pack(fill=tk.X)
 
-        title_lbl = ttk.Label(header_frame, text="StockMatch_Miya-v1.3.0", style="Header.TLabel")
+        title_lbl = ttk.Label(header_frame, text="StockMatch_Miya-v1.4.0", style="Header.TLabel")
         title_lbl.pack(side=tk.LEFT)
 
         sub_lbl = ttk.Label(
@@ -665,7 +823,7 @@ class StockMatchApp:
             side=tk.LEFT
         )
 
-        # ③ 基準日・超過設定行（設定入力項目と「設定を保存」ボタンを集約）
+        # ③ 基準日・超過設定・経過月数除外行（設定入力項目と「設定を保存」ボタンを集約）
         row3 = ttk.Frame(file_card, style="Card.TFrame")
         row3.pack(fill=tk.X, pady=(2, 6))
 
@@ -676,15 +834,20 @@ class StockMatchApp:
             style="Card.TLabel",
             font=("Meiryo UI", 9, "bold"),
         ).pack(side=tk.LEFT)
-        date_entry = ttk.Entry(row3, textvariable=self.base_date_str, width=13, font=("Meiryo UI", 9))
+        date_entry = ttk.Entry(row3, textvariable=self.base_date_str, width=12, font=("Meiryo UI", 9))
         date_entry.pack(side=tk.LEFT, padx=(4, 6))
+        date_entry.bind("<Return>", self._on_date_or_month_filter_changed)
+        date_entry.bind("<FocusOut>", self._on_date_or_month_filter_changed)
 
         ttk.Button(
             row3,
             text="今日に戻す",
             style="Action.TButton",
-            command=lambda: self.base_date_str.set(datetime.date.today().strftime("%Y-%m-%d")),
-        ).pack(side=tk.LEFT, padx=(0, 16))
+            command=lambda: [
+                self.base_date_str.set(datetime.date.today().strftime("%Y-%m-%d")),
+                self._on_date_or_month_filter_changed(),
+            ],
+        ).pack(side=tk.LEFT, padx=(0, 14))
 
         ttk.Label(
             row3,
@@ -709,6 +872,31 @@ class StockMatchApp:
             font=("Meiryo UI", 9),
         ).pack(side=tk.LEFT, padx=(2, 14))
 
+        ttk.Label(
+            row3,
+            text="経過除外:",
+            style="Card.TLabel",
+            font=("Meiryo UI", 9, "bold"),
+        ).pack(side=tk.LEFT)
+        ttk.Label(
+            row3,
+            text="注文日から",
+            style="Card.TLabel",
+            font=("Meiryo UI", 9),
+        ).pack(side=tk.LEFT, padx=(4, 2))
+        exclude_months_entry = ttk.Entry(
+            row3, textvariable=self.exclude_after_months, width=4, justify="center", font=("Meiryo UI", 9)
+        )
+        exclude_months_entry.pack(side=tk.LEFT, padx=(2, 2))
+        exclude_months_entry.bind("<Return>", self._on_date_or_month_filter_changed)
+        exclude_months_entry.bind("<FocusOut>", self._on_date_or_month_filter_changed)
+        ttk.Label(
+            row3,
+            text="ヶ月経過で除外",
+            style="Card.TLabel",
+            font=("Meiryo UI", 9),
+        ).pack(side=tk.LEFT, padx=(2, 10))
+
         self.save_cfg_btn = ttk.Button(
             row3,
             text="💾 設定を保存",
@@ -725,7 +913,7 @@ class StockMatchApp:
         )
         self.cfg_loc_btn.pack(side=tk.RIGHT, padx=(0, 6))
 
-        # ④ 一覧から除外する管理No設定行（別ウィンドウダイアログ呼び出しボタンとサマリーバッジ）
+        # ④ 除外管理No設定 ＆ 注文品管理表の指示書列(J列)フィルター設定行
         row_ex = ttk.Frame(file_card, style="Card.TFrame")
         row_ex.pack(fill=tk.X, pady=(2, 6))
 
@@ -756,18 +944,36 @@ class StockMatchApp:
             relief="solid",
             borderwidth=1,
         )
-        self.lbl_excluded_summary.pack(side=tk.LEFT, padx=(0, 8))
+        self.lbl_excluded_summary.pack(side=tk.LEFT, padx=(0, 6))
 
         ttk.Button(
             row_ex,
             text="全解除",
             style="Action.TButton",
             command=self._clear_excluded_order_nos,
-        ).pack(side=tk.LEFT, padx=(0, 10))
+        ).pack(side=tk.LEFT, padx=(0, 16))
 
         ttk.Label(
             row_ex,
-            text="※ボタンを押すと別ウィンドウが開き、Excelの複数セル(列全体等)を直接コピー＆ペーストできます",
+            text="📋 管理表 指示書列(J列)フィルタ:",
+            style="Card.TLabel",
+            font=("Meiryo UI", 9, "bold"),
+        ).pack(side=tk.LEFT, padx=(0, 4))
+
+        self.cmb_instruction_filter = ttk.Combobox(
+            row_ex,
+            textvariable=self.instruction_filter_label_var,
+            values=[lbl for _, lbl in self.INSTRUCTION_FILTER_OPTIONS],
+            state="readonly",
+            width=22,
+            font=("Meiryo UI", 9),
+        )
+        self.cmb_instruction_filter.pack(side=tk.LEFT, padx=(0, 8))
+        self.cmb_instruction_filter.bind("<<ComboboxSelected>>", self._on_date_or_month_filter_changed)
+
+        ttk.Label(
+            row_ex,
+            text="※J列が「有り」または「空白」の案件等にワンクリックで絞り込めます",
             style="Card.TLabel",
             foreground="#64748b",
             font=("Meiryo UI", 8),
@@ -987,8 +1193,8 @@ class StockMatchApp:
         """タブが切り替わったときにタイトル文言とKPIカードのアクティブ表示を更新する"""
         try:
             curr_tab_idx = self.notebook.index("current")
-            total_main = len(self.analyzed_records)
-            total_missing = len(self.missing_order_records)
+            total_main = len(self._get_visible_main_records())
+            total_missing = len(self._get_visible_missing_records())
 
             if curr_tab_idx == 0:
                 self.notebook.tab(0, text=f"  【選択中】▶ ① 納期超過・照合結果 一覧 ({total_main}件)  ")
@@ -1101,6 +1307,10 @@ class StockMatchApp:
             "mismatch_reason",
             "req_type",
             "order_no",
+            "instruction_disp",
+            "ship_to",
+            "line_name",
+            "product_detail",
             "supplier",
             "maker",
             "item_name",
@@ -1120,9 +1330,13 @@ class StockMatchApp:
 
         self.col_configs_main = [
             ("status_badge", "総合判定", 165, "center"),
-            ("mismatch_reason", "不一致理由・照合診断", 340, "w"),
+            ("mismatch_reason", "不一致理由・照合診断", 320, "w"),
             ("req_type", "依頼区分", 80, "center"),
             ("order_no", "管理No(注文番号)", 115, "center"),
+            ("instruction_disp", "指示書(J列)", 80, "center"),
+            ("ship_to", "出荷先", 110, "w"),
+            ("line_name", "品名・ライン名等", 145, "w"),
+            ("product_detail", "製品詳細", 145, "w"),
             ("supplier", "発注先", 130, "w"),
             ("maker", "メーカー", 100, "w"),
             ("item_name", "品名", 145, "w"),
@@ -1214,6 +1428,10 @@ class StockMatchApp:
             "mgmt_sheet",
             "mgmt_row",
             "order_no",
+            "instruction_disp",
+            "ship_to",
+            "line_name",
+            "product_detail",
             "supplier",
             "maker",
             "item_name",
@@ -1233,6 +1451,10 @@ class StockMatchApp:
             ("mgmt_sheet", "管理表シート", 100, "center"),
             ("mgmt_row", "行番号", 65, "center"),
             ("order_no", "管理No(8桁)", 105, "center"),
+            ("instruction_disp", "指示書(J列)", 80, "center"),
+            ("ship_to", "出荷先", 110, "w"),
+            ("line_name", "品名・ライン名等", 145, "w"),
+            ("product_detail", "製品詳細", 145, "w"),
             ("supplier", "業者 / 発注先", 140, "w"),
             ("maker", "メーカー", 100, "w"),
             ("item_name", "品名", 160, "w"),
@@ -1446,8 +1668,15 @@ class StockMatchApp:
             act_info = self.kpi_cards.get(curr_mode)
             if act_info:
                 shown_cnt = len(self.tree_main.get_children()) if hasattr(self, "tree_main") else 0
-                total_cnt = len(self.analyzed_records)
+                total_cnt = len(self._get_visible_main_records())
                 extra_tags = []
+                inst_mode = self._get_instruction_filter_mode()
+                if inst_mode == "HAS_OR_BLANK":
+                    extra_tags.append("J列:有り/空白のみ")
+                elif inst_mode == "HAS_ONLY":
+                    extra_tags.append("J列:有りのみ")
+                elif inst_mode == "BLANK_ONLY":
+                    extra_tags.append("J列:空白のみ")
                 if self.search_keyword.get().strip():
                     extra_tags.append("キーワード絞込中")
                 if self.column_filters_main:
@@ -2104,6 +2333,10 @@ class StockMatchApp:
             "sheet",
             "row",
             "order_no",
+            "instruction_disp",
+            "ship_to",
+            "line_name",
+            "product_detail",
             "actual_raw",
             "drawing_no",
             "part_no",
@@ -2121,6 +2354,10 @@ class StockMatchApp:
             ("sheet", "シート", 85, "center"),
             ("row", "行", 55, "center"),
             ("order_no", "管理No", 95, "center"),
+            ("instruction_disp", "指示書(J列)", 80, "center"),
+            ("ship_to", "出荷先", 100, "w"),
+            ("line_name", "品名・ライン名等", 130, "w"),
+            ("product_detail", "製品詳細", 130, "w"),
             ("actual_raw", "現品確認(A列)", 95, "center"),
             ("drawing_no", "図面番号", 110, "w"),
             ("part_no", "品番", 110, "w"),
@@ -2183,6 +2420,10 @@ class StockMatchApp:
                     m.get("sheet", ""),
                     m.get("row", ""),
                     m.get("order_no_8") or m.get("order_no", ""),
+                    m.get("instruction_disp") or m.get("instruction_raw") or "(空白)",
+                    m.get("ship_to", ""),
+                    m.get("line_name", ""),
+                    m.get("product_detail", ""),
                     m.get("actual_raw") or (m["actual_date"].strftime("%Y-%m-%d") if m.get("actual_date") else "未入力"),
                     m.get("drawing_no", ""),
                     m.get("part_no", ""),
@@ -2322,7 +2563,7 @@ class StockMatchApp:
 
     def _show_help_guide(self, tab_index: int = 0):
         win = tk.Toplevel(self.root)
-        win.title("StockMatch_Miya-v1.3.0 - ヘルプ＆操作ガイド")
+        win.title("StockMatch_Miya-v1.4.0 - ヘルプ＆操作ガイド")
         self._apply_window_icon(win)
         win.geometry("960x740")
         win.minsize(780, 560)
@@ -2332,7 +2573,7 @@ class StockMatchApp:
         banner.pack(fill=tk.X)
         tk.Label(
             banner,
-            text="📖 StockMatch_Miya-v1.3.0  取扱説明書・操作ガイド",
+            text="📖 StockMatch_Miya-v1.4.0  取扱説明書・操作ガイド",
             bg="#1e293b",
             fg="#ffffff",
             font=("Meiryo UI", 12, "bold"),
@@ -2369,14 +2610,16 @@ class StockMatchApp:
         txt1.insert(tk.END, "★【見積依頼書の自動除外】ファイル名およびExcelシートの2行目タイトルを自動検査し、「見積」が含まれるシートは自動的に除外して「注文」シートのみを照合対象にします。\n", "point")
         txt1.insert(tk.END, "※Googleドライブ（G:ドライブ等）や社内ネットワーク上の共有フォルダ（\\\\サーバー名\\共有名 等）にあるファイルでも問題なく高速に動作します。\n", "sub_note")
 
-        txt1.insert(tk.END, "\n  STEP 2 : 判定基準日・納期未記載時の日数・設定の保存  \n", "h1")
-        txt1.insert(tk.END, "■ ③ 判定基準日（今日）と納期未記載時の経過日数設定\n", "h2")
+        txt1.insert(tk.END, "\n  STEP 2 : 判定基準日・納期未記載時の日数・経過月数除外・設定の保存  \n", "h1")
+        txt1.insert(tk.END, "■ ③ 判定基準日（今日）・納期未記載時の経過日数・注文日からの経過除外設定\n", "h2")
         txt1.insert(tk.END, "・『③ 判定基準日 (今日)』には、納期超過を判定する基準日（初期値はアプリ起動当日の日付）を YYYY-MM-DD 形式で入力します。過去や未来の日付を入力してシミュレーションすることも可能で、『今日に戻す』ボタンでいつでも当日の日付に戻せます。\n", "body")
         txt1.insert(tk.END, "・『納期未記載時: 注文日(4行目)から [ 7 ] 日経過で超過』には、注文書の明細行に納期が書かれていない場合の猶予日数（初期値: 7日）を指定します。\n", "body")
         txt1.insert(tk.END, "★【納期空欄明細の自動算出】注文書明細の納期欄が空欄（または「別途」等の日付変換できない文字のみ）の場合、注文書シート4行目の「注文日」からこの指定日数を加算した日を「みなし納期」として超過判定を行います。\n", "point")
+        txt1.insert(tk.END, "・『経過除外: 注文日から [ 12 ] ヶ月経過で除外』には、注文日から何ヶ月経過した古いデータを一覧や集計から除外するか（初期値: 12ヶ月）を指定します。\n", "body")
+        txt1.insert(tk.END, "★【古い注文データの自動除外】判定基準日時点で、注文日（注文書4行目等）から指定ヶ月数（デフォルト12ヶ月）以上が経過している明細は、結果一覧・件数サマリー・Excel出力から自動的に除外されます（※0を入力すると経過月数による除外を行わず全期間を表示します）。\n", "point")
 
         txt1.insert(tk.END, "■ 設定の保存（💾 設定を保存）と保存先フォルダの変更（⚙ 保存先設定...）\n", "h2")
-        txt1.insert(tk.END, "・『③ 判定基準日』行の右端にある『💾 設定を保存』ボタンを押すと、現在指定している「①管理表ファイルパス」「②注文書フォルダパス」「③納期未記載時の超過日数」「④除外する管理Noリスト」が設定ファイル（config.json）に保存され、次回アプリ起動時に自動で読み込まれます。\n", "point")
+        txt1.insert(tk.END, "・『③ 判定基準日』行の右端にある『💾 設定を保存』ボタンを押すと、現在指定している「①管理表ファイルパス」「②注文書フォルダパス」「③納期未記載時の超過日数」「③注文日からの経過除外月数」「④除外する管理Noリスト」「④管理表 指示書列(J列)フィルタ設定」が設定ファイル（config.json）に保存され、次回アプリ起動時に自動で読み込まれます。\n", "point")
         txt1.insert(tk.END, "・『💾 設定を保存』の左隣にある『⚙ 保存先設定...』ボタン（または上部メニュー『設定(S)』→『設定ファイル(config.json)の保存先設定...』）を押すと、config.json を保存するフォルダを自由に変更できます。\n", "body")
         txt1.insert(tk.END, "★【保存先の変更とワンクリック初期値復帰】共有フォルダやGoogleドライブ等を保存先に指定すれば複数環境で設定を共有できます。また、保存先設定ウィンドウ内の『🏠 アプリと同じ場所（初期値）に戻す』ボタンを押すだけで、いつでもボタン一つでアプリ本体と同じフォルダ（初期状態）に戻すことができます。\n", "point")
         txt1.insert(tk.END, "※保存先フォルダの場所設定自体は、Windowsのユーザー設定領域（%APPDATA%\\StockMatch_Miya\\config_location.txt）に記憶されるため、次回起動時も指定した保存先の config.json が自動的に参照されます。\n", "sub_note")
@@ -2389,6 +2632,11 @@ class StockMatchApp:
         txt1.insert(tk.END, "・『✨ 重複・空白を整理』ボタンを押すと、空行や重複している管理No、前後の余分な空白・カンマ等を自動で綺麗に整理します。\n", "body")
         txt1.insert(tk.END, "・『✔ 適用して設定を保存』ボタンを押すと、設定ファイル（config.json）へ自動保存されると同時に、すでに表示中の照合結果一覧や件数サマリーからも即座に除外が反映されます（再スキャン不要）。\n", "point")
         txt1.insert(tk.END, "・メイン画面の④行には現在の登録件数と除外中の管理Noプレビューがバッジ表示され、右端の『全解除』ボタンからワンクリックで除外設定をすべて解除することもできます。\n", "sub_note")
+
+        txt1.insert(tk.END, "■ ④ 注文品管理表の『指示書列(J列)フィルタ』機能\n", "h2")
+        txt1.insert(tk.END, "・『④ 一覧から除外する管理No』行の右側にある『📋 管理表 指示書列(J列)フィルタ』ドロップダウンから、注文品管理表のJ列（指示書列）の値に応じた絞り込み条件を選択できます。\n", "body")
+        txt1.insert(tk.END, "★【指示書列(J列)によるワンクリック絞り込み（初期値: 「有り」のみ）】\n  ・『「有り」のみ』（初期値）: J列に「有り（有・あり・○等）」と記載されている案件のみを表示します。\n  ・『有り または 空白 のみ』: J列が「有り」または「空白（未記入）」の案件のみを表示し、「無し・不要・-」等の案件を自動除外します。\n  ・『「空白」のみ』: J列が空白（空欄）の案件のみを表示します。\n  ・『すべて表示 (フィルタなし)』: J列の値に関わらずすべての案件を表示します。\n", "point")
+        txt1.insert(tk.END, "・ドロップダウンを切り替えると再スキャン不要で即座に一覧・件数サマリーに反映され、『💾 設定を保存』で次回起動時にも引き継がれます。\n", "sub_note")
 
         txt1.insert(tk.END, "\n  STEP 4 : 照合・遅延チェックの実行と処理の中止  \n", "h1")
         txt1.insert(tk.END, "■ ⑤ 進捗状況の確認と『▶ 照合・遅延チェック実行 (F5)』\n", "h2")
@@ -2525,13 +2773,15 @@ class StockMatchApp:
     def _show_about(self):
         messagebox.showinfo(
             "バージョン情報",
-            "StockMatch_Miya-v1.3.0\n"
+            "StockMatch_Miya-v1.4.0\n"
             "注文書 ⇔ 管理表 双方向照合・現品/請求超過システム\n\n"
             "・Excel直接起動: 一時ファイルなしで未保存新規ブック展開（A4横・1ページ収まり印刷設定済）\n"
             "・注文書保護: 注文書参照時は読み取り専用＋シート保護ロック＋保存確認抑止で誤保存を完全ブロック\n"
             "・タブ完全分離: 「①納期超過・照合一覧」と「②注文書未検出(管理表のみ)」を別一覧で確認可能\n"
             "・未発注一覧フィルタ: 注文品管理表のAB列「購入数」が0の明細は自動除外\n"
+            "・指示書列(J列)フィルタ: 管理表J列が「有り または 空白 のみ」「有りのみ」「空白のみ」等で絞り込み可能\n"
             "・除外管理No設定: 一覧から除外したい管理No（複数可）を指定可能＆設定保存対応\n"
+            "・経過月数除外: 注文日から指定ヶ月数(初期値12ヶ月)経過した古い案件を自動除外＆設定保存対応\n"
             "・納期未記載対応: 注文書納期が空欄時、注文日(4行目)から指定日数(初期値7日)経過で超過判定\n"
             "・照合方式: 全体最適1対1マッチング（※単価・金額は照合対象外）\n"
             "・自動分別: 2行目の記載により「見積依頼書」を除外し「注文書」のみ照合\n"
@@ -2879,12 +3129,20 @@ class StockMatchApp:
         mgmt = self.mgmt_file_path.get().strip().strip('"')
         order = self.order_dir_path.get().strip().strip('"')
         grace_days = self._get_grace_days()
+        exclude_months = self._get_exclude_months()
+        inst_filter_mode = self._get_instruction_filter_mode()
         excluded_list = self._get_excluded_order_nos_list()
+
+        self.blank_due_grace_days.set(str(grace_days))
+        self.exclude_after_months.set(str(exclude_months))
+        self._set_instruction_filter_mode(inst_filter_mode)
 
         data = {
             "mgmt_file_path": mgmt,
             "order_dir_path": order,
             "blank_due_grace_days": grace_days,
+            "exclude_after_months": exclude_months,
+            "instruction_filter_mode": inst_filter_mode,
             "excluded_order_nos": "\n".join(excluded_list),
             "last_updated": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
@@ -2913,14 +3171,22 @@ class StockMatchApp:
 
             if show_msg:
                 ex_info = (
-                    f"\n(除外管理No: {len(excluded_list)}件設定中)"
+                    f"\n・除外管理No: {len(excluded_list)}件設定中"
                     if excluded_list
-                    else "\n(除外管理No: 未設定)"
+                    else "\n・除外管理No: 未設定"
                 )
+                months_info = (
+                    f"\n・経過月数による自動除外: 注文日から {exclude_months} ヶ月経過で除外"
+                    if exclude_months > 0
+                    else "\n・経過月数による自動除外: なし (0ヶ月)"
+                )
+                inst_label = self.INSTRUCTION_CODE_TO_LABEL.get(inst_filter_mode, inst_filter_mode)
+                inst_info = f"\n・管理表 指示書列(J列)フィルタ: {inst_label}"
                 messagebox.showinfo(
                     "設定保存完了",
-                    f"パス、納期超過設定、および除外管理Noを保存しました:\n{target_file}\n"
-                    f"(納期未記載時の超過基準: 注文日から{grace_days}日経過){ex_info}",
+                    f"設定を保存しました:\n{target_file}\n\n"
+                    f"・納期未記載時の超過基準: 注文日から {grace_days} 日経過"
+                    f"{months_info}{inst_info}{ex_info}",
                 )
         except Exception as e:
             if show_msg:
@@ -2938,6 +3204,8 @@ class StockMatchApp:
                 mgmt = data.get("mgmt_file_path", "")
                 order = data.get("order_dir_path", "")
                 grace_days = data.get("blank_due_grace_days", 7)
+                exclude_months = data.get("exclude_after_months", 12)
+                inst_filter_mode = data.get("instruction_filter_mode", "HAS_ONLY")
                 excluded_nos = data.get("excluded_order_nos", "")
                 if mgmt and os.path.isfile(mgmt):
                     self.mgmt_file_path.set(mgmt)
@@ -2945,6 +3213,10 @@ class StockMatchApp:
                     self.order_dir_path.set(order)
                 if grace_days is not None:
                     self.blank_due_grace_days.set(str(grace_days))
+                if exclude_months is not None:
+                    self.exclude_after_months.set(str(exclude_months))
+                if inst_filter_mode:
+                    self._set_instruction_filter_mode(str(inst_filter_mode))
                 if isinstance(excluded_nos, list):
                     self.excluded_order_nos_str.set("\n".join(str(x) for x in excluded_nos))
                 elif excluded_nos:
@@ -3568,6 +3840,10 @@ class StockMatchApp:
             and self._mgmt_file_cache[0] == norm_path
             and self._mgmt_file_cache[1] == mtime
             and self._mgmt_file_cache[2] == fsize
+            and (
+                not self._mgmt_file_cache[3]
+                or ("instruction_state" in self._mgmt_file_cache[3][0] and "ship_to" in self._mgmt_file_cache[3][0])
+            )
         ):
             if progress_cb:
                 progress_cb(33.0, "[1/3] 注文品管理表をメモリキャッシュから高速復元しました...")
@@ -3661,6 +3937,10 @@ class StockMatchApp:
                             col_map.setdefault("drawing_no", c_idx)
                         elif "品番" in v_comb or "型番" in v_comb or "部品番号" in v_comb:
                             col_map.setdefault("part_no", c_idx)
+                        elif "出荷先" in v_comb or "納入先" in v_comb or "客先" in v_comb or "得意先" in v_comb:
+                            col_map.setdefault("ship_to", c_idx)
+                        elif "製品詳細" in v_comb or "詳細" in v_comb:
+                            col_map.setdefault("product_detail", c_idx)
                         elif "ライン名" in v_comb or "品名、ライン名" in v_comb or "品名・ライン名" in v_comb:
                             col_map["line_name"] = c_idx
                         elif ("品名" in v_comb or "名称" in v_comb or "商品名" in v_comb) and "品名、ライン名" not in v_comb:
@@ -3688,18 +3968,24 @@ class StockMatchApp:
                             col_map.setdefault("due_date", c_idx)
                         elif "担当" in v_comb:
                             col_map.setdefault("person", c_idx)
+                        elif "指示書" in v_comb:
+                            col_map.setdefault("instruction_doc", c_idx)
                     break
 
             if header_pos_in_list is None:
                 continue
 
-            col_map.setdefault("actual_date", 1)    # A列: 現品確認日
-            col_map.setdefault("order_no", 13)      # M列: 管理No
-            col_map.setdefault("item_name", 20)     # T列: 品名
-            col_map.setdefault("maker", 21)         # U列: メーカー
-            col_map.setdefault("spec", 23)          # W列: 仕様
-            col_map["qty"] = 28                     # AB列: 購入数
-            col_map.setdefault("invoice_date", 35)  # AI列: 請求日
+            col_map.setdefault("actual_date", 1)       # A列: 現品確認日
+            col_map.setdefault("instruction_doc", 10)  # J列: 指示書
+            col_map.setdefault("order_no", 13)         # M列: 管理No
+            col_map.setdefault("ship_to", 14)          # N列: 出荷先
+            col_map.setdefault("line_name", 15)        # O列: 品名、ライン名等
+            col_map.setdefault("product_detail", 16)   # P列: 製品詳細
+            col_map.setdefault("item_name", 20)        # T列: 品名
+            col_map.setdefault("maker", 21)            # U列: メーカー
+            col_map.setdefault("spec", 23)             # W列: 仕様
+            col_map["qty"] = 28                        # AB列: 購入数
+            col_map.setdefault("invoice_date", 35)     # AI列: 請求日
 
             data_slice = raw_rows[header_pos_in_list + 1 :]
 
@@ -3716,14 +4002,16 @@ class StockMatchApp:
                 item_val = _get_col(row_tuple, col_map.get("item_name"))
                 maker_val = _get_col(row_tuple, col_map.get("maker"))
                 spec_val = _get_col(row_tuple, col_map.get("spec"))
+                ship_to_val = _get_col(row_tuple, col_map.get("ship_to"))
                 line_val = _get_col(row_tuple, col_map.get("line_name"))
+                prod_detail_val = _get_col(row_tuple, col_map.get("product_detail"))
                 order_no_val = _get_col(row_tuple, col_map.get("order_no"))
 
                 qty_val = _get_col(row_tuple, 28)
                 if qty_val is None:
                     qty_val = _get_col(row_tuple, col_map.get("qty"))
 
-                if not any([drawing_val, part_val, item_val, spec_val, maker_val, line_val]):
+                if not any([drawing_val, part_val, item_val, spec_val, maker_val, line_val, prod_detail_val]):
                     continue
 
                 order_date_raw = _get_col(row_tuple, col_map.get("order_date"))
@@ -3753,7 +4041,9 @@ class StockMatchApp:
                 item_str = self._clean_cell_str(item_val)
                 maker_str = self._clean_cell_str(maker_val)
                 spec_str = self._clean_cell_str(spec_val)
+                ship_to_str = self._clean_cell_str(ship_to_val)
                 line_str = self._clean_cell_str(line_val)
+                prod_detail_str = self._clean_cell_str(prod_detail_val)
                 qty_str = self._clean_cell_str(qty_val)
                 unit_price_str = self._clean_cell_str(_get_col(row_tuple, col_map.get("unit_price")))
                 amount_str = self._clean_cell_str(_get_col(row_tuple, col_map.get("amount")))
@@ -3778,6 +4068,14 @@ class StockMatchApp:
                 order_no_str = raw_order_no_str or exact_order_no_8 or sheet_default_order_no
                 person_str = self._clean_cell_str(_get_col(row_tuple, col_map.get("person")))
 
+                # J列 (10列目) の指示書列を読み取り
+                j_col_val = _get_col(row_tuple, 10)
+                mapped_inst_val = _get_col(row_tuple, col_map.get("instruction_doc"))
+                inst_raw_val = j_col_val if (j_col_val is not None and str(j_col_val).strip() != "") else mapped_inst_val
+                instruction_raw = self._clean_cell_str(inst_raw_val)
+                instruction_state = self._classify_instruction_col(instruction_raw)
+                instruction_disp = instruction_raw if instruction_raw else "(空白)"
+
                 model_display_parts = [p for p in (drawing_str, part_str, spec_str) if p and p != "-"]
                 model_spec_display = " / ".join(dict.fromkeys(model_display_parts))
 
@@ -3799,6 +4097,11 @@ class StockMatchApp:
                         "order_no_8": exact_order_no_8,
                         "norm_order_no": self._normalize_key(order_no_str),
                         "order_date": order_date,
+                        "instruction_raw": instruction_raw,
+                        "instruction_disp": instruction_disp,
+                        "instruction_state": instruction_state,
+                        "ship_to": ship_to_str,
+                        "product_detail": prod_detail_str,
                         "drawing_no": drawing_str,
                         "part_no": part_str,
                         "item_name": item_str,
@@ -3971,14 +4274,19 @@ class StockMatchApp:
                                     break
 
                     if "注文日" in cell_val or "発注日" in cell_val:
-                        for offset in range(1, 9):
-                            if c_idx - 1 + offset >= len(row_tuple):
-                                break
-                            d_candidate = self._parse_flexible_date(row_tuple[c_idx - 1 + offset], allow_period=False)
-                            if d_candidate:
-                                sheet_order_date = d_candidate
-                                default_year = d_candidate.year
-                                break
+                        d_in_cell = self._parse_flexible_date(cell_val, allow_period=False)
+                        if d_in_cell:
+                            sheet_order_date = d_in_cell
+                            default_year = d_in_cell.year
+                        else:
+                            for offset in range(1, 9):
+                                if c_idx - 1 + offset >= len(row_tuple):
+                                    break
+                                d_candidate = self._parse_flexible_date(row_tuple[c_idx - 1 + offset], allow_period=False)
+                                if d_candidate:
+                                    sheet_order_date = d_candidate
+                                    default_year = d_candidate.year
+                                    break
 
                     if "御中" in cell_val:
                         cleaned_sup = re.sub(r"(御中|様|殿)$", "", cell_val).strip()
@@ -4358,9 +4666,13 @@ class StockMatchApp:
                     self._refresh_main_table()
                     self._refresh_missing_table()
 
-                    delay_cnt = sum(1 for r in self.analyzed_records if r["is_any_delay"])
-                    unmatched_cnt = sum(1 for r in self.analyzed_records if r.get("is_unmatched"))
-                    missing_cnt = len(self.missing_order_records)
+                    vis_main = self._get_visible_main_records()
+                    vis_missing = self._get_visible_missing_records()
+                    delay_cnt = sum(1 for r in vis_main if r["is_any_delay"])
+                    unmatched_cnt = sum(1 for r in vis_main if r.get("is_unmatched"))
+                    missing_cnt = len(vis_missing)
+                    excluded_main_cnt = len(self.analyzed_records) - len(vis_main)
+                    ex_note = f" (フィルタ除外:{excluded_main_cnt}件)" if excluded_main_cnt > 0 else ""
 
                     self.progress_var.set(100.0)
                     self.progress_text_var.set(
@@ -4368,7 +4680,7 @@ class StockMatchApp:
                     )
                     self.status_var.set(
                         f"照合完了 (基準日: {base_date.strftime('%Y-%m-%d')}) — "
-                        f"注文書明細: {len(self.analyzed_records)}件 (超過:{delay_cnt}件 / 管理表未記載:{unmatched_cnt}件) ｜ "
+                        f"注文書明細: {len(vis_main)}件{ex_note} (超過:{delay_cnt}件 / 管理表未記載:{unmatched_cnt}件) ｜ "
                         f"【別タブ】注文書未検出(管理表のみ): {missing_cnt}件"
                     )
                     return
@@ -4631,26 +4943,48 @@ class StockMatchApp:
         m_a_disp = (m_row.get("amount", "") if m_row else "") or "(空欄)"
         rows.append(("⑨ 金額", o_a_disp, m_a_disp, "— (照合対象外)", "IGNORED"))
 
+        m_inst_disp = (m_row.get("instruction_disp", "") if m_row else "") or "— (管理表なし)"
+        rows.append(("⑩ 指示書 (管理表J列)", "— (注文書側なし)", m_inst_disp, f"状態: {m_inst_disp}", "INFO"))
+
+        m_ship_disp = (m_row.get("ship_to", "") if m_row else "") or "(空欄)"
+        rows.append(("⑪ 出荷先 (管理表N列)", "— (注文書側なし)", m_ship_disp, "管理表情報", "INFO"))
+
+        m_line_disp = (m_row.get("line_name", "") if m_row else "") or "(空欄)"
+        rows.append(("⑫ 品名・ライン名等 (管理表O列)", "— (注文書側なし)", m_line_disp, "管理表情報", "INFO"))
+
+        m_prod_disp = (m_row.get("product_detail", "") if m_row else "") or "(空欄)"
+        rows.append(("⑬ 製品詳細 (管理表P列)", "— (注文書側なし)", m_prod_disp, "管理表情報", "INFO"))
+
         cross_notes = []
         if o_item and m_row:
             if o_item["norm_spec"] and m_row["norm_part"] and o_item["norm_spec"] == m_row["norm_part"]:
                 cross_notes.append("・注文書の『仕様』と管理表の『品番』が一致しています。")
             if o_item["norm_part"] and m_row["norm_spec"] and o_item["norm_part"] == m_row["norm_spec"]:
                 cross_notes.append("・注文書の『品番』と管理表の『仕様』が一致しています。")
+            if m_row.get("ship_to"):
+                cross_notes.append(f"・管理表の『出荷先』: {m_row['ship_to']}")
             if m_row.get("line_name"):
-                cross_notes.append(f"・管理表の『製品詳細 / ライン名等』: {m_row['line_name']}")
+                cross_notes.append(f"・管理表の『品名・ライン名等』: {m_row['line_name']}")
+            if m_row.get("product_detail"):
+                cross_notes.append(f"・管理表の『製品詳細』: {m_row['product_detail']}")
 
         detail_lines = [f"【診断結果サマリー】\n  {reason_summary}", ""]
         if o_item:
+            o_dt_str = o_item["order_date"].strftime("%Y-%m-%d") if o_item.get("order_date") else "未記載"
             detail_lines.append(
-                f"【注文書データ元】\n  ファイル: {o_item['file']} (シート: {o_item['sheet']} / 行: {o_item['row']}) / 依頼区分: {o_item['req_type_label']}"
+                f"【注文書データ元】\n  ファイル: {o_item['file']} (シート: {o_item['sheet']} / 行: {o_item['row']}) / 依頼区分: {o_item['req_type_label']} / 注文日: {o_dt_str}"
             )
         else:
             detail_lines.append("【注文書データ元】\n  （注文書フォルダ内に該当する注文書が見当たりません）")
 
         if m_row:
+            m_dt_str = m_row["order_date"].strftime("%Y-%m-%d") if m_row.get("order_date") else "未記載"
+            m_inst_str = m_row.get("instruction_disp") or "(空白)"
+            m_ship_str = m_row.get("ship_to") or "-"
+            m_line_str = m_row.get("line_name") or "-"
+            m_prod_str = m_row.get("product_detail") or "-"
             detail_lines.append(
-                f"【管理表の登録データ】\n  シート: {m_row['sheet']} (行: {m_row['row']}) / 管理No: {m_row.get('order_no_8') or m_row.get('order_no')} / AB列購入数: {m_row.get('qty') or '未記載'} / 納期: {m_row.get('mgmt_due_raw') or '未記載'}"
+                f"【管理表の登録データ】\n  シート: {m_row['sheet']} (行: {m_row['row']}) / 管理No: {m_row.get('order_no_8') or m_row.get('order_no')} / 指示書(J列): {m_inst_str} / 注文日: {m_dt_str}\n  出荷先: {m_ship_str} / 品名・ライン名等: {m_line_str} / 製品詳細: {m_prod_str} / AB列購入数: {m_row.get('qty') or '未記載'} / 納期: {m_row.get('mgmt_due_raw') or '未記載'}"
             )
         else:
             detail_lines.append("【管理表の登録データ】\n  （管理表内に該当する明細が登録されていません）")
@@ -4731,10 +5065,23 @@ class StockMatchApp:
             diag = self._build_field_comparison_data(
                 o_item, best_cand, reason, "\n".join(cand_list_lines)
             )
+            diag["best_cand_instruction_raw"] = best_cand.get("instruction_raw", "")
+            diag["best_cand_instruction_disp"] = best_cand.get("instruction_disp", "(空白)")
+            diag["best_cand_instruction_state"] = best_cand.get("instruction_state", "BLANK")
+            diag["best_cand_ship_to"] = best_cand.get("ship_to", "")
+            diag["best_cand_line_name"] = best_cand.get("line_name", "")
+            diag["best_cand_product_detail"] = best_cand.get("product_detail", "")
             return reason, diag
 
+        supp_cand = same_no_rows[0] if same_no_rows else None
         reason = f"【明細未記載】管理No[{o_no}]は管理表にありますが一致する明細行がありません"
         diag = self._build_field_comparison_data(o_item, None, reason)
+        diag["best_cand_instruction_raw"] = supp_cand.get("instruction_raw", "") if supp_cand else ""
+        diag["best_cand_instruction_disp"] = supp_cand.get("instruction_disp", "(未記載)") if supp_cand else "(未記載)"
+        diag["best_cand_instruction_state"] = supp_cand.get("instruction_state", "BLANK") if supp_cand else "BLANK"
+        diag["best_cand_ship_to"] = supp_cand.get("ship_to", "") if supp_cand else ""
+        diag["best_cand_line_name"] = supp_cand.get("line_name", "") if supp_cand else ""
+        diag["best_cand_product_detail"] = supp_cand.get("product_detail", "") if supp_cand else ""
         return reason, diag
 
     def _match_and_evaluate(
@@ -4831,6 +5178,9 @@ class StockMatchApp:
 
                 order_due = o_item.get("due_date")
                 order_dt = o_item.get("order_date")
+                if not order_dt and r_idx in matched_pairs:
+                    order_dt = m_list[matched_pairs[r_idx][0]].get("order_date")
+
                 is_fallback = False
                 if order_due:
                     final_due = order_due
@@ -4838,7 +5188,7 @@ class StockMatchApp:
                     final_due = order_dt + datetime.timedelta(days=grace_days)
                     is_fallback = True
                 else:
-                    final_due = best_mgmt.get("mgmt_due_date") if r_idx in matched_pairs else None
+                    final_due = m_list[matched_pairs[r_idx][0]].get("mgmt_due_date") if r_idx in matched_pairs else None
 
                 if r_idx in matched_pairs:
                     c_idx, sc = matched_pairs[r_idx]
@@ -4854,6 +5204,12 @@ class StockMatchApp:
                     rec = self._evaluate_single_record(
                         req_type=o_item.get("req_type_label", "注文"),
                         order_no=best_mgmt.get("order_no_8") or best_mgmt.get("order_no") or o_no,
+                        instruction_raw=best_mgmt.get("instruction_raw", ""),
+                        instruction_disp=best_mgmt.get("instruction_disp", "(空白)"),
+                        instruction_state=best_mgmt.get("instruction_state", "BLANK"),
+                        ship_to=best_mgmt.get("ship_to", ""),
+                        line_name=best_mgmt.get("line_name", ""),
+                        product_detail=best_mgmt.get("product_detail", ""),
                         supplier=final_supplier,
                         maker=final_maker,
                         item_name=o_item.get("item_name") or best_mgmt.get("item_name", ""),
@@ -4881,6 +5237,12 @@ class StockMatchApp:
                     rec = self._evaluate_single_record(
                         req_type=o_item.get("req_type_label", "注文"),
                         order_no=o_no,
+                        instruction_raw=diag_data.get("best_cand_instruction_raw", ""),
+                        instruction_disp=diag_data.get("best_cand_instruction_disp", "(未記載)"),
+                        instruction_state=diag_data.get("best_cand_instruction_state", "BLANK"),
+                        ship_to=diag_data.get("best_cand_ship_to", ""),
+                        line_name=diag_data.get("best_cand_line_name", ""),
+                        product_detail=diag_data.get("best_cand_product_detail", ""),
                         supplier=o_item.get("supplier", ""),
                         maker=o_item.get("maker", ""),
                         item_name=o_item.get("item_name", ""),
@@ -4927,6 +5289,14 @@ class StockMatchApp:
                 "mgmt_sheet": m["sheet"],
                 "mgmt_row": str(m["row"]),
                 "order_no": m_no,
+                "instruction_raw": m.get("instruction_raw", ""),
+                "instruction_disp": m.get("instruction_disp", "(空白)"),
+                "instruction_state": m.get("instruction_state", "BLANK"),
+                "ship_to": m.get("ship_to", ""),
+                "line_name": m.get("line_name", ""),
+                "product_detail": m.get("product_detail", ""),
+                "order_date": m.get("order_date"),
+                "order_date_str": m["order_date"].strftime("%Y-%m-%d") if m.get("order_date") else "-",
                 "supplier": m.get("supplier") or m.get("maker", ""),
                 "maker": m.get("maker", ""),
                 "item_name": m.get("item_name", ""),
@@ -4966,6 +5336,12 @@ class StockMatchApp:
         self,
         req_type: str,
         order_no: str,
+        instruction_raw: str,
+        instruction_disp: str,
+        instruction_state: str,
+        ship_to: str,
+        line_name: str,
+        product_detail: str,
         supplier: str,
         maker: str,
         item_name: str,
@@ -5095,6 +5471,14 @@ class StockMatchApp:
             "mismatch_reason": mismatch_reason,
             "req_type": req_type,
             "order_no": order_no,
+            "instruction_raw": instruction_raw,
+            "instruction_disp": instruction_disp,
+            "instruction_state": instruction_state,
+            "ship_to": ship_to,
+            "line_name": line_name,
+            "product_detail": product_detail,
+            "order_date": order_date,
+            "order_date_str": order_date.strftime("%Y-%m-%d") if order_date else "-",
             "supplier": supplier,
             "maker": maker,
             "item_name": item_name,
@@ -5122,15 +5506,8 @@ class StockMatchApp:
         }
 
     def _update_kpis(self):
-        excluded_nos = self._get_excluded_order_nos()
-        visible_main = [
-            r for r in self.analyzed_records
-            if not self._is_order_no_excluded(r.get("order_no", ""), excluded_nos)
-        ]
-        visible_missing = [
-            r for r in self.missing_order_records
-            if not self._is_order_no_excluded(r.get("order_no", ""), excluded_nos)
-        ]
+        visible_main = self._get_visible_main_records()
+        visible_missing = self._get_visible_missing_records()
 
         total = len(visible_main)
         unmatched_cnt = sum(1 for r in visible_main if r.get("is_unmatched"))
@@ -5178,9 +5555,12 @@ class StockMatchApp:
         mode = self.filter_mode.get()
         kw = self.search_keyword.get().strip().lower()
         excluded_nos = self._get_excluded_order_nos()
+        base_date = self._parse_flexible_date(self.base_date_str.get()) or datetime.date.today()
+        exclude_months = self._get_exclude_months()
+        inst_mode = self._get_instruction_filter_mode()
 
         for idx, rec in enumerate(self.analyzed_records):
-            if self._is_order_no_excluded(rec.get("order_no", ""), excluded_nos):
+            if self._is_record_excluded(rec, excluded_nos, base_date, exclude_months, inst_mode):
                 continue
 
             if mode == "ALL_DELAY":
@@ -5220,6 +5600,10 @@ class StockMatchApp:
                         rec["mismatch_reason"],
                         rec["req_type"],
                         rec["order_no"],
+                        rec.get("instruction_disp", ""),
+                        rec.get("ship_to", ""),
+                        rec.get("line_name", ""),
+                        rec.get("product_detail", ""),
                         rec["supplier"],
                         rec["maker"],
                         rec["item_name"],
@@ -5241,6 +5625,10 @@ class StockMatchApp:
                     rec["mismatch_reason"],
                     rec["req_type"],
                     rec["order_no"],
+                    rec.get("instruction_disp", ""),
+                    rec.get("ship_to", ""),
+                    rec.get("line_name", ""),
+                    rec.get("product_detail", ""),
                     rec["supplier"],
                     rec["maker"],
                     rec["item_name"],
@@ -5282,7 +5670,7 @@ class StockMatchApp:
                 self._open_column_filter_dialog(
                     col_id=col_id,
                     title=self.col_titles_main.get(col_id, col_id),
-                    records=self.analyzed_records,
+                    records=self._get_visible_main_records(),
                     filter_dict=self.column_filters_main,
                     refresh_func=self._refresh_main_table,
                     update_heading_func=self._update_heading_display_main,
@@ -5305,9 +5693,12 @@ class StockMatchApp:
 
         kw = self.missing_search_keyword.get().strip().lower()
         excluded_nos = self._get_excluded_order_nos()
+        base_date = self._parse_flexible_date(self.base_date_str.get()) or datetime.date.today()
+        exclude_months = self._get_exclude_months()
+        inst_mode = self._get_instruction_filter_mode()
 
         for idx, rec in enumerate(self.missing_order_records):
-            if self._is_order_no_excluded(rec.get("order_no", ""), excluded_nos):
+            if self._is_record_excluded(rec, excluded_nos, base_date, exclude_months, inst_mode):
                 continue
 
             skip_by_col = False
@@ -5328,6 +5719,10 @@ class StockMatchApp:
                         rec["mgmt_sheet"],
                         rec["mgmt_row"],
                         rec["order_no"],
+                        rec.get("instruction_disp", ""),
+                        rec.get("ship_to", ""),
+                        rec.get("line_name", ""),
+                        rec.get("product_detail", ""),
                         rec["supplier"],
                         rec["maker"],
                         rec["item_name"],
@@ -5348,6 +5743,10 @@ class StockMatchApp:
                     rec["mgmt_sheet"],
                     rec["mgmt_row"],
                     rec["order_no"],
+                    rec.get("instruction_disp", ""),
+                    rec.get("ship_to", ""),
+                    rec.get("line_name", ""),
+                    rec.get("product_detail", ""),
                     rec["supplier"],
                     rec["maker"],
                     rec["item_name"],
@@ -5384,7 +5783,7 @@ class StockMatchApp:
                 self._open_column_filter_dialog(
                     col_id=col_id,
                     title=self.col_titles_missing.get(col_id, col_id),
-                    records=self.missing_order_records,
+                    records=self._get_visible_missing_records(),
                     filter_dict=self.column_filters_missing,
                     refresh_func=self._refresh_missing_table,
                     update_heading_func=self._update_heading_display_missing,
@@ -5823,6 +6222,10 @@ class StockMatchApp:
                     "不一致理由・照合診断",
                     "依頼区分",
                     "管理No(注文番号)",
+                    "指示書(J列)",
+                    "出荷先",
+                    "品名・ライン名等",
+                    "製品詳細",
                     "発注先",
                     "メーカー",
                     "品名",
@@ -5841,8 +6244,11 @@ class StockMatchApp:
                 rows_main_data = []
                 tags_main = []
                 excluded_nos = self._get_excluded_order_nos()
+                base_date = self._parse_flexible_date(self.base_date_str.get()) or datetime.date.today()
+                exclude_months = self._get_exclude_months()
+                inst_mode = self._get_instruction_filter_mode()
                 for r in self.analyzed_records:
-                    if self._is_order_no_excluded(r.get("order_no", ""), excluded_nos):
+                    if self._is_record_excluded(r, excluded_nos, base_date, exclude_months, inst_mode):
                         continue
                     rows_main_data.append(
                         [
@@ -5850,6 +6256,10 @@ class StockMatchApp:
                             r["mismatch_reason"],
                             r["req_type"],
                             r["order_no"],
+                            r.get("instruction_disp", ""),
+                            r.get("ship_to", ""),
+                            r.get("line_name", ""),
+                            r.get("product_detail", ""),
                             r["supplier"],
                             r["maker"],
                             r["item_name"],
@@ -5939,6 +6349,10 @@ class StockMatchApp:
                     "管理表シート",
                     "行番号",
                     "管理No(8桁)",
+                    "指示書(J列)",
+                    "出荷先",
+                    "品名・ライン名等",
+                    "製品詳細",
                     "業者 / 発注先",
                     "メーカー",
                     "品名",
@@ -5953,7 +6367,7 @@ class StockMatchApp:
 
                 rows_missing_data = []
                 for r in self.missing_order_records:
-                    if self._is_order_no_excluded(r.get("order_no", ""), excluded_nos):
+                    if self._is_record_excluded(r, excluded_nos, base_date, exclude_months, inst_mode):
                         continue
                     rows_missing_data.append(
                         [
@@ -5961,6 +6375,10 @@ class StockMatchApp:
                             r["mgmt_sheet"],
                             r["mgmt_row"],
                             r["order_no"],
+                            r.get("instruction_disp", ""),
+                            r.get("ship_to", ""),
+                            r.get("line_name", ""),
+                            r.get("product_detail", ""),
                             r["supplier"],
                             r["maker"],
                             r["item_name"],
@@ -6127,7 +6545,7 @@ class StockMatchApp:
 
 def main():
     try:
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("StockMatch.Miya.v1.3.0")
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("StockMatch.Miya.v1.4.0")
     except Exception:
         pass
 
