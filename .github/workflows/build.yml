@@ -34,6 +34,7 @@ jobs:
         --add-data "README.md;." 
         --add-data "icon.ico;." 
         --collect-all PySide6 
+        --collect-submodules modules 
         --hidden-import jpholiday 
         app.py
 
