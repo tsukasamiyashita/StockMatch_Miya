@@ -39,7 +39,7 @@ class AnalysisCancelledException(Exception):
 
 class StockMatchApp:
     """
-    StockMatch_Miya-v1.4.0
+    StockMatch_Miya-v1.5.0
     注文品管理表（1つのファイル）と注文書フォルダ内（サブフォルダ含む全階層）の全注文書Excelを双方向照合し、
     ・納期超過（現品確認日・請求日）および管理表未記載の注文書
     ・注文書未検出（管理表にあるのに注文書が見当たらない未発注明細 / ※AB列購入数0は自動除外）
@@ -67,9 +67,28 @@ class StockMatchApp:
     INSTRUCTION_CODE_TO_LABEL = dict(INSTRUCTION_FILTER_OPTIONS)
     INSTRUCTION_LABEL_TO_CODE = {lbl: code for code, lbl in INSTRUCTION_FILTER_OPTIONS}
 
+    # 照合結果一覧（タブ1）のデフォルト表示列（計15項目）
+    DEFAULT_VISIBLE_COLUMNS_MAIN = [
+        "status_badge",       # 総合判定
+        "mismatch_reason",    # 不一致理由・照合診断
+        "req_type",           # 依頼区分
+        "order_no",           # 管理No
+        "instruction_disp",   # 指示書
+        "ship_to",            # 出荷先
+        "line_name",          # 品名・ライン名等
+        "product_detail",     # 製品詳細
+        "supplier",           # 発注先
+        "maker",              # メーカー
+        "model_spec",         # 型番・規格(図番)
+        "qty",                # 数量
+        "due_date",           # 注文書納期
+        "days_overdue",       # 基準日超過
+        "source_info",        # 照合元情報
+    ]
+
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("StockMatch_Miya-v1.4.0 - 注文品納期・現品/請求照合システム")
+        self.root.title("StockMatch_Miya-v1.5.0 - 注文品納期・現品/請求照合システム")
 
         # メインウィンドウおよび全Toplevelウィンドウに icon.ico を適用
         self._apply_window_icon(self.root, is_main=True)
@@ -97,6 +116,7 @@ class StockMatchApp:
         self.filter_mode = tk.StringVar(value="BOTH_DELAY")
         self.search_keyword = tk.StringVar()
         self.missing_search_keyword = tk.StringVar()
+        self.visible_columns_main = list(self.DEFAULT_VISIBLE_COLUMNS_MAIN)
 
         # 進捗表示・非同期スレッド管理用
         self.progress_var = tk.DoubleVar(value=0.0)
@@ -696,8 +716,12 @@ class StockMatchApp:
 
         config_menu = tk.Menu(menubar, tearoff=0)
         config_menu.add_command(
-            label="現在の設定を保存 (パス・超過日数・経過除外月数・指示書フィルタ・除外管理No)",
+            label="現在の設定を保存 (パス・超過日数・経過除外月数・指示書フィルタ・除外管理No・表示列)",
             command=self._save_config_manual,
+        )
+        config_menu.add_command(
+            label="照合結果一覧の表示列設定...",
+            command=self._open_column_visibility_dialog,
         )
         config_menu.add_separator()
         config_menu.add_command(label="設定ファイル(config.json)の保存先を指定・変更...", command=self._open_config_location_dialog)
@@ -750,7 +774,7 @@ class StockMatchApp:
         header_frame = tk.Frame(self.root, bg="#1e293b", height=56, padx=16, pady=10)
         header_frame.pack(fill=tk.X)
 
-        title_lbl = ttk.Label(header_frame, text="StockMatch_Miya-v1.4.0", style="Header.TLabel")
+        title_lbl = ttk.Label(header_frame, text="StockMatch_Miya-v1.5.0", style="Header.TLabel")
         title_lbl.pack(side=tk.LEFT)
 
         sub_lbl = ttk.Label(
@@ -1275,6 +1299,14 @@ class StockMatchApp:
         )
         clear_col_btn.pack(side=tk.RIGHT, padx=(4, 0))
 
+        col_visibility_btn = ttk.Button(
+            filter_frame,
+            text="👁 表示列の設定...",
+            style="Action.TButton",
+            command=self._open_column_visibility_dialog,
+        )
+        col_visibility_btn.pack(side=tk.RIGHT, padx=(4, 0))
+
         open_mgmt_btn = ttk.Button(
             filter_frame,
             text="📋 管理表を参照",
@@ -1357,6 +1389,8 @@ class StockMatchApp:
         for col_id, _, width, anchor in self.col_configs_main:
             self._update_heading_display_main(col_id)
             self.tree_main.column(col_id, width=width, anchor=anchor)
+
+        self._apply_column_visibility_main()
 
         self.tree_main.bind("<Button-1>", self._on_tree_main_click)
         self.tree_main.bind("<Double-1>", lambda e: self._on_tree_double_click(e, is_missing_tab=False))
@@ -2563,7 +2597,7 @@ class StockMatchApp:
 
     def _show_help_guide(self, tab_index: int = 0):
         win = tk.Toplevel(self.root)
-        win.title("StockMatch_Miya-v1.4.0 - ヘルプ＆操作ガイド")
+        win.title("StockMatch_Miya-v1.5.0 - ヘルプ＆操作ガイド")
         self._apply_window_icon(win)
         win.geometry("960x740")
         win.minsize(780, 560)
@@ -2573,7 +2607,7 @@ class StockMatchApp:
         banner.pack(fill=tk.X)
         tk.Label(
             banner,
-            text="📖 StockMatch_Miya-v1.4.0  取扱説明書・操作ガイド",
+            text="📖 StockMatch_Miya-v1.5.0  取扱説明書・操作ガイド",
             bg="#1e293b",
             fg="#ffffff",
             font=("Meiryo UI", 12, "bold"),
@@ -2703,6 +2737,10 @@ class StockMatchApp:
         txt2.insert(tk.END, "  ・請求(AI列)のみ空欄で納期超過（現品は済） → 『【請求超過】請求日(伝票)のみ超過』（黄色で警告）\n", "point")
         txt2.insert(tk.END, "  ・納期が空欄等で判定できなくても、現品確認日(A列)から一定日数経過して請求日(AI列)が空欄の場合 → 『【伝票未着】現品確認からX日経過』としてお知らせします。\n", "point")
 
+        txt2.insert(tk.END, "■ 注文品管理表の納期（AH列）優先参照と日付型判定ルール\n", "h2")
+        txt2.insert(tk.END, "★【管理表AH列納期の最優先適用】注文品管理表のAH列（34列目）に納期が記入されている場合は、注文書に書かれている納期ではなく、注文品管理表の納期を最優先で参照して超過判定を行います。\n", "point")
+        txt2.insert(tk.END, "★【日付型判定による誤判定防止】管理表の納期セルの型が日付型（Date/Datetime）ではない場合（文字列で「未定」「要相談」等のメモが書かれている場合や空欄など）は自動的に無視され、従来通り注文書の納期（または注文日+猶予日数）を参照します。\n", "point")
+
         txt2.insert(tk.END, "\n  4. 注文書納期の曖昧表記（上旬・中旬・下旬等）と納期空欄時の自動変換ルール  \n", "h1")
         txt2.insert(tk.END, "■ 期間表記・旬表記の期日自動変換\n", "h2")
         txt2.insert(tk.END, "・注文書の納期欄に具体的な日付ではなく「上旬」「中旬」「下旬」「月末」などが書かれている場合、それぞれの期間の最終日を期日として自動変換し、その日を過ぎたら超過と判定します。\n", "body")
@@ -2736,6 +2774,12 @@ class StockMatchApp:
         txt3.insert(tk.END, "  ① 読み取り専用モード（ReadOnly）での強制起動\n  ② すでにExcelで通常モードで開かれていた場合も、自動的に読み取り専用へ切り替えて開き直す保護\n  ③ 開いたブックの全シートおよびブック構造へのメモリ上ロック適用（セルの書き換えを禁止しつつ、行選択やCtrl+Cでの文字コピーは自由に可能）\n  ④ Excelを閉じる際に「変更を保存しますか？」という紛らわしい確認ダイアログを出さずに安全に閉じられる保護\n  ⑤ 万が一制御機能が利用できない環境でも、通常モードでの直接起動を遮断して原本を守る安全設計\n", "body")
 
         txt3.insert(tk.END, "\n  3. Excel風 列フィルター＆ソート機能・Excel新規ブック直接出力  \n", "h1")
+        txt3.insert(tk.END, "■ 表示列の設定機能（設定で列の表示／非表示を自由に変更・保存）\n", "h2")
+        txt3.insert(tk.END, "・タブ①（納期超過・照合結果一覧）の上部右側にある『👁 表示列の設定...』ボタン（または上部メニュー『設定(S)』→『照合結果一覧の表示列設定...』）をクリックすると、専用の設定画面が開きます。\n", "point")
+        txt3.insert(tk.END, "・一覧に表示したい列のチェックボックスをON／OFFするだけで、画面上の表示列を自由にカスタマイズできます。\n", "body")
+        txt3.insert(tk.END, "★【デフォルト表示列（15項目）】初期状態では、業務で最もよく確認される「総合判定」「不一致理由・照合診断」「依頼区分」「管理No」「指示書」「出荷先」「品名・ライン名等」「製品詳細」「発注先」「メーカー」「型番・規格(図番)」「数量」「注文書納期」「基準日超過」「照合元情報」の15列がスマートに表示され、品名・現品確認日・現品状況・請求日・請求状況・担当は非表示となっています。\n", "point")
+        txt3.insert(tk.END, "・『💾 適用して保存』ボタンを押すと設定ファイル(config.json)に保存され、次回アプリ起動時にも選択した表示列が自動的に復元されます。\n", "sub_note")
+
         txt3.insert(tk.END, "■ 列ヘッダー（▼）クリックによるExcel風フィルターと並べ替え\n", "h2")
         txt3.insert(tk.END, "・一覧表の各列タイトル（『照合判定 ▼』『発注先 ▼』『注文書納期 ▼』など）をクリックすると、Excelと同じようなフィルターメニューが開きます。\n", "point")
         txt3.insert(tk.END, "・昇順／降順での並べ替え（数値・日付・文字を自動判別）ができるほか、検索ボックスやチェックボックスを使って特定の業者や特定の管理No、特定の日付だけを自由に絞り込めます。\n", "body")
@@ -2773,7 +2817,7 @@ class StockMatchApp:
     def _show_about(self):
         messagebox.showinfo(
             "バージョン情報",
-            "StockMatch_Miya-v1.4.0\n"
+            "StockMatch_Miya-v1.5.0\n"
             "注文書 ⇔ 管理表 双方向照合・現品/請求超過システム\n\n"
             "・Excel直接起動: 一時ファイルなしで未保存新規ブック展開（A4横・1ページ収まり印刷設定済）\n"
             "・注文書保護: 注文書参照時は読み取り専用＋シート保護ロック＋保存確認抑止で誤保存を完全ブロック\n"
@@ -3144,6 +3188,7 @@ class StockMatchApp:
             "exclude_after_months": exclude_months,
             "instruction_filter_mode": inst_filter_mode,
             "excluded_order_nos": "\n".join(excluded_list),
+            "visible_columns_main": self.visible_columns_main,
             "last_updated": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
 
@@ -3222,6 +3267,14 @@ class StockMatchApp:
                 elif excluded_nos:
                     parsed = self._parse_lines_to_order_nos(str(excluded_nos))
                     self.excluded_order_nos_str.set("\n".join(parsed))
+
+                visible_cols = data.get("visible_columns_main")
+                if isinstance(visible_cols, list) and visible_cols:
+                    all_cids = [cfg[0] for cfg in self.col_configs_main]
+                    valid_cols = [c for c in visible_cols if c in all_cids]
+                    if valid_cols:
+                        self.visible_columns_main = valid_cols
+                        self._apply_column_visibility_main()
             except Exception:
                 pass
 
@@ -3985,6 +4038,7 @@ class StockMatchApp:
             col_map.setdefault("maker", 21)            # U列: メーカー
             col_map.setdefault("spec", 23)             # W列: 仕様
             col_map["qty"] = 28                        # AB列: 購入数
+            col_map.setdefault("due_date", 34)         # AH列: 納期
             col_map.setdefault("invoice_date", 35)     # AI列: 請求日
 
             data_slice = raw_rows[header_pos_in_list + 1 :]
@@ -4026,7 +4080,10 @@ class StockMatchApp:
                 mapped_inv_val = _get_col(row_tuple, col_map.get("invoice_date"))
                 invoice_raw = ai_col_val if self._is_filled_confirmation(ai_col_val) else mapped_inv_val
 
-                due_raw = _get_col(row_tuple, col_map.get("due_date"))
+                # AH列 (34列目) の納期セル値を優先取得
+                ah_col_val = _get_col(row_tuple, 34)
+                mapped_due_val = _get_col(row_tuple, col_map.get("due_date"))
+                due_raw = ah_col_val if (ah_col_val is not None and str(ah_col_val).strip() != "") else mapped_due_val
 
                 actual_date = self._parse_flexible_date(actual_raw, default_year=inferred_year, allow_period=False)
                 actual_filled = actual_date is not None or self._is_filled_confirmation(actual_raw)
@@ -4034,7 +4091,17 @@ class StockMatchApp:
                 invoice_date = self._parse_flexible_date(invoice_raw, default_year=inferred_year, allow_period=False)
                 invoice_filled = invoice_date is not None or self._is_filled_confirmation(invoice_raw)
 
-                mgmt_due_date = self._parse_flexible_date(due_raw, default_year=inferred_year, allow_period=True)
+                # 注文品管理表の納期(AH列)の日付型判定:
+                # セル値が datetime.date または datetime.datetime 型である場合のみ有効な「日付型」と判定
+                # 文字列型(メモ・未定等)や非日付型の場合は無視(False)とする
+                mgmt_due_is_date_type = False
+                mgmt_due_date = None
+                if isinstance(due_raw, datetime.datetime):
+                    mgmt_due_date = due_raw.date()
+                    mgmt_due_is_date_type = True
+                elif isinstance(due_raw, datetime.date):
+                    mgmt_due_date = due_raw
+                    mgmt_due_is_date_type = True
 
                 drawing_str = self._clean_cell_str(drawing_val)
                 part_str = self._clean_cell_str(part_val)
@@ -4121,6 +4188,7 @@ class StockMatchApp:
                         "invoice_raw": self._clean_cell_str(invoice_raw),
                         "invoice_filled": invoice_filled,
                         "mgmt_due_date": mgmt_due_date,
+                        "mgmt_due_is_date_type": mgmt_due_is_date_type,
                         "mgmt_due_raw": self._clean_cell_str(due_raw),
                         "person": person_str,
                         "norm_drawing": norm_drawing,
@@ -5178,17 +5246,23 @@ class StockMatchApp:
 
                 order_due = o_item.get("due_date")
                 order_dt = o_item.get("order_date")
-                if not order_dt and r_idx in matched_pairs:
-                    order_dt = m_list[matched_pairs[r_idx][0]].get("order_date")
+                matched_mgmt = m_list[matched_pairs[r_idx][0]] if r_idx in matched_pairs else None
+                if not order_dt and matched_mgmt:
+                    order_dt = matched_mgmt.get("order_date")
 
                 is_fallback = False
-                if order_due:
+                # 注文品管理表の納期(AH列)に納期が記入してあり、かつ型が日付型である場合は、
+                # 注文書に書かれている納期ではなく注文品管理表の納期を参照する。
+                # 納期の型が日付型ではない場合(文字列・メモ・空欄等)は無視して、注文書の納期を参照する。
+                if matched_mgmt and matched_mgmt.get("mgmt_due_is_date_type") and matched_mgmt.get("mgmt_due_date"):
+                    final_due = matched_mgmt.get("mgmt_due_date")
+                elif order_due:
                     final_due = order_due
                 elif order_dt:
                     final_due = order_dt + datetime.timedelta(days=grace_days)
                     is_fallback = True
                 else:
-                    final_due = m_list[matched_pairs[r_idx][0]].get("mgmt_due_date") if r_idx in matched_pairs else None
+                    final_due = None
 
                 if r_idx in matched_pairs:
                     c_idx, sc = matched_pairs[r_idx]
@@ -5665,8 +5739,14 @@ class StockMatchApp:
         if region == "heading":
             col = self.tree_main.identify_column(event.x)
             col_index = int(col.replace("#", "")) - 1
-            if 0 <= col_index < len(self.col_configs_main):
-                col_id = self.col_configs_main[col_index][0]
+            disp_cols = self.tree_main.cget("displaycolumns")
+            if not disp_cols or disp_cols == "#all" or disp_cols == ("#all",):
+                actual_cols = [c[0] for c in self.col_configs_main]
+            else:
+                actual_cols = list(disp_cols)
+
+            if 0 <= col_index < len(actual_cols):
+                col_id = actual_cols[col_index]
                 self._open_column_filter_dialog(
                     col_id=col_id,
                     title=self.col_titles_main.get(col_id, col_id),
@@ -5678,6 +5758,182 @@ class StockMatchApp:
                     x=event.x_root,
                     y=event.y_root,
                 )
+
+
+    # =========================================================================
+    # 表示列設定（タブ1: 照合結果一覧）
+    # =========================================================================
+    def _apply_column_visibility_main(self):
+        """self.visible_columns_main に基づいて tree_main の表示列（displaycolumns）を設定する"""
+        all_col_ids = [c[0] for c in self.col_configs_main]
+        valid_visible = [cid for cid in all_col_ids if cid in self.visible_columns_main]
+        if not valid_visible:
+            valid_visible = list(self.DEFAULT_VISIBLE_COLUMNS_MAIN)
+        self.visible_columns_main = valid_visible
+        try:
+            self.tree_main.configure(displaycolumns=tuple(valid_visible))
+        except Exception:
+            pass
+
+    def _open_column_visibility_dialog(self):
+        """照合結果一覧（タブ1）の表示・非表示列を設定するモーダルダイアログ"""
+        win = tk.Toplevel(self.root)
+        win.title("照合結果一覧 - 表示列の設定")
+        self._apply_window_icon(win)
+        win.geometry("520x640")
+        win.minsize(460, 520)
+        win.transient(self.root)
+        win.grab_set()
+
+        # ヘッダーフレーム
+        header = tk.Frame(win, bg="#1e293b", padx=16, pady=12)
+        header.pack(fill=tk.X)
+        tk.Label(
+            header,
+            text="👁 照合結果一覧（タブ①）の表示列設定",
+            font=("Meiryo UI", 11, "bold"),
+            bg="#1e293b",
+            fg="#ffffff",
+        ).pack(anchor="w")
+        tk.Label(
+            header,
+            text="一覧に表示したい列にチェックを入れてください。チェックを外した列は非表示になります。",
+            font=("Meiryo UI", 9),
+            bg="#1e293b",
+            fg="#cbd5e1",
+        ).pack(anchor="w", pady=(4, 0))
+
+        # 一括操作バー
+        action_bar = ttk.Frame(win, padding=(16, 8, 16, 4))
+        action_bar.pack(fill=tk.X)
+
+        check_vars = {}
+        for col_id, title, _, _ in self.col_configs_main:
+            is_checked = col_id in self.visible_columns_main
+            check_vars[col_id] = tk.BooleanVar(value=is_checked)
+
+        def _select_all():
+            for var in check_vars.values():
+                var.set(True)
+
+        def _select_default():
+            for cid, var in check_vars.items():
+                var.set(cid in self.DEFAULT_VISIBLE_COLUMNS_MAIN)
+
+        def _clear_all():
+            for var in check_vars.values():
+                var.set(False)
+
+        ttk.Button(action_bar, text="すべて選択", style="Action.TButton", command=_select_all).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(action_bar, text="初期値に戻す (15列)", style="Action.TButton", command=_select_default).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(action_bar, text="すべて解除", style="Action.TButton", command=_clear_all).pack(side=tk.LEFT)
+
+        # スクロール可能な列チェックボックスリスト
+        list_frame = ttk.Frame(win, padding=(16, 6, 16, 8))
+        list_frame.pack(fill=tk.BOTH, expand=True)
+
+        canvas = tk.Canvas(list_frame, bg="#ffffff", highlightthickness=1, highlightbackground="#cbd5e1")
+        scrollbar = ttk.Scrollbar(list_frame, orient="vertical", command=canvas.yview)
+        scrollable_content = tk.Frame(canvas, bg="#ffffff", padx=12, pady=8)
+
+        scrollable_content.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all")),
+        )
+        canvas_window = canvas.create_window((0, 0), window=scrollable_content, anchor="nw")
+
+        def _on_canvas_configure(event):
+            canvas.itemconfig(canvas_window, width=event.width)
+
+        canvas.bind("<Configure>", _on_canvas_configure)
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        canvas.bind_all("<MouseWheel>", _on_mousewheel)
+
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        for idx, (col_id, title, _, _) in enumerate(self.col_configs_main, start=1):
+            row_bg = "#f8fafc" if idx % 2 == 0 else "#ffffff"
+            item_frame = tk.Frame(scrollable_content, bg=row_bg, padx=8, pady=4)
+            item_frame.pack(fill=tk.X, pady=1)
+
+            is_default = col_id in self.DEFAULT_VISIBLE_COLUMNS_MAIN
+            default_tag = " [初期表示]" if is_default else " (初期非表示)"
+            tag_color = "#0369a1" if is_default else "#64748b"
+
+            cb = tk.Checkbutton(
+                item_frame,
+                text=f"{idx:2d}. {title}",
+                variable=check_vars[col_id],
+                font=("Meiryo UI", 9, "bold" if is_default else "normal"),
+                bg=row_bg,
+                activebackground=row_bg,
+                selectcolor="#ffffff",
+                anchor="w",
+            )
+            cb.pack(side=tk.LEFT)
+
+            tk.Label(
+                item_frame,
+                text=default_tag,
+                font=("Meiryo UI", 8),
+                bg=row_bg,
+                fg=tag_color,
+            ).pack(side=tk.LEFT, padx=(6, 0))
+
+        # フッターボタン
+        footer = ttk.Frame(win, padding=(16, 12, 16, 14))
+        footer.pack(fill=tk.X)
+
+        def _get_selected_cols():
+            selected = [cid for cid, var in check_vars.items() if var.get()]
+            if not selected:
+                messagebox.showwarning("選択エラー", "少なくとも1つの列を選択してください。", parent=win)
+                return None
+            return selected
+
+        def _apply_and_close(save_to_config=False):
+            selected = _get_selected_cols()
+            if not selected:
+                return
+            canvas.unbind_all("<MouseWheel>")
+            self.visible_columns_main = selected
+            self._apply_column_visibility_main()
+            if save_to_config:
+                self._save_config(show_msg=False)
+                messagebox.showinfo("設定完了", "表示列設定を適用し、設定ファイル(config.json)に保存しました。", parent=self.root)
+            win.destroy()
+
+        def _on_cancel():
+            canvas.unbind_all("<MouseWheel>")
+            win.destroy()
+
+        win.protocol("WM_DELETE_WINDOW", _on_cancel)
+
+        ttk.Button(
+            footer,
+            text="💾 適用して保存",
+            style="Primary.TButton",
+            command=lambda: _apply_and_close(save_to_config=True),
+        ).pack(side=tk.RIGHT, padx=(6, 0))
+
+        ttk.Button(
+            footer,
+            text="✔ 適用 (保存なし)",
+            style="Action.TButton",
+            command=lambda: _apply_and_close(save_to_config=False),
+        ).pack(side=tk.RIGHT, padx=(6, 0))
+
+        ttk.Button(
+            footer,
+            text="キャンセル",
+            style="Action.TButton",
+            command=_on_cancel,
+        ).pack(side=tk.RIGHT)
 
     def _clear_all_main_column_filters(self):
         self.column_filters_main.clear()
@@ -6545,7 +6801,7 @@ class StockMatchApp:
 
 def main():
     try:
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("StockMatch.Miya.v1.4.0")
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("StockMatch.Miya.v1.5.0")
     except Exception:
         pass
 

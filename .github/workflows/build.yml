@@ -29,7 +29,7 @@ jobs:
         --onefile 
         --noconsole 
         --clean 
-        --name "StockMatch_Miya-v1.4.0" 
+        --name "StockMatch_Miya-v1.5.0" 
         --icon icon.ico 
         --add-data "README.md;." 
         --add-data "icon.ico;." 
@@ -40,5 +40,5 @@ jobs:
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: StockMatch_Miya-v1.4.0
-        path: dist/StockMatch_Miya-v1.4.0.exe
+        name: StockMatch_Miya-v1.5.0
+        path: dist/StockMatch_Miya-v1.5.0.exe
