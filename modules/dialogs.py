@@ -883,120 +883,343 @@ def _build_mgmt_preview_tree(parent, cached_mgmt_rows: list[dict], order_no: str
 
 
 def show_help_guide(parent: tk.Tk | tk.Toplevel, initial_tab: int = 0, icon_path: str | None = None):
-    """取扱説明書・操作ガイドを表示するダイアログ"""
+    """取扱説明書・操作ガイドをリッチかつ分かりやすく表示するダイアログ"""
     win = tk.Toplevel(parent)
-    win.title(f"{APP_NAME} - ヘルプ＆操作ガイド")
+    win.title(f"{APP_NAME} - ヘルプ＆操作ガイド（取扱説明書）")
     apply_window_icon(win, icon_path)
-    win.geometry("960x740")
-    win.minsize(820, 600)
+    win.geometry("1060x780")
+    win.minsize(900, 640)
 
     header = tk.Frame(win, bg="#1e293b", padx=20, pady=12)
     header.pack(fill=tk.X)
 
     tk.Label(
         header,
-        text=f"📖 {APP_NAME}  取扱説明書・操作ガイド",
+        text=f"📖 {APP_NAME}  取扱説明書・総合操作ガイド",
         bg="#1e293b",
         fg="#ffffff",
-        font=("Meiryo UI", 12, "bold"),
+        font=("Meiryo UI", 13, "bold"),
     ).pack(anchor="w")
 
     tk.Label(
         header,
-        text="注文書と注文品管理表の双方向自動照合・タブ分離一覧表示・納期超過チェックツールの使い方",
+        text="注文品管理表（1ファイル） ⇔ 注文書フォルダ（全階層） 双方向自動照合・納期超過チェックシステム 総合マニュアル",
         bg="#1e293b",
         fg="#94a3b8",
         font=("Meiryo UI", 9),
     ).pack(anchor="w", pady=(2, 0))
 
-    notebook = ttk.Notebook(win, padding=8)
+    notebook = ttk.Notebook(win, padding=6)
     notebook.pack(fill=tk.BOTH, expand=True)
 
     def _create_scrollable_text(p):
-        txt = tk.Text(p, wrap="word", font=("Meiryo UI", 9), padx=12, pady=10, bg="#ffffff", fg="#0f172a")
-        vsb = ttk.Scrollbar(p, orient="vertical", command=txt.yview)
+        txt_frame = ttk.Frame(p)
+        txt_frame.pack(fill=tk.BOTH, expand=True)
+
+        txt = tk.Text(
+            txt_frame,
+            wrap="word",
+            font=("Meiryo UI", 9),
+            padx=16,
+            pady=12,
+            bg="#ffffff",
+            fg="#0f172a",
+            relief="flat",
+            highlightthickness=0,
+        )
+        vsb = ttk.Scrollbar(txt_frame, orient="vertical", command=txt.yview)
         txt.configure(yscrollcommand=vsb.set)
         txt.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         vsb.pack(side=tk.RIGHT, fill=tk.Y)
 
-        txt.tag_configure("h1", font=("Meiryo UI", 11, "bold"), foreground="#1e293b", spacing1=12, spacing3=4)
-        txt.tag_configure("h2", font=("Meiryo UI", 10, "bold"), foreground="#2563eb", spacing1=8, spacing3=2)
+        txt.tag_configure("h1", font=("Meiryo UI", 11, "bold"), foreground="#1e3a8a", background="#eff6ff", spacing1=12, spacing3=4)
+        txt.tag_configure("h2", font=("Meiryo UI", 10, "bold"), foreground="#1e293b", spacing1=10, spacing3=2)
         txt.tag_configure("body", font=("Meiryo UI", 9), foreground="#334155", spacing1=2, spacing3=2)
+        txt.tag_configure("body_lead", font=("Meiryo UI", 9, "bold"), foreground="#1e293b", spacing1=4, spacing3=2)
         txt.tag_configure("point", font=("Meiryo UI", 9, "bold"), foreground="#0f172a", background="#fef08a")
-        txt.tag_configure("warn", font=("Meiryo UI", 9, "bold"), foreground="#dc2626")
+        txt.tag_configure("warn", font=("Meiryo UI", 9, "bold"), foreground="#991b1b", background="#fee2e2")
+        txt.tag_configure("feature", font=("Meiryo UI", 9, "bold"), foreground="#166534", background="#dcfce7")
+        txt.tag_configure("key", font=("Meiryo UI", 9, "bold"), foreground="#0f172a", background="#e2e8f0")
+        txt.tag_configure("bullet", font=("Meiryo UI", 9, "bold"), foreground="#2563eb")
+        txt.tag_configure("qa_q", font=("Meiryo UI", 10, "bold"), foreground="#1d4ed8", spacing1=10, spacing3=2)
+        txt.tag_configure("qa_a", font=("Meiryo UI", 9), foreground="#1e293b", spacing1=2, spacing3=6)
         txt.tag_configure("sub_note", font=("Meiryo UI", 8), foreground="#64748b")
         return txt
 
-    # タブ1: 基本的な使い方・設定
-    t1 = ttk.Frame(notebook, padding=8)
-    notebook.add(t1, text="  ① 基本的な使い方・設定  ")
+    # -------------------------------------------------------------
+    # タブ1: 使い方・基本操作手順
+    # -------------------------------------------------------------
+    t1 = ttk.Frame(notebook, padding=6)
+    notebook.add(t1, text="  ① 📖 使い方・基本操作手順  ")
     txt1 = _create_scrollable_text(t1)
 
-    txt1.insert(tk.END, "  STEP 1 : 注文品管理表ファイル と 注文書フォルダ の指定  \n", "h1")
-    txt1.insert(tk.END, "■ ① 注文品管理表ファイルの指定\n", "h2")
-    txt1.insert(tk.END, "・画面上部の『① 注文品管理表ファイル』行にある『ファイルを参照...』ボタン（または Ctrl+O）を押し、管理表Excelを選択します。\n", "body")
-    txt1.insert(tk.END, "・右端の『📋 管理表を開く』ボタンを押すと、現在指定されている管理表ファイルを直接Excelで開いて確認できます。\n", "body")
-    txt1.insert(tk.END, "★【自動抽出＆列構造の自動認識】管理表内の全シートから「管理No（8桁）」を自動抽出し、A列（現品確認日）、AB列（購入数）、AH列（納期）、AI列（請求日）などを自動認識します。\n", "point")
+    txt1.insert(tk.END, " 【システムの概要と目的】 \n", "h1")
+    txt1.insert(tk.END, "本システムは、社内の「注文品管理表（1ファイル）」と「注文書フォルダ（配下のサブフォルダを含む全注文書Excel）」を双方向で高精度に自動照合し、以下の案件を瞬時に抽出・可視化する業務支援ツールです。\n", "body")
+    txt1.insert(tk.END, "・納期を過ぎているのに「現品確認日（A列）」や「請求日（AI列）」が未記入となっている納期超過・遅延案件\n", "body")
+    txt1.insert(tk.END, "・管理表に記載があるのに注文書Excelが存在しない未発注・手配漏れ案件（別タブに完全分離表示）\n", "body")
+    txt1.insert(tk.END, "・注文書と管理表で品名・品番・図番・数量などが食い違っている不一致案件\n", "body")
 
-    txt1.insert(tk.END, "\n■ ② 注文書フォルダパスの指定（高速枝刈りスキャン）\n", "h2")
-    txt1.insert(tk.END, "・『② 注文書フォルダパス』行にある『フォルダを参照...』ボタン（または Ctrl+D）を押し、注文書が保管されている親フォルダを選択します。\n", "body")
-    txt1.insert(tk.END, "★【枝刈りスキャン】親フォルダ配下の多数のサブフォルダのうち、管理表にない管理Noフォルダはフォルダごと丸ごとスキップするため、何千フォルダある環境でも数秒で探索が完了します。\n", "point")
+    txt1.insert(tk.END, "\n 基本操作の 6 ステップ（日常の業務フロー） \n", "h1")
 
-    txt1.insert(tk.END, "\n  STEP 2 : 判定基準日・日数・月数除外・設定の保存  \n", "h1")
-    txt1.insert(tk.END, "・『③ 判定基準日 (今日)』には判定基準日を入力します（『今日に戻す』ボタンあり）。\n", "body")
-    txt1.insert(tk.END, "・『納期未記載時: 注文日から [ 7 ] 日経過で超過』により、納期空欄明細も自動でみなし納期を算出します。\n", "body")
-    txt1.insert(tk.END, "・『経過除外: 注文日から [ 12 ] ヶ月経過で除外』により、古い過去データを自動的に除外します（0を入力すると全期間表示）。\n", "body")
-    txt1.insert(tk.END, "・『💾 設定を保存』ボタンを押すと、パス・超過日数・除外月数・指示書フィルタ・除外管理No・表示列設定が config.json に保存されます。\n", "point")
+    txt1.insert(tk.END, "■ STEP 1 : 注文品管理表ファイル（Excel）の指定\n", "h2")
+    txt1.insert(tk.END, "1. 画面上部『① 注文品管理表ファイル』の右側にある「ファイルを参照...」ボタン（または Ctrl+O）をクリックし、管理表Excel（例: 注文品管理表.xlsx）を選択します。\n", "body")
+    txt1.insert(tk.END, "2. 右端の「📋 管理表を開く」ボタンを押すと、現在指定されている管理表をいつでも直接Excelで開いて閲覧できます。\n", "body")
+    txt1.insert(tk.END, "★【全シート自動解析 ＆ Excelを開いたままでOK】\n", "feature")
+    txt1.insert(tk.END, "・ブック内の全シート（購入品リスト、外注加工リスト等）を自動で網羅探索し、8桁の管理Noを瞬時に抽出します。\n", "body")
+    txt1.insert(tk.END, "・Excelで管理表を開いたまま作業していても、アプリが一時的に安全に読み込むため、Excelを閉じる必要はありません。\n", "body")
 
-    txt1.insert(tk.END, "\n  STEP 3 : 除外する管理Noの設定 ＆ 指示書列(J列)フィルタ  \n", "h1")
-    txt1.insert(tk.END, "・『🚫 除外する管理Noを設定・編集...』から、テスト案件や除外したい管理Noを改行区切りで登録できます（Excel複数セルの直接貼り付けに対応）。\n", "body")
-    txt1.insert(tk.END, "・『📋 管理表 指示書列(J列)フィルタ』から、「「有り」のみ（初期値）」「有り または 空白 のみ」「「空白」のみ」「すべて表示」をワンクリックで切り替えられます。\n", "body")
+    txt1.insert(tk.END, "\n■ STEP 2 : 注文書フォルダの指定（超高速枝刈りスキャン）\n", "h2")
+    txt1.insert(tk.END, "1. 『② 注文書フォルダパス』の右側にある「フォルダを参照...」ボタン（または Ctrl+D）をクリックし、注文書が保管されている親フォルダを選択します。\n", "body")
+    txt1.insert(tk.END, "2. 右端の「📂 フォルダを開く」ボタンを押すと、エクスプローラーで保管フォルダを直接開けます。\n", "body")
+    txt1.insert(tk.END, "★【管理Noフォルダ単位の枝刈りスキップ】\n", "feature")
+    txt1.insert(tk.END, "・親フォルダの中に1,000個以上のサブフォルダがあっても、管理表に記載のある管理Noフォルダだけを自動判別して探索します。\n", "body")
+    txt1.insert(tk.END, "・関係のないフォルダや見積専用ファイルは一切開かずに丸ごとスキップするため、Googleドライブ等のクラウド同期フォルダや社内サーバー上でも数秒で高速に探索が完了します。\n", "body")
 
-    txt1.insert(tk.END, "\n  STEP 4 : 照合・遅延チェックの実行と中止  \n", "h1")
-    txt1.insert(tk.END, "・青い『▶ 照合・遅延チェック実行 (F5)』ボタンで照合を開始します。実行中は赤い『⏹ 中止 (Esc)』ボタンまたは Esc キーでいつでも安全に中断できます。\n", "point")
+    txt1.insert(tk.END, "\n■ STEP 3 : 判定基準日・日数・月数除外の設定と保存\n", "h2")
+    txt1.insert(tk.END, "・判定基準日 (今日): 超過を判定する基準日を入力します（初期値は当日。「今日に戻す」ボタンでいつでも当日に復帰）。\n", "body")
+    txt1.insert(tk.END, "・納期未記載時 [ 7 ] 日経過で超過: 注文書に納期が書かれていない場合、注文日（注文書4行目）から指定日数経過でみなし超過判定します。\n", "body")
+    txt1.insert(tk.END, "・経過除外 [ 12 ] ヶ月経過で除外: 注文日から指定ヶ月数以上が経過した古い完了データを自動的に一覧や集計から除外します（0で全期間表示）。\n", "body")
+    txt1.insert(tk.END, "★「💾 設定を保存」ボタンを押すと、ファイルパス・超過日数・除外月数・除外管理No・指示書フィルタ・表示列設定が設定ファイル（config.json）に保存され、次回起動時に自動復元されます。\n", "point")
+
+    txt1.insert(tk.END, "\n■ STEP 4 : 除外管理No・指示書列(J列)フィルタの確認\n", "h2")
+    txt1.insert(tk.END, "・『④ 一覧から除外する管理No』の「🚫 除外する管理Noを設定・編集...」から、照合対象外にしたい管理Noを登録・編集できます。\n", "body")
+    txt1.insert(tk.END, "・右側の「📋 管理表 指示書列(J列)フィルタ」から、注文品管理表の指示書列（初期値: 「有り」のみ）による絞り込みをワンクリックで選択できます。\n", "body")
+
+    txt1.insert(tk.END, "\n■ STEP 5 : 照合・遅延チェックの実行と中止\n", "h2")
+    txt1.insert(tk.END, "・右端の大きなロイヤルブルーのボタン「▶ 照合・遅延チェック実行 (F5)」を押すと照合が始まります。\n", "body")
+    txt1.insert(tk.END, "・プログレスバーに進捗状況（読み込み済みファイル数／全件数）がリアルタイム表示されます。\n", "body")
+    txt1.insert(tk.END, "★【安心の中止機能】処理を中断したいときは、左隣の赤い「⏹ 中止 (Esc)」ボタンを押すか、キーボードの「Esc」キーを押すだけで、いつでも安全かつ即座に処理を中断できます。\n", "point")
+
+    txt1.insert(tk.END, "\n■ STEP 6 : 件数サマリーカードと2つのタブによる確認\n", "h2")
+    txt1.insert(tk.END, "・照合が完了すると、中段の8枚のサマリーカードに件数が集計されます。\n", "body")
+    txt1.insert(tk.END, "・見たいカード（例:「【警告】現品・請求の両方超過」など）をクリックするだけで、該当する明細が下部一覧へワンクリックで絞り込まれます。\n", "body")
+    txt1.insert(tk.END, "・下部の一覧エリアは2つの独立したタブで構成されています:\n", "body")
+    txt1.insert(tk.END, "  【タブ① 納期超過・照合結果 一覧】: 注文書が存在する案件の納期超過や管理表との不一致を確認。\n", "body")
+    txt1.insert(tk.END, "  【タブ② 【未発注・注文書なし】管理表のみ記載 一覧】: 管理表に載っているのに注文書が見当たらない未発注案件を確認。\n", "body")
     txt1.configure(state="disabled")
 
-    # タブ2: 照合ルール・タブ分離の仕組み
-    t2 = ttk.Frame(notebook, padding=8)
-    notebook.add(t2, text="  ② 照合ルール・タブ分離の仕組み  ")
+    # -------------------------------------------------------------
+    # タブ2: 判定ロジック・色分け・2系統タブ
+    # -------------------------------------------------------------
+    t2 = ttk.Frame(notebook, padding=6)
+    notebook.add(t2, text="  ② 🎯 判定ロジック・色分け・2系統タブ  ")
     txt2 = _create_scrollable_text(t2)
 
-    txt2.insert(tk.END, "  1. 2系統タブによる明確な分離表示  \n", "h1")
-    txt2.insert(tk.END, "・注文書が存在する案件はすべて『タブ①（納期超過・照合結果一覧）』に集約されます。\n", "body")
-    txt2.insert(tk.END, "・管理表にのみ記載があって注文書が見当たらない未発注案件は『タブ②（未発注・注文書なし一覧）』へ完全に分離されます。\n", "body")
-    txt2.insert(tk.END, "★【管理表AB列（購入数0）の自動除外】管理表AB列の購入数が0の明細は在庫充当品としてタブ②から自動除外されます。\n", "point")
+    txt2.insert(tk.END, " 8 枚の件数サマリーカードと警告色の意味 \n", "h1")
+    txt2.insert(tk.END, "画面中段のカードをクリックすると、対象の明細へ瞬時に切り替わります（初期選択: 最重要の【警告】現品・請求の両方超過）。\n\n", "body")
 
-    txt2.insert(tk.END, "\n  2. 注文品管理表の納期（AH列）優先参照と日付型判定ルール  \n", "h1")
-    txt2.insert(tk.END, "★【管理表AH列納期の最優先適用】注文品管理表のAH列（34列目）に納期が記入されている場合は、注文書に書かれている納期ではなく、注文品管理表の納期を最優先で参照して超過判定を行います。\n", "point")
-    txt2.insert(tk.END, "★【日付型判定による誤判定防止】管理表の納期セルの型が日付型（Date/Datetime）ではない場合（文字列で「未定」「要相談」等のメモが書かれている場合や空欄など）は自動的に無視され、従来通り注文書の納期（または注文日+猶予日数）を参照します。\n", "point")
+    cards_info = [
+        ("① 注文書明細 総数", "白", "注文書から検出された全明細の総件数を表示します。"),
+        ("② すべての異常(超過・不一致)", "薄赤枠", "納期超過・伝票未着・不一致・管理表未登録など、何らかの対応・確認が必要な全異常件数を一括表示します。"),
+        ("③ 【警告】現品・請求の両方超過", "薄赤背景・赤文字", "【最重要確認】納期を過ぎても「現品確認日(A列)」と「請求日(AI列)」の両方が未記入となっている遅延案件を表示します。"),
+        ("④ 【現品超過】現品確認日の超過", "薄橙背景・橙文字", "請求日は記入済みですが、現品確認日(A列)が未記入のまま納期を過ぎている案件を表示します。"),
+        ("⑤ 【請求超過・未着】請求日(伝票)超過", "薄黄背景・茶文字", "現品は確認済みですが、請求書・伝票（請求日: AI列）が未記入のまま納期を過ぎている案件を表示します。"),
+        ("⑥ 【不一致】管理表との不一致", "薄紫背景・紫文字", "注文書と管理表で品名・品番・図番・数量などが食い違っている案件、または注文書はあるが管理表に記載がない案件を表示します。"),
+        ("⑦ 正常・納期前・確認済", "白背景・緑枠", "現品・請求ともに確認済みの案件、またはまだ納期前の正常な案件を表示します。"),
+        ("⑧ 【別タブ】注文書未検出", "琥珀色背景", "管理表に記載があるのに注文書フォルダ内に対応する注文書Excelが存在しない案件数を表示します（クリックで自動的にタブ②へ移動）。"),
+    ]
+    for c_title, c_color, c_desc in cards_info:
+        txt2.insert(tk.END, f"■ {c_title}  [{c_color}]\n", "h2")
+        txt2.insert(tk.END, f"  {c_desc}\n", "body")
 
-    txt2.insert(tk.END, "\n  3. 高精度マッチングアルゴリズム  \n", "h1")
-    txt2.insert(tk.END, "★【単価・金額の照合除外】誤判定を防ぐため、単価・金額は照合計算から完全に除外しています。\n", "point")
-    txt2.insert(tk.END, "・管理No、図面番号、品番、品名、仕様、業者/メーカー、数量で1対1の全体最適マッチングを行います。\n", "body")
+    txt2.insert(tk.END, "\n 注文品管理表の納期（AH列）優先参照 ＆ 日付型判定ルール \n", "h1")
+    txt2.insert(tk.END, "★【管理表納期の最優先適用】\n", "feature")
+    txt2.insert(tk.END, "・注文品管理表のAH列（34列目: 納期列）に納期が記載されている場合、注文書側に書かれている日付ではなく、注文品管理表の納期を最優先で参照して超過判定を行います。\n", "body")
+    txt2.insert(tk.END, "★【日付型判定による誤判定の完全防止】\n", "point")
+    txt2.insert(tk.END, "・注文品管理表の納期セルが「日付型（Excelの表示形式が日付）」である場合のみ納期として有効判定します。\n", "body")
+    txt2.insert(tk.END, "・管理表の納期欄に「未定」「要相談」「都度」「4月中旬」などの文字列メモが書かれている場合や空欄の場合は、誤判定を防ぐため自動的に無視され、注文書に記載された本来の納期を参照します。\n", "body")
+    txt2.insert(tk.END, "・文字列として入力された日付形式（例: '2026-07-30 00:00:00' や '2026/07/30' 等）も自動で正規の日付として解析・認識します。\n", "body")
+
+    txt2.insert(tk.END, "\n 納期の柔軟な期間自動変換ルール \n", "h1")
+    txt2.insert(tk.END, "注文書や管理表に書かれた柔軟な納期表記を、自動的に正確な判定期日へ変換します:\n", "body")
+    txt2.insert(tk.END, "・「上旬・初旬・頭」: その月の 10 日までとして判定（例: 11/上 → 11月10日）\n", "body")
+    txt2.insert(tk.END, "・「中旬・半ば・中頃」: その月の 20 日までとして判定（例: 11/中 → 11月20日）\n", "body")
+    txt2.insert(tk.END, "・「下旬・月末・いっぱい」: その月の最終日までとして判定（例: 11/下 → 11月30日、2月 → 28日/29日）\n", "body")
+    txt2.insert(tk.END, "・「11/10〜15」等の範囲表記: 後ろの期日（15日）を基準に判定\n", "body")
+    txt2.insert(tk.END, "・和暦表記（令和・R表記）や年省略表記にも自動対応\n", "body")
+    txt2.insert(tk.END, "・納期未記載（空欄）時: 注文書4行目の「注文日」から指定猶予日数（初期値: 7日）を加算した日を期日として自動計算\n", "body")
+
+    txt2.insert(tk.END, "\n 2 系統タブによる完全分離 ＆ AB列「購入数0」自動除外 \n", "h1")
+    txt2.insert(tk.END, "・タブ①『納期超過・照合結果 一覧』: 注文書が存在する案件を一覧表示します。\n", "body")
+    txt2.insert(tk.END, "・タブ②『【未発注・注文書なし】管理表のみ記載 一覧』: 管理表にあるのに注文書が見当たらない未発注案件のみを完全分離して表示します。\n", "body")
+    txt2.insert(tk.END, "★【管理表AB列「購入数0」の自動除外】\n", "feature")
+    txt2.insert(tk.END, "・注文品管理表のAB列（28列目）「購入数」が「0」（または「0個」「0台」等）となっている在庫充当品や発注不要項目は、未発注一覧から自動的に除外されます。\n", "body")
+
+    txt2.insert(tk.END, "\n 単価・金額の照合除外と高精度 1 対 1 マッチング \n", "h1")
+    txt2.insert(tk.END, "・単価未入力や金額0円、消費税率表記の違いによる誤判定を防ぐため、単価・金額は照合計算から完全に除外しています。\n", "body")
+    txt2.insert(tk.END, "・管理No（8桁）、図面番号、品番、品名、仕様、業者/メーカー、購入数による多次元スコアリングを行い、全体最適1対1マッチングを実行します。\n", "body")
     txt2.configure(state="disabled")
 
-    # タブ3: 便利機能・ショートカットキー
-    t3 = ttk.Frame(notebook, padding=8)
-    notebook.add(t3, text="  ③ 便利機能・ショートカットキー  ")
+    # -------------------------------------------------------------
+    # タブ3: 除外設定・フィルタ・設定管理
+    # -------------------------------------------------------------
+    t3 = ttk.Frame(notebook, padding=6)
+    notebook.add(t3, text="  ③ ⚙ 除外設定・フィルタ・設定管理  ")
     txt3 = _create_scrollable_text(t3)
 
-    txt3.insert(tk.END, "  1. 表示列の設定機能（自由なカスタマイズ ＆ 設定保存）  \n", "h1")
-    txt3.insert(tk.END, "・一覧上部の『👁 表示列の設定...』ボタン（またはメニュー『設定(S)』）から、表示する列を自由に選択・保存できます。\n", "point")
-    txt3.insert(tk.END, "★【デフォルト15列表示】業務で最も確認頻度の高い15列（総合判定、不一致理由、依頼区分、管理No、指示書、出荷先、品名/ライン名、製品詳細、発注先、メーカー、型番/規格、数量、注文書納期、基準日超過、照合元情報）が初期表示されます。\n", "point")
+    txt3.insert(tk.END, " 専用画面での除外管理No設定 ＆ Excel直接貼り付け \n", "h1")
+    txt3.insert(tk.END, "1. 画面上部『④ 一覧から除外する管理No』の「🚫 除外する管理Noを設定・編集...」ボタンをクリックすると専用ウィンドウが開きます。\n", "body")
+    txt3.insert(tk.END, "2. 1行に1件ずつ管理Noが並ぶ見やすいエディタ形式で、除外したい管理Noを管理できます。\n", "body")
+    txt3.insert(tk.END, "★【Excelからのコピー＆ペーストに対応】\n", "feature")
+    txt3.insert(tk.END, "・Excelの管理No列（縦一列や複数セル）をまとめてコピー（Ctrl+C）し、設定画面で「📋 クリップボードから貼り付け」ボタンを押す（または Ctrl+V）だけで、何十件・何百件でも一括登録できます。\n", "body")
+    txt3.insert(tk.END, "・「✨ 重複・空白を整理」ボタンで、重複した管理Noや余分な改行・空白を瞬時にクリーンアップできます。\n", "body")
+    txt3.insert(tk.END, "3. 「✔ 適用して設定を保存」ボタンを押すと、再スキャン不要で現在表示中の一覧・サマリーから即座に対象案件が除外され、設定ファイルへ自動保存されます。\n", "point")
+    txt3.insert(tk.END, "4. メイン画面の「全解除」ボタンを押すと、ワンクリックで除外指定をすべて解除できます。\n", "body")
 
-    txt3.insert(tk.END, "\n  2. 詳細プレビュー ＆ 原本誤編集完全ブロック  \n", "h1")
-    txt3.insert(tk.END, "・明細行をダブルクリックすると、比較診断レポートやアプリ内シートプレビュー（注文書・管理表）が開きます。\n", "body")
-    txt3.insert(tk.END, "・注文書をExcelで開く際は、読み取り専用強制やシート編集ロック等の5重の保護により、誤上書き事故を完全に防止します。\n", "point")
+    txt3.insert(tk.END, "\n 注文品管理表「指示書列(J列)」フィルタ（設定保存対応） \n", "h1")
+    txt3.insert(tk.END, "画面上部『④』の右側にある「📋 管理表 指示書列(J列)フィルタ」から、ワンクリックで表示対象を切り替えられます:\n", "body")
+    txt3.insert(tk.END, "1. 「有り」のみ (初期値): J列に「有り（有・〇・済・完等）」と書かれた指示書発行済み案件のみを表示。\n", "body")
+    txt3.insert(tk.END, "2. 有り または 空白 のみ: J列が「有り」または「空白」の案件を表示し、「無し（不要・×・ー等）」の対象外案件を除外。\n", "body")
+    txt3.insert(tk.END, "3. 「空白」のみ: J列が未記入の案件のみを表示。\n", "body")
+    txt3.insert(tk.END, "4. すべて表示 (フィルタなし): J列の値に関係なく全件を表示。\n", "body")
+    txt3.insert(tk.END, "※コンボボックスを切り替えると、再照合を行わなくても一覧・サマリーカード・Excel出力へ即座に反映されます。\n", "point")
 
-    txt3.insert(tk.END, "\n  3. Excel新規ブックへの直接展開（Ctrl + S）  \n", "h1")
-    txt3.insert(tk.END, "・『📊 Excelで直接開く』ボタンを押すと、一時ファイルなしで新規ブックに色分け・フィルター・A4横印刷設定済みの表を直接展開します。\n", "point")
+    txt3.insert(tk.END, "\n 注文日からの経過月数自動除外（初期値: 12ヶ月） \n", "h1")
+    txt3.insert(tk.END, "・『経過除外: 注文日から [ 12 ] ヶ月経過で除外』欄により、完了済みの古い過去データを自動的に集計・一覧から除外します。\n", "body")
+    txt3.insert(tk.END, "・数値を変更して Enter を押すだけで即座に反映されます（「0」を入力すると経過月数除外を行わず全期間を表示）。\n", "body")
+
+    txt3.insert(tk.END, "\n 設定ファイル (config.json) の保存先変更 ＆ 初期値復帰 \n", "h1")
+    txt3.insert(tk.END, "・「⚙ 保存先設定...」ボタン（またはメニュー『設定(S)』）から、設定ファイルの保存先フォルダを自由に変更できます。\n", "body")
+    txt3.insert(tk.END, "・社内共有サーバー（NAS）やGoogleドライブ等を指定することで、複数端末で同一の除外設定やパスを共有できます。\n", "body")
+    txt3.insert(tk.END, "★【初期値へのワンクリック復帰】「🏠 アプリと同じ場所 (初期値) に戻す」ボタンを押せば、いつでも初期状態に戻せます。\n", "feature")
+    txt3.insert(tk.END, "★【設定の自動引き継ぎ】保存先変更時に既存の設定内容が自動コピーされるため、入力済みのパスや除外設定が消える心配はありません。\n", "body")
     txt3.configure(state="disabled")
 
-    notebook.select(initial_tab)
+    # -------------------------------------------------------------
+    # タブ4: 便利機能・ショートカット・マウス操作
+    # -------------------------------------------------------------
+    t4 = ttk.Frame(notebook, padding=6)
+    notebook.add(t4, text="  ④ 💡 便利機能・ショートカット・マウス操作  ")
+    txt4 = _create_scrollable_text(t4)
+
+    txt4.insert(tk.END, " 全 18 列の表示列設定（管理表順準拠 ＆ 設定保存） \n", "h1")
+    txt4.insert(tk.END, "・一覧上部『👁 表示列の設定...』ボタンをクリックすると専用設定画面が開きます。\n", "body")
+    txt4.insert(tk.END, "・チェックボックスのON/OFFで表示列を自由にカスタマイズでき、「💾 適用して保存」で次回起動時にも復元されます。\n", "body")
+    txt4.insert(tk.END, "【全18列の構成】\n", "body_lead")
+    txt4.insert(tk.END, " 1.総合判定  2.不一致理由・照合診断  3.納期  4.プロジェクト名  5.管理No  6.出荷先\n", "body")
+    txt4.insert(tk.END, " 7.品名、ライン名等  8.製品詳細  9.製作数  10.図面番号  11.品番  12.品名\n", "body")
+    txt4.insert(tk.END, " 13.メーカー  14.単数  15.仕様  16.仕入先  17.在庫数  18.注文日\n", "body")
+
+    txt4.insert(tk.END, "\n 列幅の自動調整 ＆ 標準推奨幅へのリセット \n", "h1")
+    txt4.insert(tk.END, "・「📐 列幅自動調整」ボタン（一覧下部またはメニュー設定）: 表示中の文字長に合わせて全列の幅を一括拡大フィット（文字数の少ない列も標準幅を下限保証して潰れを防止）。\n", "body")
+    txt4.insert(tk.END, "・「↺ 標準列幅に戻す」ボタン: いつでもワンクリックで見やすい標準初期幅にリセット。\n", "body")
+    txt4.insert(tk.END, "・列ヘッダー境界（セパレータ）のダブルクリックでも個別自動調整が可能です。\n", "body")
+
+    txt4.insert(tk.END, "\n 快適な横スクロール操作（4つの操作方法） \n", "h1")
+    txt4.insert(tk.END, "① 下部スクロールバーの左右移動ボタン: 「⏮ 左端」「◀ 左へ」「右へ ▶」「右端 ⏭」でワンクリック高速移動\n", "body")
+    txt4.insert(tk.END, "② Shift + マウスホイール: 表の上で Shift（または Ctrl）を押しながらホイールを回すと左右にスムーズにスクロール\n", "body")
+    txt4.insert(tk.END, "③ 横スクロールバー上のホイール回転: 下部横スクロールバーの上にマウスを乗せてホイールを回すだけでも横スクロール\n", "body")
+    txt4.insert(tk.END, "④ キーボード操作: 表を選択した状態で「←」「→」キー（Shift + ← / → で高速移動）\n", "body")
+
+    txt4.insert(tk.END, "\n セル・ツールチップ表示（マウスを乗せるだけで全文表示） \n", "h1")
+    txt4.insert(tk.END, "・一覧のセルにマウスカーソルを合わせるだけで、見切れている文字を含めた完全な内容が吹き出し（ツールチップ）でポップアップ表示されます。\n", "body")
+
+    txt4.insert(tk.END, "\n 注文書の原本誤保存・誤編集完全ブロック（5重の安全保護） \n", "h1")
+    txt4.insert(tk.END, "「📄 注文書を参照 (読取専用)」ボタンまたは行の右クリックから開くと、Excelで該当シート・該当行がハイライトされた状態で開きます。\n", "body")
+    txt4.insert(tk.END, "① 強制読取専用オープン\n", "body")
+    txt4.insert(tk.END, "② 既存通常オープン検知時の強制読取専用切り替え\n", "body")
+    txt4.insert(tk.END, "③ メモリ上の全シート保護ロック（セル書き換え・削除禁止）\n", "body")
+    txt4.insert(tk.END, "④ 終了時の「保存しますか？」ポップアップ抑止\n", "body")
+    txt4.insert(tk.END, "⑤ 通常モード起動の完全遮断ガード\n", "body")
+    txt4.insert(tk.END, "※この5重ガードにより、原本の注文書を誤って編集・上書き保存してしまう事故を100%防止します。\n", "point")
+
+    txt4.insert(tk.END, "\n 一時ファイルなしの「📊 Excelで直接開く」（Ctrl + S） \n", "h1")
+    txt4.insert(tk.END, "・一時ファイルを作成せず、未保存のExcel新規ブックに直接結果を展開（シート1: 納期超過・照合結果、シート2: 注文書未検出）。\n", "body")
+    txt4.insert(tk.END, "・アプリと同じ色分け、見出し固定、オートフィルター、最適列幅（フィルター▼が欠けない最小幅保証＆広すぎ防止）、A4横向き1ページ収まり印刷設定を自動適用。\n", "body")
+    txt4.insert(tk.END, "・展開完了後は即座にアプリ側が待機状態に戻るため、Excelを閉じても安全です。\n", "body")
+
+    txt4.insert(tk.END, "\n キーボードショートカット ＆ マウス操作一覧 \n", "h1")
+    shortcuts = [
+        ("F1", "取扱説明書・操作ガイドを開く"),
+        ("F5", "▶ 照合・遅延チェックを実行する"),
+        ("Esc", "実行中の処理（照合 または Excel展開）を安全に中止する"),
+        ("Ctrl + O", "① 注文品管理表ファイルを選択する"),
+        ("Ctrl + D", "② 注文書フォルダを選択する"),
+        ("Ctrl + S", "照合結果を「📊 Excelで直接開く」（新規ブック展開）"),
+        ("Alt + F4", "アプリケーションを終了する"),
+        ("行ダブルクリック", "照合詳細・アプリ内シートプレビュー画面を開く"),
+        ("行右クリック", "コンテキストメニュー（注文書参照／管理表参照／フォルダを開く／列幅調整）"),
+        ("列ヘッダー左クリック", "Excel風 列フィルター＆並べ替え（昇順・降順）メニューを開く"),
+        ("列ヘッダー境界ダブルクリック", "該当列の幅を表示文字長に合わせて自動フィットする"),
+        ("Shift + ホイール", "一覧表を左右にスムーズに横スクロールする"),
+        ("← / → キー", "一覧表を左右に横スクロールする（Shiftキー併用で高速移動）"),
+        ("セルにマウスホバー", "見切れている文字列の全文を吹き出しで確認する"),
+    ]
+    for key_name, key_desc in shortcuts:
+        txt4.insert(tk.END, f"・{key_name: <22} : {key_desc}\n", "body")
+    txt4.configure(state="disabled")
+
+    # -------------------------------------------------------------
+    # タブ5: よくある質問 (Q&A)・トラブルシューティング
+    # -------------------------------------------------------------
+    t5 = ttk.Frame(notebook, padding=6)
+    notebook.add(t5, text="  ⑤ ❓ よくある質問 (Q&A)  ")
+    txt5 = _create_scrollable_text(t5)
+
+    txt5.insert(tk.END, " よくある質問 (Q&A) と トラブルシューティング \n", "h1")
+
+    qa_list = [
+        (
+            "Q1. 注文品管理表をExcelで開いたままでも照合を実行できますか？",
+            "A. はい、まったく問題ありません。\n"
+            "本アプリはExcelファイルの一時的なメモリ読み込みを行うため、Excelで管理表を開いたまま作業していてもエラーにならず、そのまま照合を実行できます。"
+        ),
+        (
+            "Q2. 納期が注文書に書いてある日付と違っている行があります。なぜですか？",
+            "A. 注文品管理表のAH列（納期列）に確定納期が入力されているためです。\n"
+            "本アプリの仕様として、管理表の納期欄に有効な日付が記入されている場合は、管理表の納期を最優先で適用します。管理表側が空欄または「未定」等の文字列メモの場合は、注文書の納期が正しく参照されます。"
+        ),
+        (
+            "Q3. 注文書に納期が書かれていない（空欄）案件はどう判定されますか？",
+            "A. 注文書4行目に記載されている「注文日」から、設定された猶予日数（初期値: 7日）を加算した日付をみなし納期として自動計算します。\n"
+            "一覧表の納期欄にも「未記載 (2026-07-10注文+7日)」のように計算根拠が明記されます。"
+        ),
+        (
+            "Q4. Excelへの直接展開を実行した後、Excelを閉じるとどうなりますか？",
+            "A. 展開完了と同時にアプリは通常の待機状態に戻っていますので、Excelをいつ閉じてもアプリの動作には何の影響もありません。\n"
+            "保存が必要な場合は、Excel側で「名前を付けて保存」を行ってください。"
+        ),
+        (
+            "Q5. 特定のテスト案件や終了済み管理Noを一覧から非表示にしたいです。",
+            "A. 画面上部『④』の「🚫 除外する管理Noを設定・編集...」ボタンを開き、除外したい管理Noを改行区切りで入力（またはExcelからコピー＆ペースト）して適用してください。\n"
+            "再スキャンを行わなくても、現在表示中の一覧や集計カードから即座に除外されます。"
+        ),
+        (
+            "Q6. 表示される列が多すぎるので、必要な列だけに絞り込みたいです。",
+            "A. 一覧上部『👁 表示列の設定...』ボタンをクリックし、表示したい列にのみチェックを入れて「💾 適用して保存」を押してください。\n"
+            "次回アプリを起動した際も、保存した列構成が自動的に復元されます。"
+        ),
+        (
+            "Q7. 列の文字が見切れていて読めないときはどうすればいいですか？",
+            "A. 以下の方法で快適に確認できます:\n"
+            "1. セルにマウスカーソルを合わせると、吹き出し（ツールチップ）で全文が表示されます。\n"
+            "2. 下部の「📐 列幅自動調整」ボタンを押すと、表示中の文字長に合わせて列幅が一括で広がります。\n"
+            "3. 元の見やすい幅に戻したいときは、隣の「↺ 標準列幅に戻す」ボタンを押してください。"
+        ),
+        (
+            "Q8. 初回起動時にWindowsの青い警告画面（SmartScreen）が出ました。",
+            "A. 故障やウイルスではありません。以下の手順でそのまま実行してください:\n"
+            "1. 画面中央の文章下にある「詳細情報」という文字をクリックします。\n"
+            "2. 右下に現れる「実行」ボタンをクリックすると、アプリが正常に起動します（2回目以降は表示されません）。"
+        ),
+    ]
+
+    for q_text, a_text in qa_list:
+        txt5.insert(tk.END, f"■ {q_text}\n", "qa_q")
+        txt5.insert(tk.END, f"  {a_text}\n\n", "qa_a")
+
+    txt5.configure(state="disabled")
+
+    # 指定されたタブを選択
+    try:
+        notebook.select(min(max(0, initial_tab), 4))
+    except Exception:
+        notebook.select(0)
 
     btn_frame = tk.Frame(win, bg="#f1f5f9", padx=16, pady=8)
     btn_frame.pack(fill=tk.X, side=tk.BOTTOM)
-    ttk.Button(btn_frame, text="閉じる", style="Primary.TButton", command=win.destroy).pack(side=tk.RIGHT)
+    ttk.Button(btn_frame, text="閉じる (Esc)", style="Primary.TButton", command=win.destroy).pack(side=tk.RIGHT)
+    win.bind("<Escape>", lambda _e: win.destroy())
 
 
 def show_about(parent: tk.Tk | tk.Toplevel, icon_path: str | None = None):

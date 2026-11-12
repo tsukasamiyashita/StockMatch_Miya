@@ -25,6 +25,86 @@ from .date_utils import (
     is_instruction_matched,
 )
 
+# Excel展開用の各列の最小幅・最大幅の定義 (ColumnWidth: 半角文字数換算)
+# ・文字数が少ない列（製作数・単数・在庫数・管理No等）はオートフィルター▼でヘッダーが隠れない最小幅を確保
+# ・文字数が長くなりやすい列（製品詳細・仕様・不一致理由等）は広がりすぎて画面を圧迫しない最大幅に抑制
+EXCEL_COL_WIDTH_LIMITS = {
+    "status_badge": (20.0, 26.0),     # 総合判定 / 状態判定
+    "mismatch_reason": (28.0, 38.0),  # 不一致理由・照合診断 / 未検出診断内容
+    "due_date": (20.0, 26.0),         # 納期
+    "project_name": (14.0, 22.0),     # プロジェクト名
+    "order_no": (13.0, 16.0),         # 管理No
+    "ship_to": (14.0, 20.0),          # 出荷先
+    "line_name": (16.0, 24.0),        # 品名、ライン名等
+    "product_detail": (18.0, 32.0),   # 製品詳細
+    "prod_qty": (11.0, 13.0),         # 製作数
+    "drawing_no": (13.0, 18.0),       # 図面番号
+    "part_no": (12.0, 16.0),          # 品番
+    "item_name": (18.0, 28.0),        # 品名
+    "maker": (13.0, 20.0),            # メーカー
+    "unit_qty": (11.0, 13.0),         # 単数
+    "spec": (18.0, 28.0),             # 仕様
+    "supplier": (14.0, 20.0),         # 仕入先
+    "stock_qty": (11.0, 13.0),        # 在庫数
+    "order_date": (13.0, 16.0),       # 注文日
+}
+
+# Excel展開用のデータセル配置 (xlCenter: -4108, xlLeft: -4131)
+EXCEL_COL_ALIGNMENTS = {
+    "status_badge": -4108,    # 中央
+    "mismatch_reason": -4131, # 左
+    "due_date": -4108,        # 中央
+    "project_name": -4131,    # 左
+    "order_no": -4108,        # 中央
+    "ship_to": -4131,         # 左
+    "line_name": -4131,       # 左
+    "product_detail": -4131,  # 左
+    "prod_qty": -4108,        # 中央
+    "drawing_no": -4131,      # 左
+    "part_no": -4131,         # 左
+    "item_name": -4131,       # 左
+    "maker": -4131,           # 左
+    "unit_qty": -4108,        # 中央
+    "spec": -4131,            # 左
+    "supplier": -4131,        # 左
+    "stock_qty": -4108,       # 中央
+    "order_date": -4108,      # 中央
+}
+
+
+def format_excel_sheet_columns(ws, col_configs: list[tuple]):
+    """
+    Excelシートの各列に対して、AutoFit後の幅をベースに
+    ・文字やオートフィルター▼アイコンが隠れない最小幅を保証
+    ・広すぎる列（製品詳細・仕様・不一致理由等）が画面を破壊しない最大幅を制限
+    ・適切な配置（中央揃え・左揃え）を適用
+    """
+    try:
+        ws.Columns.AutoFit()
+        for idx, col_info in enumerate(col_configs, start=1):
+            col_id = col_info[0]
+            min_w, max_w = EXCEL_COL_WIDTH_LIMITS.get(col_id, (12.0, 30.0))
+            col_range = ws.Columns(idx)
+            try:
+                cur_w = float(col_range.ColumnWidth)
+            except Exception:
+                cur_w = min_w
+            # AutoFit後の幅に適度なマージン(+2.0)を加えつつ、[min_w, max_w] の範囲に収める
+            optimal_w = max(min_w, min(max_w, round(cur_w + 2.0, 1)))
+            col_range.ColumnWidth = optimal_w
+
+            # 2行目以降のデータ領域に適切な配置（中央／左）を適用
+            align = EXCEL_COL_ALIGNMENTS.get(col_id, -4131)
+            try:
+                row_count = ws.UsedRange.Rows.Count
+                if row_count > 1:
+                    data_col_rng = ws.Range(ws.Cells(2, idx), ws.Cells(row_count, idx))
+                    data_col_rng.HorizontalAlignment = align
+            except Exception:
+                pass
+    except Exception:
+        pass
+
 
 def configure_excel_page_setup(ws, title: str):
     """Excelシートに業務帳票としての最適な印刷設定（A4横・1ページ収まり・見出し行リピート）を適用"""
@@ -357,7 +437,7 @@ def export_to_excel_direct(
                 total_range.Borders(border_id).LineStyle = 1
                 total_range.Borders(border_id).Color = border_color
 
-        ws1.Columns.AutoFit()
+        format_excel_sheet_columns(ws1, COL_CONFIGS_MAIN)
         ws1.Range("A2").Select()
         excel.ActiveWindow.FreezePanes = True
         header_range_main.AutoFilter()
@@ -430,7 +510,7 @@ def export_to_excel_direct(
                 total_range2.Borders(border_id).LineStyle = 1
                 total_range2.Borders(border_id).Color = border_color
 
-        ws2.Columns.AutoFit()
+        format_excel_sheet_columns(ws2, COL_CONFIGS_MISSING)
         ws2.Range("A2").Select()
         excel.ActiveWindow.FreezePanes = True
         header_range_missing.AutoFilter()

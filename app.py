@@ -625,9 +625,11 @@ class StockMatchApp:
         menubar.add_cascade(label="参照(R)", menu=ref_menu)
 
         help_menu = tk.Menu(menubar, tearoff=0)
-        help_menu.add_command(label="使い方・操作ガイド(H)...", command=lambda: self._show_help_guide(tab_index=0), accelerator="F1")
-        help_menu.add_command(label="照合・判定ロジックの詳細...", command=lambda: self._show_help_guide(tab_index=1))
-        help_menu.add_command(label="ショートカット・便利機能一覧...", command=lambda: self._show_help_guide(tab_index=2))
+        help_menu.add_command(label="使い方・基本操作手順(H)...", command=lambda: self._show_help_guide(tab_index=0), accelerator="F1")
+        help_menu.add_command(label="照合・判定ロジックと色分けの詳細...", command=lambda: self._show_help_guide(tab_index=1))
+        help_menu.add_command(label="除外設定・フィルタ・設定ファイル管理...", command=lambda: self._show_help_guide(tab_index=2))
+        help_menu.add_command(label="便利機能・ショートカット・マウス操作...", command=lambda: self._show_help_guide(tab_index=3))
+        help_menu.add_command(label="よくある質問 (Q&A)・トラブルシューティング...", command=lambda: self._show_help_guide(tab_index=4))
         help_menu.add_separator()
         help_menu.add_command(label="バージョン情報...", command=self._show_about)
         menubar.add_cascade(label="ヘルプ(H)", menu=help_menu)
@@ -2235,11 +2237,26 @@ class StockMatchApp:
         self.status_var.set("照合処理の中止を要求しました。安全に中断しています...")
         self.progress_text_var.set("処理を中止しています...")
 
+    def _reset_excel_ui_state(self):
+        """Excel展開処理完了時・中止時のUIコントロール状態を正常に復帰する"""
+        self.is_excel_running = False
+        self.excel_open_btn.configure(state=tk.NORMAL, text="📊 Excelで直接開く")
+        self.excel_cancel_btn.configure(state=tk.DISABLED, text="⏹ 中止")
+        self.cancel_btn.configure(state=tk.DISABLED, text="⏹ 中止 (Esc)")
+        self.run_btn.configure(state=tk.NORMAL, text="▶ 照合・遅延チェック実行 (F5)")
+
     def cancel_excel_open(self):
         """実行中のExcel直接展開処理を安全に中断する"""
         if not self.is_excel_running:
             return
         self.excel_cancel_event.set()
+        th = getattr(self, "_excel_thread", None)
+        if th is not None and not th.is_alive():
+            self._reset_excel_ui_state()
+            self.progress_var.set(0.0)
+            self.progress_text_var.set("待機中")
+            self.status_var.set("Excel展開処理が終了しました。")
+            return
         self.excel_cancel_btn.configure(state=tk.DISABLED, text="中止中...")
         self.cancel_btn.configure(state=tk.DISABLED, text="中止中...")
         self.status_var.set("Excel展開処理の中止を要求しました。安全に中断しています...")
@@ -2909,21 +2926,33 @@ class StockMatchApp:
         inst_mode = self.instruction_filter_mode.get()
 
         def _worker():
-            ok, msg = export_to_excel_direct(
-                analyzed_records=self.analyzed_records,
-                missing_order_records=self.missing_order_records,
-                excluded_nos=excluded_nos,
-                base_date=base_date,
-                exclude_months=exclude_months,
-                inst_mode=inst_mode,
-                cancel_event=self.excel_cancel_event,
-                progress_queue=self.ui_queue,
-            )
-            self.ui_queue.put(("EXCEL_DONE" if ok else "EXCEL_ERROR", msg))
+            try:
+                ok, msg = export_to_excel_direct(
+                    analyzed_records=self.analyzed_records,
+                    missing_order_records=self.missing_order_records,
+                    excluded_nos=excluded_nos,
+                    base_date=base_date,
+                    exclude_months=exclude_months,
+                    inst_mode=inst_mode,
+                    cancel_event=self.excel_cancel_event,
+                    progress_queue=self.ui_queue,
+                )
+                if self.excel_cancel_event.is_set():
+                    self.ui_queue.put(("EXCEL_OPENED_CANCELLED", msg))
+                elif ok:
+                    self.ui_queue.put(("EXCEL_OPENED_SUCCESS", msg))
+                else:
+                    self.ui_queue.put(("EXCEL_OPENED_ERROR", msg))
+            except Exception as e:
+                if self.excel_cancel_event.is_set():
+                    self.ui_queue.put(("EXCEL_OPENED_CANCELLED", str(e)))
+                else:
+                    self.ui_queue.put(("EXCEL_OPENED_ERROR", str(e)))
 
-        th = threading.Thread(target=_worker, daemon=True)
-        th.start()
+        self._excel_thread = threading.Thread(target=_worker, daemon=True)
+        self._excel_thread.start()
         self.root.after(50, self._poll_excel_queue)
+
     def _poll_excel_queue(self):
         try:
             while True:
@@ -2933,12 +2962,8 @@ class StockMatchApp:
                     self.progress_var.set(pct)
                     self.progress_text_var.set(text)
                     self.status_var.set(f"実行中: {text}")
-                elif msg_type == "EXCEL_OPENED_SUCCESS":
-                    self.is_excel_running = False
-                    self.excel_open_btn.configure(state=tk.NORMAL, text="📊 Excelで直接開く")
-                    self.excel_cancel_btn.configure(state=tk.DISABLED, text="⏹ 中止")
-                    self.cancel_btn.configure(state=tk.DISABLED, text="⏹ 中止 (Esc)")
-                    self.run_btn.configure(state=tk.NORMAL, text="▶ 照合・遅延チェック実行 (F5)")
+                elif msg_type in ("EXCEL_OPENED_SUCCESS", "EXCEL_DONE"):
+                    self._reset_excel_ui_state()
                     self.progress_var.set(100.0)
                     self.progress_text_var.set("Excel展開完了！")
                     self.status_var.set("新規Excelブックに照合結果を展開しました（未保存の新規ブックとして開いています）。")
@@ -2947,27 +2972,19 @@ class StockMatchApp:
                         "一時ファイルを作成せず、Excelの新規ブックとして直接展開しました。\n\n"
                         "・シート1: 納期超過・照合結果\n"
                         "・シート2: 注文書未検出(管理表のみ)\n"
-                        "※アプリと同じ色分け・書式・オートフィルターが設定されています。\n"
+                        "※アプリと同じ色分け・書式・オートフィルター・最適列幅が設定されています。\n"
                         "保存が必要な場合は、Excel側で「名前を付けて保存」を行ってください。",
                     )
                     return
-                elif msg_type == "EXCEL_OPENED_CANCELLED":
-                    self.is_excel_running = False
-                    self.excel_open_btn.configure(state=tk.NORMAL, text="📊 Excelで直接開く")
-                    self.excel_cancel_btn.configure(state=tk.DISABLED, text="⏹ 中止")
-                    self.cancel_btn.configure(state=tk.DISABLED, text="⏹ 中止 (Esc)")
-                    self.run_btn.configure(state=tk.NORMAL, text="▶ 照合・遅延チェック実行 (F5)")
+                elif msg_type in ("EXCEL_OPENED_CANCELLED", "CANCELLED"):
+                    self._reset_excel_ui_state()
                     self.progress_var.set(0.0)
                     self.progress_text_var.set("Excel展開が中止されました")
                     self.status_var.set("ユーザーによってExcel直接展開処理が中止されました。")
                     messagebox.showinfo("処理中止", "Excel直接展開処理を中止しました。")
                     return
-                elif msg_type == "EXCEL_OPENED_ERROR":
-                    self.is_excel_running = False
-                    self.excel_open_btn.configure(state=tk.NORMAL, text="📊 Excelで直接開く")
-                    self.excel_cancel_btn.configure(state=tk.DISABLED, text="⏹ 中止")
-                    self.cancel_btn.configure(state=tk.DISABLED, text="⏹ 中止 (Esc)")
-                    self.run_btn.configure(state=tk.NORMAL, text="▶ 照合・遅延チェック実行 (F5)")
+                elif msg_type in ("EXCEL_OPENED_ERROR", "EXCEL_ERROR", "ERROR"):
+                    self._reset_excel_ui_state()
                     self.progress_var.set(0.0)
                     self.progress_text_var.set("Excel展開エラー")
                     self.status_var.set(f"Excel展開エラー: {payload}")
@@ -2980,6 +2997,35 @@ class StockMatchApp:
             pass
 
         if self.is_excel_running:
+            # スレッド終了後の自己修復ガード
+            th = getattr(self, "_excel_thread", None)
+            if th is not None and not th.is_alive():
+                while not self.ui_queue.empty():
+                    try:
+                        m_type, p_load = self.ui_queue.get_nowait()
+                        if m_type in ("EXCEL_OPENED_SUCCESS", "EXCEL_DONE"):
+                            self._reset_excel_ui_state()
+                            self.progress_var.set(100.0)
+                            self.progress_text_var.set("Excel展開完了！")
+                            self.status_var.set("新規Excelブックに照合結果を展開しました。")
+                            return
+                        elif m_type in ("EXCEL_OPENED_CANCELLED", "CANCELLED"):
+                            self._reset_excel_ui_state()
+                            self.progress_var.set(0.0)
+                            self.progress_text_var.set("Excel展開が中止されました")
+                            return
+                        elif m_type in ("EXCEL_OPENED_ERROR", "EXCEL_ERROR"):
+                            self._reset_excel_ui_state()
+                            self.progress_var.set(0.0)
+                            self.progress_text_var.set("Excel展開エラー")
+                            return
+                    except queue.Empty:
+                        break
+                self._reset_excel_ui_state()
+                self.progress_var.set(100.0)
+                self.progress_text_var.set("Excel展開完了！")
+                return
+
             self.root.after(50, self._poll_excel_queue)
 
 
