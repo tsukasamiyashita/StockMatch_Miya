@@ -7,7 +7,23 @@ import re
 import calendar
 import datetime
 import unicodedata
-import pandas as pd
+try:
+    import pandas as pd
+    _has_pandas = True
+except ImportError:
+    pd = None
+    _has_pandas = False
+
+
+def is_na(val) -> bool:
+    """値が None または NaN/NaT であるかを安全に判定"""
+    if val is None:
+        return True
+    if _has_pandas and pd is not None:
+        return bool(pd.isna(val))
+    if isinstance(val, float) and val != val:
+        return True
+    return str(val).strip().lower() in ("nan", "nat")
 
 
 class AnalysisCancelledException(Exception):
@@ -89,7 +105,7 @@ def parse_flexible_date(
     Excelの生データ（日付型、数値シリアル、文字列）から柔軟かつ高精度に datetime.date を復元する。
     上旬・中旬・下旬・月末、和暦表記（令和/R）、年末年始の年跨ぎ、月日のみ表記を自動補完。
     """
-    if val is None or pd.isna(val):
+    if val is None or is_na(val):
         return None
 
     if isinstance(val, datetime.datetime):
@@ -341,7 +357,7 @@ def is_zero_quantity(s: str) -> bool:
 
 def clean_cell_str(val) -> str:
     """セルの値を文字列化し、不要な空白や改行を除去"""
-    if val is None or pd.isna(val):
+    if val is None or is_na(val):
         return ""
     s = str(val).strip()
     return "" if s.lower() in ("none", "nan", "nat") else s

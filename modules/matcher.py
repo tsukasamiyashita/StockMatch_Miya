@@ -8,7 +8,10 @@ import re
 import datetime
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import openpyxl
+try:
+    import openpyxl
+except ImportError:
+    openpyxl = None
 
 try:
     from scipy.optimize import linear_sum_assignment  # type: ignore
@@ -357,17 +360,13 @@ def parse_management_book(
             invoice_date = parse_flexible_date(invoice_raw, default_year=inferred_year, allow_period=False)
             invoice_filled = invoice_date is not None or is_filled_confirmation(invoice_raw)
 
-            # 注文品管理表の納期(AH列)の日付型判定:
-            # セル値が datetime.date または datetime.datetime 型である場合のみ有効な「日付型」と判定
-            # 文字列型(メモ・未定等)や非日付型の場合は無視(False)とする
-            mgmt_due_is_date_type = False
-            mgmt_due_date = None
-            if isinstance(due_raw, datetime.datetime):
-                mgmt_due_date = due_raw.date()
-                mgmt_due_is_date_type = True
-            elif isinstance(due_raw, datetime.date):
-                mgmt_due_date = due_raw
-                mgmt_due_is_date_type = True
+            # 注文品管理表の納期(AH列)の日付パースおよび判定:
+            # セル値が datetime.datetime / datetime.date 型はもちろん、
+            # 文字列形式（例: "2026-07-30 00:00:00", "2026-07-30", "2026/07/30"）や
+            # エクセルのシリアル値であっても parse_flexible_date により日付型(datetime.date)として復元する。
+            # 「未定」「納期30〜40日間」「8500円/本」「-」などのメモ・非日付文字列・空欄の場合は None となる。
+            mgmt_due_date = parse_flexible_date(due_raw, default_year=inferred_year, allow_period=True)
+            mgmt_due_is_date_type = mgmt_due_date is not None
 
             project_name_str = clean_cell_str(project_name_val)
             drawing_str = clean_cell_str(drawing_val)
@@ -1455,18 +1454,27 @@ def match_and_evaluate(
                     order_dt = matched_mgmt.get("order_date")
 
                 is_fallback = False
-                # 注文品管理表の納期(AH列)に納期が記入してあり、かつ型が日付型である場合は、
-                # 注文書に書かれている納期ではなく注文品管理表の納期を参照する。
-                # 納期の型が日付型ではない場合(文字列・メモ・空欄等)は無視して、注文書の納期を参照する。
-                if matched_mgmt and matched_mgmt.get("mgmt_due_is_date_type") and matched_mgmt.get("mgmt_due_date"):
-                    final_due = matched_mgmt.get("mgmt_due_date")
+                # 納期(AH列)の優先判定:
+                # 注文品管理表に書かれていれば最優先して注文品管理表の納期を参照する。
+                # 注文品管理表の一致明細に有効な納期(日付)が存在する場合は最優先で採用。
+                # 管理表に有効な納期がない場合(未記載や非日付メモ等)、注文書の納期を参照する。
+                # どちらにも納期がない場合、注文日(注文書優先、なければ管理表)＋猶予日数でフォールバック計算。
+                mgmt_due = matched_mgmt.get("mgmt_due_date") if matched_mgmt else None
+                if not mgmt_due and matched_mgmt and matched_mgmt.get("mgmt_due_raw"):
+                    mgmt_due = parse_flexible_date(matched_mgmt.get("mgmt_due_raw"), allow_period=True)
+
+                if mgmt_due:
+                    final_due = mgmt_due
+                    is_fallback = False
                 elif order_due:
                     final_due = order_due
+                    is_fallback = False
                 elif order_dt:
                     final_due = order_dt + datetime.timedelta(days=grace_days)
                     is_fallback = True
                 else:
                     final_due = None
+                    is_fallback = False
 
                 if r_idx in matched_pairs:
                     c_idx, sc = matched_pairs[r_idx]
@@ -1602,8 +1610,8 @@ def match_and_evaluate(
             "order_date_str": m["order_date"].strftime("%Y-%m-%d") if m.get("order_date") else "-",
             "model_spec": m.get("model_spec", ""),
             "qty": m.get("qty", ""),
-            "due_date": m.get("mgmt_due_raw") or (m["mgmt_due_date"].strftime("%Y-%m-%d") if m.get("mgmt_due_date") else "-"),
-            "due_date_str": m.get("mgmt_due_raw") or (m["mgmt_due_date"].strftime("%Y-%m-%d") if m.get("mgmt_due_date") else "-"),
+            "due_date": (m["mgmt_due_date"].strftime("%Y-%m-%d") if m.get("mgmt_due_date") else (m.get("mgmt_due_raw") or "-")),
+            "due_date_str": (m["mgmt_due_date"].strftime("%Y-%m-%d") if m.get("mgmt_due_date") else (m.get("mgmt_due_raw") or "-")),
             "actual_date": m["actual_date"].strftime("%Y-%m-%d") if m.get("actual_date") else (m.get("actual_raw") or "未入力"),
             "invoice_date": m["invoice_date"].strftime("%Y-%m-%d") if m.get("invoice_date") else (m.get("invoice_raw") or "未入力"),
             "person": m.get("person", ""),
