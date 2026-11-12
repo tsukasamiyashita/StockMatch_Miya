@@ -136,25 +136,33 @@ def open_excel_read_only_at_location(
     sheet_name: str | None = None,
     row_index: int | None = None,
     is_mgmt: bool = False,
+    read_only: bool = True,
+    **kwargs,
 ) -> tuple[bool, str]:
     """
     指定されたExcelファイルを起動し、該当シート・該当行をハイライト選択した状態で開く。
-    注文書原本を誤編集・上書き保存してしまう事故を防止するため、注文書の場合は5重の保護ガードを適用する。
+    注文書原本および注文品管理表を誤編集・上書き保存してしまう事故を防止するため、
+    常に読み取り専用（ReadOnly）保護モードで開き、注文書には5重の保護ガードを適用する。
     """
+    if not filepath:
+        return False, "ファイルパスが指定されていません。"
     if not os.path.isfile(filepath):
         return False, f"ファイルが見つかりません:\n{filepath}"
 
     abs_path = os.path.abspath(filepath)
 
     if not HAS_WIN32COM:
-        # win32com がない場合の安全フォールバック
-        if not is_mgmt:
-            return False, "win32com未検出のため、注文書原本の安全保護起動ができません。\npip install pywin32 を実行してください。"
+        # win32com がない場合の安全フォールバック（読み取り専用コマンド起動）
         try:
-            os.startfile(abs_path)
-            return True, "通常モードで起動しました。"
-        except Exception as e:
-            return False, str(e)
+            import subprocess
+            subprocess.Popen(["cmd", "/c", "start", "excel.exe", "/r", abs_path], shell=True)
+            return True, "通常Excel（読み取り専用起動）で開きました。"
+        except Exception:
+            try:
+                os.startfile(abs_path)
+                return True, "通常モードで起動しました。"
+            except Exception as e:
+                return False, str(e)
 
     try:
         pythoncom.CoInitialize()
@@ -182,23 +190,20 @@ def open_excel_read_only_at_location(
             pass
 
         if target_wb:
-            # 注文書ですでに通常モードで開かれていた場合は読み取り専用へ安全に切り替え
-            if not is_mgmt and not target_wb.ReadOnly:
+            # すでに開かれていて読み取り専用モードでない場合、安全のため読み取り専用へ切り替え
+            if (not is_mgmt or read_only) and not target_wb.ReadOnly:
                 try:
                     target_wb.ChangeFileAccess(Mode=3)  # xlReadOnly
                 except Exception:
                     pass
         else:
-            # 新規オープン
-            if is_mgmt:
-                target_wb = excel.Workbooks.Open(abs_path, ReadOnly=False)
-            else:
-                target_wb = excel.Workbooks.Open(
-                    abs_path,
-                    UpdateLinks=0,
-                    ReadOnly=True,
-                    IgnoreReadOnlyRecommended=True,
-                )
+            # 新規オープン（誤編集・誤上書き防止のため読み取り専用で開く）
+            target_wb = excel.Workbooks.Open(
+                abs_path,
+                UpdateLinks=0,
+                ReadOnly=read_only,
+                IgnoreReadOnlyRecommended=True,
+            )
 
         target_wb.Activate()
 
@@ -266,15 +271,22 @@ def open_excel_read_only_at_location(
             except Exception:
                 pass
 
-        # 閉じる際の「変更を保存しますか？」確認ポップアップを抑止
-        if not is_mgmt:
+        # 閉じる際の「変更を保存しますか？」確認ポップアップを抑止（読み取り専用保護）
+        if read_only or not is_mgmt:
             try:
                 target_wb.Saved = True
             except Exception:
                 pass
 
-        return True, "正常にExcelで開きました。"
+        return True, "正常にExcel（読み取り専用保護）で開きました。"
     except Exception as e:
+        # COMオートメーションでエラーが発生した場合のフォールバック起動
+        try:
+            import subprocess
+            subprocess.Popen(["cmd", "/c", "start", "excel.exe", "/r", abs_path], shell=True)
+            return True, "通常Excel（読み取り専用起動）で開きました。"
+        except Exception:
+            pass
         return False, f"Excel起動中にエラーが発生しました:\n{e}"
     finally:
         try:

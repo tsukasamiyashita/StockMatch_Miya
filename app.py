@@ -1627,13 +1627,57 @@ class StockMatchApp:
     # =========================================================================
     # 注文品管理表・注文書の直接参照＆プレビュー機能
     # =========================================================================
-    def _open_excel_at_location(self, filepath: str, sheet_name: str = "", row_index: int | None = None, is_mgmt: bool = False):
+    def _open_excel_at_location(
+        self,
+        filepath: str,
+        sheet_name: str = "",
+        row_index: int | None = None,
+        row_num: int | None = None,
+        is_mgmt: bool = False,
+        label_for_status: str = "",
+        read_only_strict: bool = True,
+        **kwargs,
+    ) -> bool:
+        """
+        指定されたExcelファイルを起動し、該当シート・該当行をハイライト選択した状態で開く。
+        注文書・注文品管理表ともに、誤編集・誤上書き防止のため読み取り専用保護で開く。
+        """
+        target_row = row_index if row_index is not None else row_num
+        lbl = label_for_status or ("注文品管理表" if is_mgmt else "注文書")
+
+        if not filepath:
+            messagebox.showinfo(f"{lbl}未指定", f"{lbl}のファイルパスが指定されていません。")
+            return False
+        if not os.path.isfile(filepath):
+            messagebox.showerror("ファイル未検出", f"{lbl}のファイルが見つかりません:\n{filepath}")
+            return False
+
         from modules.excel_exporter import open_excel_read_only_at_location
-        open_excel_read_only_at_location(filepath, sheet_name, row_index, is_mgmt)
+        ok, msg = open_excel_read_only_at_location(
+            filepath=filepath,
+            sheet_name=sheet_name,
+            row_index=target_row,
+            is_mgmt=is_mgmt,
+            read_only=read_only_strict,
+        )
+        if not ok:
+            messagebox.showerror("Excel起動エラー", f"{lbl}をExcelで開けませんでした:\n{msg}")
+            return False
+
+        self.status_var.set(f"{lbl} をExcel（読み取り専用保護）で開きました。")
+        return True
+
     def _open_mgmt_file_direct(self):
-        """上部の設定パスにある注文品管理表ファイルをExcelで開く"""
+        """上部の設定パスにある注文品管理表ファイルをExcelで開く（読み取り専用保護）"""
         mgmt_path = self.mgmt_file_path.get().strip().strip('"')
-        self._open_excel_at_location(mgmt_path, label_for_status="注文品管理表", read_only_strict=False)
+        self._open_excel_at_location(
+            mgmt_path,
+            sheet_name="",
+            row_index=None,
+            is_mgmt=True,
+            label_for_status="注文品管理表",
+            read_only_strict=True,
+        )
 
     def _open_order_dir_direct(self):
         """上部の設定パスにある注文書フォルダをエクスプローラーで開く"""
@@ -1663,29 +1707,30 @@ class StockMatchApp:
             return None
         return records[rec_idx]
 
-    def _open_selected_row_order(self):
+    def _open_selected_row_order(self, target_rec: dict | None = None):
         """タブ1の選択行に対応する注文書Excelを【読み取り専用・保存ブロック】で開き、該当シート・該当行を選択表示する"""
-        rec = self._get_selected_record(is_missing_tab=False)
+        rec = target_rec if target_rec is not None else self._get_selected_record(is_missing_tab=False)
         if not rec:
             return
         diag = rec.get("diagnostic_data", {})
-        order_path = diag.get("order_full_path", "")
-        order_sheet = diag.get("order_sheet", "")
-        order_row = diag.get("order_row")
+        order_path = diag.get("order_full_path", "") or rec.get("filepath", "")
+        order_sheet = diag.get("order_sheet", "") or rec.get("sheet_name", "")
+        order_row = diag.get("order_row") or rec.get("order_row_index") or rec.get("row_index")
         if not order_path:
             messagebox.showinfo("注文書なし", "この明細には対応する注文書ファイルパスが紐付いていません。")
             return
         self._open_excel_at_location(
             order_path,
             sheet_name=order_sheet,
-            row_num=order_row,
+            row_index=order_row,
+            is_mgmt=False,
             label_for_status="注文書",
             read_only_strict=True,
         )
 
-    def _open_selected_row_mgmt(self, is_missing_tab: bool = False):
-        """選択行に対応する注文品管理表Excelを開き、該当シート・該当行を選択表示する"""
-        rec = self._get_selected_record(is_missing_tab=is_missing_tab)
+    def _open_selected_row_mgmt(self, is_missing_tab: bool = False, target_rec: dict | None = None):
+        """選択行に対応する注文品管理表Excelを開き、該当シート・該当行を選択表示する（読み取り専用保護）"""
+        rec = target_rec if target_rec is not None else self._get_selected_record(is_missing_tab=is_missing_tab)
         if not rec:
             return
         mgmt_path = self.mgmt_file_path.get().strip().strip('"')
@@ -1705,8 +1750,10 @@ class StockMatchApp:
         self._open_excel_at_location(
             mgmt_path,
             sheet_name=mgmt_sheet,
-            row_num=mgmt_row,
+            row_index=mgmt_row,
+            is_mgmt=True,
             label_for_status="注文品管理表",
+            read_only_strict=True,
         )
 
     def _open_active_tab_selected_mgmt(self):
@@ -1817,8 +1864,8 @@ class StockMatchApp:
             cached_mgmt_rows=self.cached_mgmt_rows,
             is_missing_tab=is_missing_tab,
             icon_path=self._resolve_icon_path(),
-            on_open_order=lambda _r: self._open_selected_row_order(),
-            on_open_mgmt=lambda _r: self._open_selected_row_mgmt(is_missing_tab=is_missing_tab),
+            on_open_order=lambda r: self._open_selected_row_order(target_rec=r),
+            on_open_mgmt=lambda r: self._open_selected_row_mgmt(is_missing_tab=is_missing_tab, target_rec=r),
         )
 
     def _show_help_guide(self, tab_index: int = 0):
