@@ -8,7 +8,11 @@ import re
 import unicodedata
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
-import openpyxl
+import tkinter.font as tkfont
+try:
+    import openpyxl
+except ImportError:
+    openpyxl = None
 
 from .constants import APP_NAME, APP_VERSION, APP_TITLE, DEFAULT_VISIBLE_COLUMNS_MAIN
 from .date_utils import parse_lines_to_order_nos, extract_8digit_no
@@ -735,12 +739,12 @@ def _build_sheet_preview_tree(parent, filepath: str, sheet_name: str, target_row
     col_ids = ["row_no"] + [f"c{i}" for i in range(1, max_preview_cols + 1)]
     tree = ttk.Treeview(tbl_frame, columns=col_ids, show="headings", selectmode="browse")
     tree.heading("row_no", text="行")
-    tree.column("row_no", width=55, anchor="center")
+    tree.column("row_no", width=65, minwidth=55, anchor="center", stretch=False)
 
     for i in range(1, max_preview_cols + 1):
         col_letter = chr(64 + i)
         tree.heading(f"c{i}", text=f"{col_letter}列")
-        tree.column(f"c{i}", width=110, anchor="w")
+        tree.column(f"c{i}", width=125, minwidth=80, anchor="w", stretch=False)
 
     tree.tag_configure("TARGET_ROW", background="#fef08a", foreground="#713f12")
     tree.tag_configure("HEADER_ROW", background="#e2e8f0", foreground="#0f172a")
@@ -748,6 +752,7 @@ def _build_sheet_preview_tree(parent, filepath: str, sheet_name: str, target_row
     vsb = ttk.Scrollbar(tbl_frame, orient="vertical", command=tree.yview)
     hsb = ttk.Scrollbar(tbl_frame, orient="horizontal", command=tree.xview)
     tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+    tree.bind("<Shift-MouseWheel>", lambda e: (tree.xview_scroll(-4 if e.delta > 0 else 4, "units"), "break")[1])
 
     tree.grid(row=0, column=0, sticky="nsew")
     vsb.grid(row=0, column=1, sticky="ns")
@@ -821,7 +826,7 @@ def _build_mgmt_preview_tree(parent, cached_mgmt_rows: list[dict], order_no: str
     ]
     for cid, text, width, anchor in col_defs:
         tree.heading(cid, text=text)
-        tree.column(cid, width=width, anchor=anchor)
+        tree.column(cid, width=width, minwidth=65, anchor=anchor, stretch=False)
 
     tree.tag_configure("TARGET_ROW", background="#fef08a", foreground="#713f12")
     tree.tag_configure("NORMAL_ROW", background="#ffffff", foreground="#334155")
@@ -829,6 +834,7 @@ def _build_mgmt_preview_tree(parent, cached_mgmt_rows: list[dict], order_no: str
     vsb = ttk.Scrollbar(tbl_frame, orient="vertical", command=tree.yview)
     hsb = ttk.Scrollbar(tbl_frame, orient="horizontal", command=tree.xview)
     tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+    tree.bind("<Shift-MouseWheel>", lambda e: (tree.xview_scroll(-4 if e.delta > 0 else 4, "units"), "break")[1])
 
     tree.grid(row=0, column=0, sticky="nsew")
     vsb.grid(row=0, column=1, sticky="ns")
@@ -1007,3 +1013,231 @@ def show_about(parent: tk.Tk | tk.Toplevel, icon_path: str | None = None):
         "・納期AH列優先: 管理表の確定納期を最優先参照（日付型自動判定）\n"
     )
     messagebox.showinfo("バージョン情報", about_text, parent=parent)
+
+
+class TreeviewCellTooltip:
+    """
+    Treeviewの各セルにマウスを合わせた際に、見切れている文字を含めた完全な内容を
+    吹き出し（ツールチップ）でポップアップ表示するクラス
+    """
+
+    def __init__(self, tree: ttk.Treeview, col_titles: dict[str, str], delay_ms: int = 350):
+        self.tree = tree
+        self.col_titles = col_titles
+        self.delay_ms = delay_ms
+        self.tip_window = None
+        self.after_id = None
+        self.current_cell = None
+
+        self.tree.bind("<Motion>", self._on_motion, add="+")
+        self.tree.bind("<Leave>", self._on_leave, add="+")
+        self.tree.bind("<ButtonPress>", self._on_button_press, add="+")
+        self.tree.bind("<MouseWheel>", self._on_leave, add="+")
+
+    def _on_motion(self, event):
+        item_id = self.tree.identify_row(event.y)
+        col_id = self.tree.identify_column(event.x)
+
+        if not item_id or not col_id:
+            self._cancel_timer()
+            self._hide_tooltip()
+            self.current_cell = None
+            return
+
+        cell_key = (item_id, col_id)
+        if cell_key == self.current_cell:
+            return
+
+        self._cancel_timer()
+        self._hide_tooltip()
+        self.current_cell = cell_key
+
+        x_root = event.x_root
+        y_root = event.y_root
+        self.after_id = self.tree.after(
+            self.delay_ms, lambda: self._show_tooltip(item_id, col_id, x_root, y_root)
+        )
+
+    def _on_leave(self, event=None):
+        self._cancel_timer()
+        self._hide_tooltip()
+        self.current_cell = None
+
+    def _on_button_press(self, event=None):
+        self._cancel_timer()
+        self._hide_tooltip()
+
+    def _cancel_timer(self):
+        if self.after_id:
+            try:
+                self.tree.after_cancel(self.after_id)
+            except Exception:
+                pass
+            self.after_id = None
+
+    def _hide_tooltip(self):
+        if self.tip_window:
+            try:
+                self.tip_window.destroy()
+            except Exception:
+                pass
+            self.tip_window = None
+
+    def _show_tooltip(self, item_id: str, col_id: str, x: int, y: int):
+        self.after_id = None
+        if not self.tree.exists(item_id):
+            return
+
+        try:
+            col_index = int(col_id.replace("#", "")) - 1
+        except Exception:
+            return
+
+        all_columns = list(self.tree.cget("columns"))
+        columns = self.tree.cget("displaycolumns")
+        if not columns or columns == ("#all",) or columns == "#all":
+            columns = all_columns
+        elif isinstance(columns, str):
+            columns = columns.split()
+        else:
+            columns = list(columns)
+
+        if col_index < 0 or col_index >= len(columns):
+            return
+
+        target_col_key = columns[col_index]
+        raw_idx = all_columns.index(target_col_key) if target_col_key in all_columns else col_index
+        item_values = self.tree.item(item_id, "values")
+        if not item_values or raw_idx >= len(item_values):
+            return
+
+        cell_val = str(item_values[raw_idx] or "").strip()
+        if not cell_val or cell_val in ("-", "(空欄)", "(空白)", "なし"):
+            return
+
+        col_name = self.col_titles.get(target_col_key, target_col_key)
+
+        self._hide_tooltip()
+        self.tip_window = tw = tk.Toplevel(self.tree)
+        tw.wm_overrideredirect(True)
+        try:
+            tw.attributes("-topmost", True)
+        except Exception:
+            pass
+
+        frame = tk.Frame(
+            tw,
+            bg="#1e293b",
+            relief=tk.SOLID,
+            bd=1,
+            highlightbackground="#475569",
+            highlightthickness=1,
+        )
+        frame.pack(fill=tk.BOTH, expand=True)
+
+        header_lbl = tk.Label(
+            frame,
+            text=f"【{col_name}】",
+            font=("Meiryo UI", 8, "bold"),
+            bg="#1e293b",
+            fg="#94a3b8",
+            anchor="w",
+        )
+        header_lbl.pack(fill=tk.X, padx=8, pady=(5, 1))
+
+        body_lbl = tk.Label(
+            frame,
+            text=cell_val,
+            font=("Meiryo UI", 9),
+            bg="#1e293b",
+            fg="#f8fafc",
+            justify=tk.LEFT,
+            wraplength=520,
+            anchor="w",
+        )
+        body_lbl.pack(fill=tk.BOTH, padx=8, pady=(0, 6))
+
+        tw.update_idletasks()
+        req_w = tw.winfo_reqwidth()
+        req_h = tw.winfo_reqheight()
+
+        screen_w = tw.winfo_screenwidth()
+        screen_h = tw.winfo_screenheight()
+
+        pos_x = x + 16
+        pos_y = y + 20
+        if pos_x + req_w > screen_w - 10:
+            pos_x = screen_w - req_w - 10
+        if pos_y + req_h > screen_h - 10:
+            pos_y = y - req_h - 10
+
+        tw.wm_geometry(f"+{max(0, pos_x)}+{max(0, pos_y)}")
+
+
+def autofit_treeview_columns(
+    tree: ttk.Treeview,
+    col_configs: list,
+    col_titles: dict[str, str],
+    max_sample_rows: int = 200,
+    min_width: int = 85,
+    max_width: int = 450,
+):
+    """
+    Treeviewに表示されているテキストの最長文字幅、および各列の推奨幅・ヘッダー文字幅に合わせて
+    すべての列の幅を自動的に最適フィット（オートフィット）させる。
+    列が小さくなりすぎないよう、各列の初期推奨幅を下限基準として保証し、stretch=Falseを維持する。
+    """
+    try:
+        font_name = "Meiryo UI"
+        font_size = 9
+        data_font = tkfont.Font(family=font_name, size=font_size)
+        heading_font = tkfont.Font(family=font_name, size=font_size, weight="bold")
+    except Exception:
+        data_font = None
+        heading_font = None
+
+    all_items = tree.get_children()
+    sample_items = all_items[:max_sample_rows]
+
+    all_cols = list(tree.cget("columns"))
+    display_cols = tree.cget("displaycolumns")
+    if not display_cols or display_cols == ("#all",) or display_cols == "#all":
+        display_cols = all_cols
+    elif isinstance(display_cols, str):
+        display_cols = display_cols.split()
+    else:
+        display_cols = list(display_cols)
+
+    col_index_map = {col_id: idx for idx, col_id in enumerate(all_cols)}
+    default_width_map = {c[0]: c[2] for c in col_configs}
+    anchor_map = {c[0]: c[3] for c in col_configs}
+
+    for col_id in display_cols:
+        col_title = col_titles.get(col_id, col_id)
+        default_w = default_width_map.get(col_id, min_width)
+        anchor = anchor_map.get(col_id, "w")
+
+        if heading_font:
+            title_w = heading_font.measure(col_title) + 44
+        else:
+            title_w = len(col_title) * 14 + 44
+
+        max_w = max(title_w, default_w)
+        raw_idx = col_index_map.get(col_id)
+        if raw_idx is not None:
+            for item in sample_items:
+                vals = tree.item(item, "values")
+                if vals and raw_idx < len(vals):
+                    val_str = str(vals[raw_idx] or "").strip()
+                    if val_str:
+                        for line in val_str.split("\n"):
+                            line_str = line.strip()
+                            if data_font:
+                                w = data_font.measure(line_str) + 30
+                            else:
+                                w = len(line_str) * 11 + 30
+                            if w > max_w:
+                                max_w = w
+
+        optimal_w = max(min_width, default_w, min(max_w, max_width))
+        tree.column(col_id, width=optimal_w, minwidth=80, anchor=anchor, stretch=False)

@@ -494,7 +494,20 @@ class StockMatchApp:
             foreground=[("disabled", "#e2e8f0")],
         )
 
-        style.configure("Action.TButton", font=("Meiryo UI", 9), padding=(10, 5))
+        style.configure("Action.TButton", font=("Meiryo UI", 9), padding=(7, 4))
+        style.configure("ScrollNav.TButton", font=("Meiryo UI", 8, "bold"), padding=(6, 2))
+        style.configure(
+            "Horizontal.TScrollbar",
+            arrowsize=16,
+            background="#cbd5e1",
+            troughcolor="#f1f5f9",
+        )
+        style.configure(
+            "Vertical.TScrollbar",
+            arrowsize=16,
+            background="#cbd5e1",
+            troughcolor="#f1f5f9",
+        )
         style.configure(
             "Horizontal.TProgressbar",
             troughcolor="#e2e8f0",
@@ -576,6 +589,14 @@ class StockMatchApp:
         config_menu.add_command(
             label="照合結果一覧の表示列設定...",
             command=self._open_column_visibility_dialog,
+        )
+        config_menu.add_command(
+            label="表示中の全列の幅を自動調整 (文字長に合わせて最適化)",
+            command=self._autofit_active_tab_columns,
+        )
+        config_menu.add_command(
+            label="表示中の全列の幅を標準推奨幅に戻す",
+            command=self._reset_active_tab_column_widths,
         )
         config_menu.add_separator()
         config_menu.add_command(label="設定ファイル(config.json)の保存先を指定・変更...", command=self._open_config_location_dialog)
@@ -1197,9 +1218,12 @@ class StockMatchApp:
 
         for col_id, _, width, anchor in self.col_configs_main:
             self._update_heading_display_main(col_id)
-            self.tree_main.column(col_id, width=width, anchor=anchor)
+            self.tree_main.column(col_id, width=width, minwidth=80, anchor=anchor, stretch=False)
 
         self._apply_column_visibility_main()
+
+        from modules.dialogs import TreeviewCellTooltip
+        self.tooltip_main = TreeviewCellTooltip(self.tree_main, self.col_titles_main)
 
         self.tree_main.bind("<Button-1>", self._on_tree_main_click)
         self.tree_main.bind("<Double-1>", lambda e: self._on_tree_double_click(e, is_missing_tab=False))
@@ -1212,12 +1236,62 @@ class StockMatchApp:
         self.tree_main.tag_configure("OK", background="#ffffff", foreground="#334155")
 
         vsb = ttk.Scrollbar(table_container, orient="vertical", command=self.tree_main.yview)
-        hsb = ttk.Scrollbar(table_container, orient="horizontal", command=self.tree_main.xview)
-        self.tree_main.configure(yscrollcommand=vsb.set)
+
+        hscroll_bar_frame = tk.Frame(table_container, bg="#f1f5f9", pady=2)
+        ttk.Button(
+            hscroll_bar_frame,
+            text="⏮ 左端",
+            style="ScrollNav.TButton",
+            command=lambda: self._scroll_tree_horizontal(self.tree_main, "start"),
+        ).pack(side=tk.LEFT, padx=(2, 2))
+        ttk.Button(
+            hscroll_bar_frame,
+            text="◀ 左へ",
+            style="ScrollNav.TButton",
+            command=lambda: self._scroll_tree_horizontal(self.tree_main, "page_left"),
+        ).pack(side=tk.LEFT, padx=(0, 4))
+
+        hsb = ttk.Scrollbar(hscroll_bar_frame, orient="horizontal", command=self.tree_main.xview)
+        hsb.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
+
+        ttk.Button(
+            hscroll_bar_frame,
+            text="↺ 標準列幅に戻す",
+            style="ScrollNav.TButton",
+            command=self._reset_main_column_widths,
+        ).pack(side=tk.RIGHT, padx=(2, 2))
+        ttk.Button(
+            hscroll_bar_frame,
+            text="📐 列幅自動調整",
+            style="ScrollNav.TButton",
+            command=self._autofit_main_columns,
+        ).pack(side=tk.RIGHT, padx=(4, 2))
+        tk.Label(
+            hscroll_bar_frame,
+            text="💡 Shift+ホイールで横スクロール",
+            font=("Meiryo UI", 8),
+            fg="#475569",
+            bg="#f1f5f9",
+        ).pack(side=tk.RIGHT, padx=(6, 4))
+        ttk.Button(
+            hscroll_bar_frame,
+            text="右端 ⏭",
+            style="ScrollNav.TButton",
+            command=lambda: self._scroll_tree_horizontal(self.tree_main, "end"),
+        ).pack(side=tk.RIGHT, padx=(2, 2))
+        ttk.Button(
+            hscroll_bar_frame,
+            text="右へ ▶",
+            style="ScrollNav.TButton",
+            command=lambda: self._scroll_tree_horizontal(self.tree_main, "page_right"),
+        ).pack(side=tk.RIGHT, padx=(4, 0))
+
+        self.tree_main.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        self._bind_tree_horizontal_scroll(self.tree_main, hsb, hscroll_bar_frame)
 
         self.tree_main.grid(row=0, column=0, sticky="nsew")
         vsb.grid(row=0, column=1, sticky="ns")
-        hsb.grid(row=1, column=0, sticky="ew")
+        hscroll_bar_frame.grid(row=1, column=0, columnspan=2, sticky="ew")
 
         table_container.grid_rowconfigure(0, weight=1)
         table_container.grid_columnconfigure(0, weight=1)
@@ -1275,7 +1349,10 @@ class StockMatchApp:
 
         for col_id, _, width, anchor in self.col_configs_missing:
             self._update_heading_display_missing(col_id)
-            self.tree_missing.column(col_id, width=width, anchor=anchor)
+            self.tree_missing.column(col_id, width=width, minwidth=80, anchor=anchor, stretch=False)
+
+        from modules.dialogs import TreeviewCellTooltip
+        self.tooltip_missing = TreeviewCellTooltip(self.tree_missing, self.col_titles_missing)
 
         self.tree_missing.bind("<Button-1>", self._on_tree_missing_click)
         self.tree_missing.bind("<Double-1>", lambda e: self._on_tree_double_click(e, is_missing_tab=True))
@@ -1284,12 +1361,62 @@ class StockMatchApp:
         self.tree_missing.tag_configure("MISSING_ORDER", background="#fef3c7", foreground="#92400e")
 
         vsb = ttk.Scrollbar(table_container, orient="vertical", command=self.tree_missing.yview)
-        hsb = ttk.Scrollbar(table_container, orient="horizontal", command=self.tree_missing.xview)
-        self.tree_missing.configure(yscrollcommand=vsb.set)
+
+        hscroll_bar_frame = tk.Frame(table_container, bg="#f1f5f9", pady=2)
+        ttk.Button(
+            hscroll_bar_frame,
+            text="⏮ 左端",
+            style="ScrollNav.TButton",
+            command=lambda: self._scroll_tree_horizontal(self.tree_missing, "start"),
+        ).pack(side=tk.LEFT, padx=(2, 2))
+        ttk.Button(
+            hscroll_bar_frame,
+            text="◀ 左へ",
+            style="ScrollNav.TButton",
+            command=lambda: self._scroll_tree_horizontal(self.tree_missing, "page_left"),
+        ).pack(side=tk.LEFT, padx=(0, 4))
+
+        hsb = ttk.Scrollbar(hscroll_bar_frame, orient="horizontal", command=self.tree_missing.xview)
+        hsb.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
+
+        ttk.Button(
+            hscroll_bar_frame,
+            text="↺ 標準列幅に戻す",
+            style="ScrollNav.TButton",
+            command=self._reset_missing_column_widths,
+        ).pack(side=tk.RIGHT, padx=(2, 2))
+        ttk.Button(
+            hscroll_bar_frame,
+            text="📐 列幅自動調整",
+            style="ScrollNav.TButton",
+            command=self._autofit_missing_columns,
+        ).pack(side=tk.RIGHT, padx=(4, 2))
+        tk.Label(
+            hscroll_bar_frame,
+            text="💡 Shift+ホイールで横スクロール",
+            font=("Meiryo UI", 8),
+            fg="#475569",
+            bg="#f1f5f9",
+        ).pack(side=tk.RIGHT, padx=(6, 4))
+        ttk.Button(
+            hscroll_bar_frame,
+            text="右端 ⏭",
+            style="ScrollNav.TButton",
+            command=lambda: self._scroll_tree_horizontal(self.tree_missing, "end"),
+        ).pack(side=tk.RIGHT, padx=(2, 2))
+        ttk.Button(
+            hscroll_bar_frame,
+            text="右へ ▶",
+            style="ScrollNav.TButton",
+            command=lambda: self._scroll_tree_horizontal(self.tree_missing, "page_right"),
+        ).pack(side=tk.RIGHT, padx=(4, 0))
+
+        self.tree_missing.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        self._bind_tree_horizontal_scroll(self.tree_missing, hsb, hscroll_bar_frame)
 
         self.tree_missing.grid(row=0, column=0, sticky="nsew")
         vsb.grid(row=0, column=1, sticky="ns")
-        hsb.grid(row=1, column=0, sticky="ew")
+        hscroll_bar_frame.grid(row=1, column=0, columnspan=2, sticky="ew")
 
         table_container.grid_rowconfigure(0, weight=1)
         table_container.grid_columnconfigure(0, weight=1)
@@ -1649,6 +1776,15 @@ class StockMatchApp:
                 label="📂 この注文書の保存先フォルダを開く",
                 command=lambda: self._open_order_file_parent_folder(order_path),
             )
+        menu.add_separator()
+        menu.add_command(
+            label="📐 列幅を内容に合わせて自動調整",
+            command=self._autofit_missing_columns if is_missing_tab else self._autofit_main_columns,
+        )
+        menu.add_command(
+            label="↺ 列幅を標準推奨幅に戻す",
+            command=self._reset_missing_column_widths if is_missing_tab else self._reset_main_column_widths,
+        )
         try:
             menu.tk_popup(event.x_root, event.y_root)
         finally:
@@ -1659,12 +1795,17 @@ class StockMatchApp:
         region = tree.identify_region(event.x, event.y)
         if region == "heading":
             return
+        if region == "separator":
+            if is_missing_tab:
+                self._autofit_missing_columns()
+            else:
+                self._autofit_main_columns()
+            return
         self._open_selected_row_detail(is_missing_tab=is_missing_tab)
 
     def _open_selected_row_detail(self, is_missing_tab: bool = False):
-        rec, is_missing = self._get_selected_record()
+        rec = self._get_selected_record(is_missing_tab=is_missing_tab)
         if not rec:
-            messagebox.showinfo("行選択", "詳細・照合診断を表示する行を一覧から選択してください。")
             return
         from modules.dialogs import open_detail_preview_dialog
 
@@ -1672,24 +1813,21 @@ class StockMatchApp:
             parent=self.root,
             rec=rec,
             cached_mgmt_rows=self.cached_mgmt_rows,
-            is_missing_tab=is_missing,
+            is_missing_tab=is_missing_tab,
             icon_path=self._resolve_icon_path(),
-            on_open_order=lambda r: self._open_excel_at_location(
-                r.get("filepath", ""), r.get("sheet_name", ""), r.get("row_index"), is_mgmt=False
-            ),
-            on_open_mgmt=lambda r: self._open_excel_at_location(
-                self.mgmt_file_path.get().strip(),
-                r.get("mgmt_sheet", "") or r.get("sheet_name", ""),
-                r.get("mgmt_row_index"),
-                is_mgmt=True,
-            ),
+            on_open_order=lambda _r: self._open_selected_row_order(),
+            on_open_mgmt=lambda _r: self._open_selected_row_mgmt(is_missing_tab=is_missing_tab),
         )
+
     def _show_help_guide(self, tab_index: int = 0):
         from modules.dialogs import show_help_guide
         show_help_guide(self.root, initial_tab=tab_index, icon_path=self._resolve_icon_path())
+
     def _show_about(self):
         from modules.dialogs import show_about
         show_about(self.root, icon_path=self._resolve_icon_path())
+
+    @classmethod
     def _resolve_initial_config_path(cls) -> str:
         """起動時に config.json の保存先をポインタファイル等から決定して返す"""
         ptr_file = cls.CONFIG_POINTER_FILE_PATH
@@ -2436,10 +2574,12 @@ class StockMatchApp:
 
 
     # =========================================================================
-    # 表示列設定（タブ1: 照合結果一覧）
+    # 表示列設定・列幅調整・横スクロール制御
     # =========================================================================
-    def _apply_column_visibility_main(self):
+    def _apply_column_visibility_main(self, new_cols: list[str] | None = None):
         """self.visible_columns_main に基づいて tree_main の表示列（displaycolumns）を設定する"""
+        if new_cols is not None:
+            self.visible_columns_main = list(new_cols)
         all_col_ids = [c[0] for c in self.col_configs_main]
         valid_visible = [cid for cid in all_col_ids if cid in self.visible_columns_main]
         if not valid_visible:
@@ -2447,6 +2587,10 @@ class StockMatchApp:
         self.visible_columns_main = valid_visible
         try:
             self.tree_main.configure(displaycolumns=tuple(valid_visible))
+            for col_id, _, width, anchor in self.col_configs_main:
+                cur_w = self.tree_main.column(col_id, "width")
+                w = cur_w if isinstance(cur_w, int) and cur_w >= 80 else width
+                self.tree_main.column(col_id, width=w, minwidth=80, anchor=anchor, stretch=False)
         except Exception:
             pass
 
@@ -2466,6 +2610,105 @@ class StockMatchApp:
             icon_path=self._resolve_icon_path(),
             on_apply=on_apply,
         )
+
+    def _autofit_main_columns(self):
+        """タブ1（照合結果一覧）の各列幅を表示中テキストの最長幅に合わせて自動調整"""
+        from modules.dialogs import autofit_treeview_columns
+        autofit_treeview_columns(
+            self.tree_main, self.col_configs_main, self.col_titles_main
+        )
+
+    def _autofit_missing_columns(self):
+        """タブ2（注文書未検出一覧）の各列幅を表示中テキストの最長幅に合わせて自動調整"""
+        from modules.dialogs import autofit_treeview_columns
+        autofit_treeview_columns(
+            self.tree_missing, self.col_configs_missing, self.col_titles_missing
+        )
+
+    def _autofit_active_tab_columns(self):
+        """現在アクティブなタブの列幅を自動調整"""
+        try:
+            current_tab = self.notebook.index(self.notebook.select())
+            if current_tab == 1:
+                self._autofit_missing_columns()
+            else:
+                self._autofit_main_columns()
+        except Exception:
+            self._autofit_main_columns()
+
+    def _reset_main_column_widths(self):
+        """タブ1（照合結果一覧）の各列幅を見やすい標準推奨幅に戻す"""
+        for col_id, _, width, anchor in self.col_configs_main:
+            self.tree_main.column(col_id, width=width, minwidth=80, anchor=anchor, stretch=False)
+
+    def _reset_missing_column_widths(self):
+        """タブ2（注文書未検出一覧）の各列幅を見やすい標準推奨幅に戻す"""
+        for col_id, _, width, anchor in self.col_configs_missing:
+            self.tree_missing.column(col_id, width=width, minwidth=80, anchor=anchor, stretch=False)
+
+    def _reset_active_tab_column_widths(self):
+        """現在アクティブなタブの列幅を標準推奨幅に戻す"""
+        try:
+            current_tab = self.notebook.index(self.notebook.select())
+            if current_tab == 1:
+                self._reset_missing_column_widths()
+            else:
+                self._reset_main_column_widths()
+        except Exception:
+            self._reset_main_column_widths()
+
+    @staticmethod
+    def _scroll_tree_horizontal(tree: ttk.Treeview, action: str):
+        """一覧テーブルの横スクロールをボタン操作で快適に移動する"""
+        try:
+            if action == "start":
+                tree.xview_moveto(0.0)
+            elif action == "end":
+                tree.xview_moveto(1.0)
+            elif action == "page_left":
+                first, last = tree.xview()
+                span = max(0.08, (last - first) * 0.65)
+                tree.xview_moveto(max(0.0, first - span))
+            elif action == "page_right":
+                first, last = tree.xview()
+                span = max(0.08, (last - first) * 0.65)
+                tree.xview_moveto(min(1.0, first + span))
+        except Exception:
+            pass
+
+    def _bind_tree_horizontal_scroll(self, tree: ttk.Treeview, hsb: ttk.Scrollbar, bar_frame: tk.Widget):
+        """一覧テーブルに Shift+ホイール、Ctrl+ホイール、左右矢印キー、下部バー上ホイールの横スクロールをバインド"""
+        def _on_horiz_wheel(event):
+            delta = event.delta
+            if delta == 0:
+                return "break"
+            step = -1 if delta > 0 else 1
+            try:
+                first, last = tree.xview()
+                move_delta = max(0.04, (last - first) * 0.22) * step
+                tree.xview_moveto(min(1.0, max(0.0, first + move_delta)))
+            except Exception:
+                tree.xview_scroll(step * 6, "units")
+            return "break"
+
+        def _on_key_scroll(step_ratio: float):
+            try:
+                first, last = tree.xview()
+                move_delta = max(0.03, (last - first) * abs(step_ratio)) * (1 if step_ratio > 0 else -1)
+                tree.xview_moveto(min(1.0, max(0.0, first + move_delta)))
+            except Exception:
+                pass
+            return "break"
+
+        tree.bind("<Shift-MouseWheel>", _on_horiz_wheel)
+        tree.bind("<Control-MouseWheel>", _on_horiz_wheel)
+        tree.bind("<Left>", lambda _e: _on_key_scroll(-0.18))
+        tree.bind("<Right>", lambda _e: _on_key_scroll(0.18))
+        tree.bind("<Shift-Left>", lambda _e: _on_key_scroll(-0.45))
+        tree.bind("<Shift-Right>", lambda _e: _on_key_scroll(0.45))
+        hsb.bind("<MouseWheel>", _on_horiz_wheel)
+        bar_frame.bind("<MouseWheel>", _on_horiz_wheel)
+
     def _clear_all_main_column_filters(self):
         self.column_filters_main.clear()
         self._update_all_headings_main()
@@ -2623,7 +2866,8 @@ class StockMatchApp:
             x=event.x_root,
             y=event.y_root,
         )
-    def _sort_tree(self, tree: ttk.Treeview, col: str, reverse: bool):
+    @staticmethod
+    def _sort_tree(tree: ttk.Treeview, col: str, reverse: bool):
         items = [(tree.set(k, col), k) for k in tree.get_children("")]
         items.sort(reverse=reverse)
         for index, (_, k) in enumerate(items):
@@ -2632,7 +2876,6 @@ class StockMatchApp:
     # =========================================================================
     # Excel直接展開機能（一時ファイル非作成・新規ブック展開）
     # =========================================================================
-    @staticmethod
     def _open_in_excel_direct(self):
         """Excelがインストールされている場合、一時ファイルを作成せず未保存の新規ブックに直接結果を展開する"""
         if not self.analyzed_records and not self.missing_order_records:
