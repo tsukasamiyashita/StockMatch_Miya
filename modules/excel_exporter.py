@@ -16,7 +16,7 @@ except ImportError:
     pythoncom = None
     HAS_WIN32COM = False
 
-from .constants import EXCEL_COLOR_HEX
+from .constants import EXCEL_COLOR_HEX, COL_CONFIGS_MAIN, COL_CONFIGS_MISSING
 from .date_utils import (
     rgb_to_bgr_int,
     parse_flexible_date,
@@ -278,26 +278,7 @@ def export_to_excel_direct(
         progress_queue.put(("PROGRESS", (45.0, "シート1 (納期超過・照合結果) にデータを転送中...")))
         _check_cancelled()
 
-        headers_main = [
-            "総合判定",
-            "不一致理由・照合診断",
-            "プロジェクト名(K)",
-            "管理No(M)",
-            "出荷先(N)",
-            "品名、ライン名等(O)",
-            "製品詳細(P)",
-            "製作数(Q)",
-            "図面番号(R)",
-            "品番(S)",
-            "品名(T)",
-            "メーカー(U)",
-            "単数(V)",
-            "仕様(W)",
-            "仕入先(X)",
-            "在庫数(AA)",
-            "注文日(AG)",
-            "納期(AH)",
-        ]
+        headers_main = [title for _, title, _, _ in COL_CONFIGS_MAIN]
 
         rows_main_data = []
         tags_main = []
@@ -321,6 +302,7 @@ def export_to_excel_direct(
                 [
                     r["status_badge"],
                     r["mismatch_reason"],
+                    r["due_date_str"],
                     r.get("project_name", ""),
                     r["order_no"],
                     r.get("ship_to", ""),
@@ -336,7 +318,6 @@ def export_to_excel_direct(
                     r["supplier"],
                     r.get("stock_qty", ""),
                     r.get("order_date_str", "-"),
-                    r["due_date_str"],
                 ]
             )
             tags_main.append(r["row_tag"])
@@ -388,26 +369,7 @@ def export_to_excel_direct(
         progress_queue.put(("PROGRESS", (75.0, "シート2 (注文書未検出) にデータを転送中...")))
         _check_cancelled()
 
-        headers_missing = [
-            "状態判定",
-            "未検出診断内容",
-            "プロジェクト名(K)",
-            "管理No(M)",
-            "出荷先(N)",
-            "品名、ライン名等(O)",
-            "製品詳細(P)",
-            "製作数(Q)",
-            "図面番号(R)",
-            "品番(S)",
-            "品名(T)",
-            "メーカー(U)",
-            "単数(V)",
-            "仕様(W)",
-            "仕入先(X)",
-            "在庫数(AA)",
-            "注文日(AG)",
-            "納期(AH)",
-        ]
+        headers_missing = [title for _, title, _, _ in COL_CONFIGS_MISSING]
 
         rows_missing_data = []
         for r in missing_order_records:
@@ -417,6 +379,7 @@ def export_to_excel_direct(
                 [
                     r["status_badge"],
                     r["mismatch_reason"],
+                    r.get("due_date_str", r.get("due_date", "-")),
                     r.get("project_name", ""),
                     r["order_no"],
                     r.get("ship_to", ""),
@@ -432,7 +395,6 @@ def export_to_excel_direct(
                     r["supplier"],
                     r.get("stock_qty", ""),
                     r.get("order_date_str", "-"),
-                    r.get("due_date_str", r.get("due_date", "-")),
                 ]
             )
 

@@ -12,8 +12,15 @@ import queue
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
-import pandas as pd  # type: ignore
-import openpyxl  # type: ignore
+try:
+    import pandas as pd  # type: ignore
+except ImportError:
+    pd = None
+
+try:
+    import openpyxl  # type: ignore
+except ImportError:
+    openpyxl = None
 
 try:
     from scipy.optimize import linear_sum_assignment  # type: ignore
@@ -71,6 +78,7 @@ class StockMatchApp:
     DEFAULT_VISIBLE_COLUMNS_MAIN = [
         "status_badge",
         "mismatch_reason",
+        "due_date",
         "project_name",
         "order_no",
         "ship_to",
@@ -86,7 +94,6 @@ class StockMatchApp:
         "supplier",
         "stock_qty",
         "order_date",
-        "due_date",
     ]
 
     def __init__(self, root: tk.Tk):
@@ -2362,6 +2369,7 @@ class StockMatchApp:
                     [
                         rec["status_badge"],
                         rec["mismatch_reason"],
+                        rec["due_date_str"],
                         rec.get("project_name", ""),
                         rec["order_no"],
                         rec.get("ship_to", ""),
@@ -2377,7 +2385,6 @@ class StockMatchApp:
                         rec["supplier"],
                         rec.get("stock_qty", ""),
                         rec.get("order_date_str", "-"),
-                        rec["due_date_str"],
                     ]
                 ).lower()
                 if kw not in searchable:
@@ -2390,6 +2397,7 @@ class StockMatchApp:
                 values=(
                     rec["status_badge"],
                     rec["mismatch_reason"],
+                    rec["due_date_str"],
                     rec.get("project_name", ""),
                     rec["order_no"],
                     rec.get("ship_to", ""),
@@ -2405,7 +2413,6 @@ class StockMatchApp:
                     rec["supplier"],
                     rec.get("stock_qty", ""),
                     rec.get("order_date_str", "-"),
-                    rec["due_date_str"],
                 ),
                 tags=(rec["row_tag"],),
             )
@@ -2497,6 +2504,7 @@ class StockMatchApp:
                     [
                         rec["status_badge"],
                         rec["mismatch_reason"],
+                        rec.get("due_date_str", rec.get("due_date", "-")),
                         rec.get("project_name", ""),
                         rec["order_no"],
                         rec.get("ship_to", ""),
@@ -2512,7 +2520,6 @@ class StockMatchApp:
                         rec["supplier"],
                         rec.get("stock_qty", ""),
                         rec.get("order_date_str", "-"),
-                        rec.get("due_date_str", rec.get("due_date", "-")),
                     ]
                 ).lower()
                 if kw not in searchable:
@@ -2525,6 +2532,7 @@ class StockMatchApp:
                 values=(
                     rec["status_badge"],
                     rec["mismatch_reason"],
+                    rec.get("due_date_str", rec.get("due_date", "-")),
                     rec.get("project_name", ""),
                     rec["order_no"],
                     rec.get("ship_to", ""),
@@ -2540,7 +2548,6 @@ class StockMatchApp:
                     rec["supplier"],
                     rec.get("stock_qty", ""),
                     rec.get("order_date_str", "-"),
-                    rec.get("due_date_str", rec.get("due_date", "-")),
                 ),
                 tags=(rec["row_tag"],),
             )
