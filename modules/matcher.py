@@ -229,6 +229,8 @@ def parse_management_book(
                         for k in ("管理NO", "管理番号", "注文番号", "発注番号", "手配番号", "工事番号", "工事NO", "製番")
                     ):
                         col_map.setdefault("order_no", c_idx)
+                    elif "プロジェクト" in v_comb or "プロジェクト名" in v_comb or "PJ名" in v_comb:
+                        col_map.setdefault("project_name", c_idx)
                     elif "発注日" in v_comb or "注文日" in v_comb:
                         col_map.setdefault("order_date", c_idx)
                     elif "図面番号" in v_comb or "図番" in v_comb:
@@ -246,8 +248,14 @@ def parse_management_book(
                             col_map["item_name"] = c_idx
                         elif "item_name" not in col_map:
                             col_map["item_name"] = c_idx
-                    elif "メーカー" in v_comb or "発注先" in v_comb or "仕入先" in v_comb or "業者" in v_comb:
+                    elif "仕入先" in v_comb:
+                        col_map.setdefault("supplier", c_idx)
+                    elif "メーカー" in v_comb or "発注先" in v_comb or "業者" in v_comb:
                         col_map.setdefault("maker", c_idx)
+                    elif "製作数" in v_comb or "作数" in v_comb:
+                        col_map.setdefault("prod_qty", c_idx)
+                    elif "単数" in v_comb:
+                        col_map.setdefault("unit_qty", c_idx)
                     elif "仕様" in v_comb or "規格" in v_comb or "材質" in v_comb or "寸法" in v_comb:
                         col_map.setdefault("spec", c_idx)
                     elif "購入数" in v_comb or v_curr == "購入数":
@@ -275,14 +283,22 @@ def parse_management_book(
 
         col_map.setdefault("actual_date", 1)       # A列: 現品確認日
         col_map.setdefault("instruction_doc", 10)  # J列: 指示書
+        col_map.setdefault("project_name", 11)     # K列: プロジェクト名
         col_map.setdefault("order_no", 13)         # M列: 管理No
         col_map.setdefault("ship_to", 14)          # N列: 出荷先
         col_map.setdefault("line_name", 15)        # O列: 品名、ライン名等
         col_map.setdefault("product_detail", 16)   # P列: 製品詳細
+        col_map.setdefault("prod_qty", 17)         # Q列: 製作数
+        col_map.setdefault("drawing_no", 18)       # R列: 図面番号
+        col_map.setdefault("part_no", 19)          # S列: 品番
         col_map.setdefault("item_name", 20)        # T列: 品名
         col_map.setdefault("maker", 21)            # U列: メーカー
+        col_map.setdefault("unit_qty", 22)         # V列: 単数
         col_map.setdefault("spec", 23)             # W列: 仕様
+        col_map.setdefault("supplier", 24)         # X列: 仕入先
+        col_map.setdefault("stock_qty", 27)        # AA列: 在庫数
         col_map["qty"] = 28                        # AB列: 購入数
+        col_map.setdefault("order_date", 33)       # AG列: 注文日
         col_map.setdefault("due_date", 34)         # AH列: 納期
         col_map.setdefault("invoice_date", 35)     # AI列: 請求日
 
@@ -296,6 +312,7 @@ def parse_management_book(
         last_seen_order_no_8 = sheet_default_order_no
 
         for r_idx, row_tuple in data_slice:
+            project_name_val = _get_col(row_tuple, col_map.get("project_name"))
             drawing_val = _get_col(row_tuple, col_map.get("drawing_no"))
             part_val = _get_col(row_tuple, col_map.get("part_no"))
             item_val = _get_col(row_tuple, col_map.get("item_name"))
@@ -305,12 +322,16 @@ def parse_management_book(
             line_val = _get_col(row_tuple, col_map.get("line_name"))
             prod_detail_val = _get_col(row_tuple, col_map.get("product_detail"))
             order_no_val = _get_col(row_tuple, col_map.get("order_no"))
+            prod_qty_val = _get_col(row_tuple, col_map.get("prod_qty"))
+            unit_qty_val = _get_col(row_tuple, col_map.get("unit_qty"))
+            supplier_val = _get_col(row_tuple, col_map.get("supplier"))
+            stock_qty_val = _get_col(row_tuple, col_map.get("stock_qty"))
 
             qty_val = _get_col(row_tuple, 28)
             if qty_val is None:
                 qty_val = _get_col(row_tuple, col_map.get("qty"))
 
-            if not any([drawing_val, part_val, item_val, spec_val, maker_val, line_val, prod_detail_val]):
+            if not any([project_name_val, drawing_val, part_val, item_val, spec_val, maker_val, line_val, prod_detail_val]):
                 continue
 
             order_date_raw = _get_col(row_tuple, col_map.get("order_date"))
@@ -348,6 +369,7 @@ def parse_management_book(
                 mgmt_due_date = due_raw
                 mgmt_due_is_date_type = True
 
+            project_name_str = clean_cell_str(project_name_val)
             drawing_str = clean_cell_str(drawing_val)
             part_str = clean_cell_str(part_val)
             item_str = clean_cell_str(item_val)
@@ -356,6 +378,10 @@ def parse_management_book(
             ship_to_str = clean_cell_str(ship_to_val)
             line_str = clean_cell_str(line_val)
             prod_detail_str = clean_cell_str(prod_detail_val)
+            prod_qty_str = clean_cell_str(prod_qty_val)
+            unit_qty_str = clean_cell_str(unit_qty_val)
+            supplier_str = clean_cell_str(supplier_val) or maker_str
+            stock_qty_str = clean_cell_str(stock_qty_val)
             qty_str = clean_cell_str(qty_val)
             unit_price_str = clean_cell_str(_get_col(row_tuple, col_map.get("unit_price")))
             amount_str = clean_cell_str(_get_col(row_tuple, col_map.get("amount")))
@@ -405,6 +431,7 @@ def parse_management_book(
                     "sheet_cat": sheet_cat,
                     "sheet_cat_label": sheet_cat_label,
                     "row": r_idx,
+                    "project_name": project_name_str,
                     "order_no": order_no_str,
                     "order_no_8": exact_order_no_8,
                     "norm_order_no": normalize_key(order_no_str),
@@ -414,12 +441,15 @@ def parse_management_book(
                     "instruction_state": instruction_state,
                     "ship_to": ship_to_str,
                     "product_detail": prod_detail_str,
+                    "prod_qty": prod_qty_str,
                     "drawing_no": drawing_str,
                     "part_no": part_str,
                     "item_name": item_str,
                     "line_name": line_str,
                     "maker": maker_str,
-                    "supplier": maker_str,
+                    "unit_qty": unit_qty_str,
+                    "supplier": supplier_str,
+                    "stock_qty": stock_qty_str,
                     "spec": spec_str,
                     "model_spec": model_spec_display,
                     "qty": qty_str,
@@ -939,10 +969,26 @@ def build_field_comparison_data(
     rows.append(("⑪ 出荷先 (管理表N列)", "— (注文書側なし)", m_ship_disp, "管理表情報", "INFO"))
 
     m_line_disp = (m_row.get("line_name", "") if m_row else "") or "(空欄)"
-    rows.append(("⑫ 品名・ライン名等 (管理表O列)", "— (注文書側なし)", m_line_disp, "管理表情報", "INFO"))
+    rows.append(("⑫ 品名、ライン名等 (管理表O列)", "— (注文書側なし)", m_line_disp, "管理表情報", "INFO"))
 
     m_prod_disp = (m_row.get("product_detail", "") if m_row else "") or "(空欄)"
     rows.append(("⑬ 製品詳細 (管理表P列)", "— (注文書側なし)", m_prod_disp, "管理表情報", "INFO"))
+
+    m_pj_disp = (m_row.get("project_name", "") if m_row else "") or "(空欄)"
+    rows.append(("⑭ プロジェクト名 (管理表K列)", "— (注文書側なし)", m_pj_disp, "管理表情報", "INFO"))
+
+    m_prod_qty_disp = (m_row.get("prod_qty", "") if m_row else "") or "(空欄)"
+    rows.append(("⑮ 製作数 (管理表Q列)", "— (注文書側なし)", m_prod_qty_disp, "管理表情報", "INFO"))
+
+    m_unit_qty_disp = (m_row.get("unit_qty", "") if m_row else "") or "(空欄)"
+    rows.append(("⑯ 単数 (管理表V列)", "— (注文書側なし)", m_unit_qty_disp, "管理表情報", "INFO"))
+
+    o_sup_disp = (o_item.get("supplier", "") if o_item else "") or "(空欄)"
+    m_sup_disp = (m_row.get("supplier", "") if m_row else "") or "(空欄)"
+    rows.append(_cmp_field("⑰ 仕入先 (管理表X列)", o_sup_disp, m_sup_disp, o_sup_disp, m_sup_disp))
+
+    m_stock_disp = (m_row.get("stock_qty", "") if m_row else "") or "(空欄)"
+    rows.append(("⑱ 在庫数 (管理表AA列)", "— (注文書側なし)", m_stock_disp, "管理表情報", "INFO"))
 
     cross_notes = []
     if o_item and m_row:
@@ -1105,6 +1151,13 @@ def evaluate_single_record(
     is_unmatched: bool = False,
     mismatch_reason: str = "",
     diagnostic_data: dict | None = None,
+    project_name: str = "",
+    prod_qty: str = "",
+    drawing_no: str = "",
+    part_no: str = "",
+    unit_qty: str = "",
+    spec: str = "",
+    stock_qty: str = "",
 ) -> dict:
     """1つの照合明細について超過状況を判定し、表示用レコード辞書を構築"""
     actual_overdue = False
@@ -1212,6 +1265,7 @@ def evaluate_single_record(
     return {
         "status_badge": status_badge,
         "mismatch_reason": mismatch_reason,
+        "project_name": project_name,
         "req_type": req_type,
         "order_no": order_no,
         "instruction_raw": instruction_raw,
@@ -1220,11 +1274,17 @@ def evaluate_single_record(
         "ship_to": ship_to,
         "line_name": line_name,
         "product_detail": product_detail,
+        "prod_qty": prod_qty,
+        "drawing_no": drawing_no,
+        "part_no": part_no,
         "order_date": order_date,
         "order_date_str": order_date.strftime("%Y-%m-%d") if order_date else "-",
         "supplier": supplier,
         "maker": maker,
         "item_name": item_name,
+        "unit_qty": unit_qty,
+        "spec": spec,
+        "stock_qty": stock_qty,
         "model_spec": model_spec,
         "qty": qty,
         "due_date": due_str,
@@ -1420,6 +1480,7 @@ def match_and_evaluate(
                     diag_data = build_field_comparison_data(o_item, best_mgmt, match_summary)
 
                     rec = evaluate_single_record(
+                        project_name=best_mgmt.get("project_name", ""),
                         req_type=o_item.get("req_type_label", "注文"),
                         order_no=best_mgmt.get("order_no_8") or best_mgmt.get("order_no") or o_no,
                         instruction_raw=best_mgmt.get("instruction_raw", ""),
@@ -1428,9 +1489,15 @@ def match_and_evaluate(
                         ship_to=best_mgmt.get("ship_to", ""),
                         line_name=best_mgmt.get("line_name", ""),
                         product_detail=best_mgmt.get("product_detail", ""),
-                        supplier=final_supplier,
+                        prod_qty=best_mgmt.get("prod_qty", ""),
+                        drawing_no=best_mgmt.get("drawing_no") or o_item.get("drawing_no", ""),
+                        part_no=best_mgmt.get("part_no") or o_item.get("part_no", ""),
+                        item_name=best_mgmt.get("item_name") or o_item.get("item_name", ""),
                         maker=final_maker,
-                        item_name=o_item.get("item_name") or best_mgmt.get("item_name", ""),
+                        unit_qty=best_mgmt.get("unit_qty", ""),
+                        spec=best_mgmt.get("spec") or o_item.get("spec", ""),
+                        supplier=final_supplier,
+                        stock_qty=best_mgmt.get("stock_qty", ""),
                         model_spec=o_item.get("model_spec") or best_mgmt.get("model_spec", ""),
                         qty=o_item.get("qty") or best_mgmt.get("qty", ""),
                         due_date=final_due,
@@ -1453,6 +1520,7 @@ def match_and_evaluate(
                 else:
                     reason_txt, diag_data = diagnose_unmatched_item(o_item, mgmt_rows)
                     rec = evaluate_single_record(
+                        project_name="",
                         req_type=o_item.get("req_type_label", "注文"),
                         order_no=o_no,
                         instruction_raw=diag_data.get("best_cand_instruction_raw", ""),
@@ -1461,9 +1529,15 @@ def match_and_evaluate(
                         ship_to=diag_data.get("best_cand_ship_to", ""),
                         line_name=diag_data.get("best_cand_line_name", ""),
                         product_detail=diag_data.get("best_cand_product_detail", ""),
-                        supplier=o_item.get("supplier", ""),
-                        maker=o_item.get("maker", ""),
+                        prod_qty="",
+                        drawing_no=o_item.get("drawing_no", ""),
+                        part_no=o_item.get("part_no", ""),
                         item_name=o_item.get("item_name", ""),
+                        maker=o_item.get("maker", ""),
+                        unit_qty="",
+                        spec=o_item.get("spec", ""),
+                        supplier=o_item.get("supplier", ""),
+                        stock_qty="",
                         model_spec=o_item.get("model_spec", ""),
                         qty=o_item.get("qty", ""),
                         due_date=final_due,
@@ -1504,6 +1578,8 @@ def match_and_evaluate(
 
         rec_missing = {
             "status_badge": "未発注 (注文書なし)",
+            "mismatch_reason": reason_txt,
+            "project_name": m.get("project_name", ""),
             "mgmt_sheet": m["sheet"],
             "mgmt_row": str(m["row"]),
             "order_no": m_no,
@@ -1513,14 +1589,21 @@ def match_and_evaluate(
             "ship_to": m.get("ship_to", ""),
             "line_name": m.get("line_name", ""),
             "product_detail": m.get("product_detail", ""),
+            "prod_qty": m.get("prod_qty", ""),
+            "drawing_no": m.get("drawing_no", ""),
+            "part_no": m.get("part_no", ""),
+            "item_name": m.get("item_name", ""),
+            "maker": m.get("maker", ""),
+            "unit_qty": m.get("unit_qty", ""),
+            "spec": m.get("spec", ""),
+            "supplier": m.get("supplier") or m.get("maker", ""),
+            "stock_qty": m.get("stock_qty", ""),
             "order_date": m.get("order_date"),
             "order_date_str": m["order_date"].strftime("%Y-%m-%d") if m.get("order_date") else "-",
-            "supplier": m.get("supplier") or m.get("maker", ""),
-            "maker": m.get("maker", ""),
-            "item_name": m.get("item_name", ""),
             "model_spec": m.get("model_spec", ""),
             "qty": m.get("qty", ""),
             "due_date": m.get("mgmt_due_raw") or (m["mgmt_due_date"].strftime("%Y-%m-%d") if m.get("mgmt_due_date") else "-"),
+            "due_date_str": m.get("mgmt_due_raw") or (m["mgmt_due_date"].strftime("%Y-%m-%d") if m.get("mgmt_due_date") else "-"),
             "actual_date": m["actual_date"].strftime("%Y-%m-%d") if m.get("actual_date") else (m.get("actual_raw") or "未入力"),
             "invoice_date": m["invoice_date"].strftime("%Y-%m-%d") if m.get("invoice_date") else (m.get("invoice_raw") or "未入力"),
             "person": m.get("person", ""),

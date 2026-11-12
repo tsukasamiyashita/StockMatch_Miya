@@ -453,18 +453,31 @@ def open_column_filter_dialog(
     win = tk.Toplevel(parent)
     win.title(f"フィルター: {title}")
     win.attributes("-topmost", True)
-    win.resizable(False, False)
+    win.resizable(True, True)
+    win.minsize(340, 420)
 
-    win_w = 340
-    win_h = 440
+    win_w = 360
+    win_h = 480
     screen_w = win.winfo_screenwidth()
     screen_h = win.winfo_screenheight()
-    pos_x = min(x, screen_w - win_w - 20)
-    pos_y = min(y, screen_h - win_h - 40)
+    pos_x = max(10, min(x, screen_w - win_w - 20))
+    pos_y = max(10, min(y, screen_h - win_h - 60))
     win.geometry(f"{win_w}x{win_h}+{pos_x}+{pos_y}")
 
-    sort_frame = ttk.Frame(win, padding=8)
-    sort_frame.pack(fill=tk.X)
+    # --- 最下部フッター（フィルター解除・キャンセル・OK）を先に BOTTOM で配置 ---
+    footer = ttk.Frame(win, padding=(10, 8))
+    footer.pack(side=tk.BOTTOM, fill=tk.X)
+
+    # --- フッター上の区切り線 ---
+    ttk.Separator(win, orient="horizontal").pack(side=tk.BOTTOM, fill=tk.X, pady=(2, 0))
+
+    # --- 一括選択操作バー（すべて選択・すべて解除） ---
+    btn_row = ttk.Frame(win, padding=(10, 4))
+    btn_row.pack(side=tk.BOTTOM, fill=tk.X)
+
+    # --- 最上部: ソートフレーム ---
+    sort_frame = ttk.Frame(win, padding=(10, 8, 10, 4))
+    sort_frame.pack(side=tk.TOP, fill=tk.X)
 
     def _do_sort(rev):
         win.destroy()
@@ -478,10 +491,11 @@ def open_column_filter_dialog(
         side=tk.LEFT, fill=tk.X, expand=True
     )
 
-    ttk.Separator(win, orient="horizontal").pack(fill=tk.X, pady=4)
+    ttk.Separator(win, orient="horizontal").pack(side=tk.TOP, fill=tk.X, pady=4)
 
-    search_frame = ttk.Frame(win, padding=(8, 4))
-    search_frame.pack(fill=tk.X)
+    # --- 検索フレーム ---
+    search_frame = ttk.Frame(win, padding=(10, 4))
+    search_frame.pack(side=tk.TOP, fill=tk.X)
     search_var = tk.StringVar()
     ttk.Label(search_frame, text="検索:").pack(side=tk.LEFT)
     search_entry = ttk.Entry(search_frame, textvariable=search_var)
@@ -502,8 +516,9 @@ def open_column_filter_dialog(
         init_state = True if currently_allowed is None else (v in currently_allowed)
         check_vars[v] = tk.BooleanVar(value=init_state)
 
-    list_container = ttk.Frame(win, padding=8)
-    list_container.pack(fill=tk.BOTH, expand=True)
+    # --- 中央: スクロール可能な値リスト（残りの全領域を占有） ---
+    list_container = ttk.Frame(win, padding=(10, 4))
+    list_container.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
     canvas = tk.Canvas(list_container, bg="#ffffff", highlightthickness=1, highlightbackground="#cbd5e1")
     scrollbar = ttk.Scrollbar(list_container, orient="vertical", command=canvas.yview)
@@ -513,6 +528,11 @@ def open_column_filter_dialog(
     c_win = canvas.create_window((0, 0), window=scroll_frame, anchor="nw")
     canvas.bind("<Configure>", lambda e: canvas.itemconfig(c_win, width=e.width))
     canvas.configure(yscrollcommand=scrollbar.set)
+
+    def _on_mousewheel(event):
+        canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+    canvas.bind("<MouseWheel>", _on_mousewheel)
 
     canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
     scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
@@ -530,6 +550,8 @@ def open_column_filter_dialog(
             font=("Meiryo UI", 9),
         )
         cb.pack(fill=tk.X)
+        cb.bind("<MouseWheel>", _on_mousewheel)
+        c_frame.bind("<MouseWheel>", _on_mousewheel)
         cb_widgets.append((v, c_frame))
 
     def _filter_cb_list(*_args):
@@ -542,19 +564,13 @@ def open_column_filter_dialog(
 
     search_var.trace_add("write", _filter_cb_list)
 
-    btn_row = ttk.Frame(win, padding=(8, 2))
-    btn_row.pack(fill=tk.X)
-
     def _select_all(state):
         for v, frame in cb_widgets:
             if frame.winfo_ismapped():
                 check_vars[v].set(state)
 
-    ttk.Button(btn_row, text="すべて選択", command=lambda: _select_all(True)).pack(side=tk.LEFT, padx=2)
-    ttk.Button(btn_row, text="すべて解除", command=lambda: _select_all(False)).pack(side=tk.LEFT, padx=2)
-
-    footer = ttk.Frame(win, padding=8)
-    footer.pack(fill=tk.X)
+    ttk.Button(btn_row, text="すべて選択", command=lambda: _select_all(True)).pack(side=tk.LEFT, padx=(0, 4))
+    ttk.Button(btn_row, text="すべて解除", command=lambda: _select_all(False)).pack(side=tk.LEFT)
 
     def _apply_filter():
         allowed = {v for v, var in check_vars.items() if var.get()}
@@ -579,6 +595,9 @@ def open_column_filter_dialog(
     ttk.Button(footer, text="フィルター解除", command=_clear_filter).pack(side=tk.LEFT)
     ttk.Button(footer, text="OK", style="Primary.TButton", command=_apply_filter).pack(side=tk.RIGHT, padx=(4, 0))
     ttk.Button(footer, text="キャンセル", command=win.destroy).pack(side=tk.RIGHT)
+
+    win.bind("<Escape>", lambda _e: win.destroy())
+    win.bind("<Return>", lambda _e: _apply_filter())
 
 
 def open_detail_preview_dialog(
