@@ -67,23 +67,26 @@ class StockMatchApp:
     INSTRUCTION_CODE_TO_LABEL = dict(INSTRUCTION_FILTER_OPTIONS)
     INSTRUCTION_LABEL_TO_CODE = {lbl: code for code, lbl in INSTRUCTION_FILTER_OPTIONS}
 
-    # 照合結果一覧（タブ1）のデフォルト表示列（計15項目）
+    # 照合結果一覧（タブ1）のデフォルト表示列（計18項目）
     DEFAULT_VISIBLE_COLUMNS_MAIN = [
-        "status_badge",       # 総合判定
-        "mismatch_reason",    # 不一致理由・照合診断
-        "req_type",           # 依頼区分
-        "order_no",           # 管理No
-        "instruction_disp",   # 指示書
-        "ship_to",            # 出荷先
-        "line_name",          # 品名・ライン名等
-        "product_detail",     # 製品詳細
-        "supplier",           # 発注先
-        "maker",              # メーカー
-        "model_spec",         # 型番・規格(図番)
-        "qty",                # 数量
-        "due_date",           # 注文書納期
-        "days_overdue",       # 基準日超過
-        "source_info",        # 照合元情報
+        "status_badge",
+        "mismatch_reason",
+        "project_name",
+        "order_no",
+        "ship_to",
+        "line_name",
+        "product_detail",
+        "prod_qty",
+        "drawing_no",
+        "part_no",
+        "item_name",
+        "maker",
+        "unit_qty",
+        "spec",
+        "supplier",
+        "stock_qty",
+        "order_date",
+        "due_date",
     ]
 
     def __init__(self, root: tk.Tk):
@@ -1178,56 +1181,11 @@ class StockMatchApp:
         table_container = ttk.Frame(parent)
         table_container.pack(fill=tk.BOTH, expand=True)
 
-        columns = (
-            "status_badge",
-            "mismatch_reason",
-            "req_type",
-            "order_no",
-            "instruction_disp",
-            "ship_to",
-            "line_name",
-            "product_detail",
-            "supplier",
-            "maker",
-            "item_name",
-            "model_spec",
-            "qty",
-            "due_date",
-            "days_overdue",
-            "actual_date",
-            "actual_status",
-            "invoice_date",
-            "invoice_status",
-            "person",
-            "source_info",
-        )
+        from modules.constants import COL_CONFIGS_MAIN
+        self.col_configs_main = list(COL_CONFIGS_MAIN)
+        columns = tuple(c[0] for c in self.col_configs_main)
 
         self.tree_main = ttk.Treeview(table_container, columns=columns, show="headings", selectmode="browse")
-
-        self.col_configs_main = [
-            ("status_badge", "総合判定", 130, "center"),
-            ("mismatch_reason", "不一致理由・照合診断", 210, "w"),
-            ("req_type", "依頼区分", 65, "center"),
-            ("order_no", "管理No(注文番号)", 100, "center"),
-            ("instruction_disp", "指示書(J列)", 65, "center"),
-            ("ship_to", "出荷先", 95, "w"),
-            ("line_name", "品名・ライン名等", 115, "w"),
-            ("product_detail", "製品詳細", 115, "w"),
-            ("supplier", "発注先", 105, "w"),
-            ("maker", "メーカー", 80, "w"),
-            ("item_name", "品名", 110, "w"),
-            ("model_spec", "型番・規格(図番)", 135, "w"),
-            ("qty", "数量", 45, "center"),
-            ("due_date", "注文書納期", 85, "center"),
-            ("days_overdue", "基準日超過", 75, "center"),
-            ("actual_date", "現品確認日(物)", 85, "center"),
-            ("actual_status", "現品状況", 95, "center"),
-            ("invoice_date", "請求日(伝票)", 85, "center"),
-            ("invoice_status", "請求状況", 95, "center"),
-            ("person", "担当", 55, "center"),
-            ("source_info", "照合元情報", 135, "w"),
-        ]
-
         self.col_titles_main = {col_id: title for col_id, title, _, _ in self.col_configs_main}
 
         for col_id, _, width, anchor in self.col_configs_main:
@@ -1301,50 +1259,11 @@ class StockMatchApp:
         table_container = ttk.Frame(parent)
         table_container.pack(fill=tk.BOTH, expand=True)
 
-        columns = (
-            "status_badge",
-            "mgmt_sheet",
-            "mgmt_row",
-            "order_no",
-            "instruction_disp",
-            "ship_to",
-            "line_name",
-            "product_detail",
-            "supplier",
-            "maker",
-            "item_name",
-            "model_spec",
-            "qty",
-            "due_date",
-            "actual_date",
-            "invoice_date",
-            "person",
-            "mismatch_reason",
-        )
+        from modules.constants import COL_CONFIGS_MISSING
+        self.col_configs_missing = list(COL_CONFIGS_MISSING)
+        columns = tuple(c[0] for c in self.col_configs_missing)
 
         self.tree_missing = ttk.Treeview(table_container, columns=columns, show="headings", selectmode="browse")
-
-        self.col_configs_missing = [
-            ("status_badge", "状態判定", 130, "center"),
-            ("mgmt_sheet", "管理表シート", 85, "center"),
-            ("mgmt_row", "行番号", 55, "center"),
-            ("order_no", "管理No(8桁)", 95, "center"),
-            ("instruction_disp", "指示書(J列)", 65, "center"),
-            ("ship_to", "出荷先", 95, "w"),
-            ("line_name", "品名・ライン名等", 115, "w"),
-            ("product_detail", "製品詳細", 115, "w"),
-            ("supplier", "業者 / 発注先", 105, "w"),
-            ("maker", "メーカー", 80, "w"),
-            ("item_name", "品名", 115, "w"),
-            ("model_spec", "型番・規格・図番", 135, "w"),
-            ("qty", "購入数", 45, "center"),
-            ("due_date", "管理表納期", 85, "center"),
-            ("actual_date", "現品確認日", 85, "center"),
-            ("invoice_date", "請求日", 85, "center"),
-            ("person", "担当", 55, "center"),
-            ("mismatch_reason", "未検出診断内容", 210, "w"),
-        ]
-
         self.col_titles_missing = {col_id: title for col_id, title, _, _ in self.col_configs_missing}
 
         for col_id, _, width, anchor in self.col_configs_missing:
@@ -2049,9 +1968,11 @@ class StockMatchApp:
                 if isinstance(visible_cols, list) and visible_cols:
                     all_cids = [cfg[0] for cfg in self.col_configs_main]
                     valid_cols = [c for c in visible_cols if c in all_cids]
-                    if valid_cols:
+                    if valid_cols and "project_name" in valid_cols:
                         self.visible_columns_main = valid_cols
-                        self._apply_column_visibility_main()
+                    else:
+                        self.visible_columns_main = list(self.DEFAULT_VISIBLE_COLUMNS_MAIN)
+                    self._apply_column_visibility_main()
             except Exception:
                 pass
 
@@ -2441,19 +2362,22 @@ class StockMatchApp:
                     [
                         rec["status_badge"],
                         rec["mismatch_reason"],
-                        rec["req_type"],
+                        rec.get("project_name", ""),
                         rec["order_no"],
-                        rec.get("instruction_disp", ""),
                         rec.get("ship_to", ""),
                         rec.get("line_name", ""),
                         rec.get("product_detail", ""),
-                        rec["supplier"],
-                        rec["maker"],
+                        rec.get("prod_qty", ""),
+                        rec.get("drawing_no", ""),
+                        rec.get("part_no", ""),
                         rec["item_name"],
-                        rec["model_spec"],
-                        rec["person"],
-                        rec["actual_status"],
-                        rec["invoice_status"],
+                        rec["maker"],
+                        rec.get("unit_qty", ""),
+                        rec.get("spec", ""),
+                        rec["supplier"],
+                        rec.get("stock_qty", ""),
+                        rec.get("order_date_str", "-"),
+                        rec["due_date_str"],
                     ]
                 ).lower()
                 if kw not in searchable:
@@ -2466,25 +2390,22 @@ class StockMatchApp:
                 values=(
                     rec["status_badge"],
                     rec["mismatch_reason"],
-                    rec["req_type"],
+                    rec.get("project_name", ""),
                     rec["order_no"],
-                    rec.get("instruction_disp", ""),
                     rec.get("ship_to", ""),
                     rec.get("line_name", ""),
                     rec.get("product_detail", ""),
-                    rec["supplier"],
-                    rec["maker"],
+                    rec.get("prod_qty", ""),
+                    rec.get("drawing_no", ""),
+                    rec.get("part_no", ""),
                     rec["item_name"],
-                    rec["model_spec"],
-                    rec["qty"],
+                    rec["maker"],
+                    rec.get("unit_qty", ""),
+                    rec.get("spec", ""),
+                    rec["supplier"],
+                    rec.get("stock_qty", ""),
+                    rec.get("order_date_str", "-"),
                     rec["due_date_str"],
-                    rec["days_overdue_str"],
-                    rec["actual_date_str"],
-                    rec["actual_status"],
-                    rec["invoice_date_str"],
-                    rec["invoice_status"],
-                    rec["person"],
-                    rec["source_info"],
                 ),
                 tags=(rec["row_tag"],),
             )
@@ -2504,29 +2425,7 @@ class StockMatchApp:
             self._update_heading_display_main(col_id)
 
     def _on_tree_main_click(self, event):
-        region = self.tree_main.identify_region(event.x, event.y)
-        if region == "heading":
-            col = self.tree_main.identify_column(event.x)
-            col_index = int(col.replace("#", "")) - 1
-            disp_cols = self.tree_main.cget("displaycolumns")
-            if not disp_cols or disp_cols == "#all" or disp_cols == ("#all",):
-                actual_cols = [c[0] for c in self.col_configs_main]
-            else:
-                actual_cols = list(disp_cols)
-
-            if 0 <= col_index < len(actual_cols):
-                col_id = actual_cols[col_index]
-                self._open_column_filter_dialog(
-                    col_id=col_id,
-                    title=self.col_titles_main.get(col_id, col_id),
-                    records=self._get_visible_main_records(),
-                    filter_dict=self.column_filters_main,
-                    refresh_func=self._refresh_main_table,
-                    update_heading_func=self._update_heading_display_main,
-                    sort_func=lambda c, r: self._sort_tree(self.tree_main, c, r),
-                    x=event.x_root,
-                    y=event.y_root,
-                )
+        self._handle_tree_heading_click(event, is_missing=False)
 
 
     # =========================================================================
@@ -2597,19 +2496,23 @@ class StockMatchApp:
                 searchable = " ".join(
                     [
                         rec["status_badge"],
-                        rec["mgmt_sheet"],
-                        rec["mgmt_row"],
+                        rec["mismatch_reason"],
+                        rec.get("project_name", ""),
                         rec["order_no"],
-                        rec.get("instruction_disp", ""),
                         rec.get("ship_to", ""),
                         rec.get("line_name", ""),
                         rec.get("product_detail", ""),
-                        rec["supplier"],
-                        rec["maker"],
+                        rec.get("prod_qty", ""),
+                        rec.get("drawing_no", ""),
+                        rec.get("part_no", ""),
                         rec["item_name"],
-                        rec["model_spec"],
-                        rec["person"],
-                        rec["mismatch_reason"],
+                        rec["maker"],
+                        rec.get("unit_qty", ""),
+                        rec.get("spec", ""),
+                        rec["supplier"],
+                        rec.get("stock_qty", ""),
+                        rec.get("order_date_str", "-"),
+                        rec.get("due_date_str", rec.get("due_date", "-")),
                     ]
                 ).lower()
                 if kw not in searchable:
@@ -2621,23 +2524,23 @@ class StockMatchApp:
                 iid=f"mis_{idx}",
                 values=(
                     rec["status_badge"],
-                    rec["mgmt_sheet"],
-                    rec["mgmt_row"],
+                    rec["mismatch_reason"],
+                    rec.get("project_name", ""),
                     rec["order_no"],
-                    rec.get("instruction_disp", ""),
                     rec.get("ship_to", ""),
                     rec.get("line_name", ""),
                     rec.get("product_detail", ""),
-                    rec["supplier"],
-                    rec["maker"],
+                    rec.get("prod_qty", ""),
+                    rec.get("drawing_no", ""),
+                    rec.get("part_no", ""),
                     rec["item_name"],
-                    rec["model_spec"],
-                    rec["qty"],
-                    rec["due_date"],
-                    rec["actual_date"],
-                    rec["invoice_date"],
-                    rec["person"],
-                    rec["mismatch_reason"],
+                    rec["maker"],
+                    rec.get("unit_qty", ""),
+                    rec.get("spec", ""),
+                    rec["supplier"],
+                    rec.get("stock_qty", ""),
+                    rec.get("order_date_str", "-"),
+                    rec.get("due_date_str", rec.get("due_date", "-")),
                 ),
                 tags=(rec["row_tag"],),
             )
@@ -2655,23 +2558,7 @@ class StockMatchApp:
             self._update_heading_display_missing(col_id)
 
     def _on_tree_missing_click(self, event):
-        region = self.tree_missing.identify_region(event.x, event.y)
-        if region == "heading":
-            col = self.tree_missing.identify_column(event.x)
-            col_index = int(col.replace("#", "")) - 1
-            if 0 <= col_index < len(self.col_configs_missing):
-                col_id = self.col_configs_missing[col_index][0]
-                self._open_column_filter_dialog(
-                    col_id=col_id,
-                    title=self.col_titles_missing.get(col_id, col_id),
-                    records=self._get_visible_missing_records(),
-                    filter_dict=self.column_filters_missing,
-                    refresh_func=self._refresh_missing_table,
-                    update_heading_func=self._update_heading_display_missing,
-                    sort_func=lambda c, r: self._sort_tree(self.tree_missing, c, r),
-                    x=event.x_root,
-                    y=event.y_root,
-                )
+        self._handle_tree_heading_click(event, is_missing=True)
 
     def _clear_all_missing_column_filters(self):
         self.column_filters_missing.clear()
@@ -2681,6 +2568,33 @@ class StockMatchApp:
     # =========================================================================
     # 共通Excel風列フィルターダイアログ
     # =========================================================================
+    def _handle_tree_heading_click(self, event, is_missing: bool = False):
+        """一覧テーブルの列ヘッダークリック時に該当列のフィルターダイアログを開く"""
+        tree = self.tree_missing if is_missing else self.tree_main
+        region = tree.identify_region(event.x, event.y)
+        if region != "heading":
+            return
+
+        col = tree.identify_column(event.x)
+        if not col or not col.startswith("#"):
+            return
+        try:
+            col_index = int(col[1:]) - 1
+        except ValueError:
+            return
+
+        col_configs = self.col_configs_missing if is_missing else self.col_configs_main
+        disp_cols = tree.cget("displaycolumns")
+        if not disp_cols or disp_cols == "#all" or disp_cols == ("#all",):
+            actual_cols = [c[0] for c in col_configs]
+        elif isinstance(disp_cols, str):
+            actual_cols = disp_cols.split()
+        else:
+            actual_cols = list(disp_cols)
+
+        if 0 <= col_index < len(actual_cols):
+            col_id = actual_cols[col_index]
+            self._open_column_filter_dialog(event, col_id, is_missing=is_missing)
     def _open_column_filter_dialog(self, event, col_id: str, is_missing: bool = False):
         from modules.dialogs import open_column_filter_dialog
         records = self._get_visible_missing_records() if is_missing else self._get_visible_main_records()
