@@ -107,7 +107,7 @@ def open_column_visibility_dialog(
     def _on_mousewheel(event):
         canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
 
-    canvas.bind_all("<MouseWheel>", _on_mousewheel)
+    win.bind("<MouseWheel>", _on_mousewheel)
 
     canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
     scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
@@ -155,16 +155,16 @@ def open_column_visibility_dialog(
         selected = _get_selected_cols()
         if not selected:
             return
-        canvas.unbind_all("<MouseWheel>")
         win.destroy()
         if on_apply:
             on_apply(selected, save_to_config)
 
-    def _on_cancel():
-        canvas.unbind_all("<MouseWheel>")
+    def _on_cancel(_event=None):
         win.destroy()
+        return "break"
 
     win.protocol("WM_DELETE_WINDOW", _on_cancel)
+    win.bind("<Escape>", _on_cancel)
 
     ttk.Button(
         footer,
@@ -322,6 +322,7 @@ def open_exclude_dialog(
         side=tk.RIGHT, padx=(8, 0)
     )
     ttk.Button(btn_bar, text="キャンセル", style="Action.TButton", command=win.destroy).pack(side=tk.RIGHT)
+    win.bind("<Escape>", lambda _e: (win.destroy(), "break")[1])
 
 
 def open_config_location_dialog(
@@ -338,6 +339,7 @@ def open_config_location_dialog(
     win.minsize(560, 320)
     win.transient(parent)
     win.grab_set()
+    win.bind("<Escape>", lambda _e: (win.destroy(), "break")[1])
 
     header = tk.Frame(win, bg="#1e293b", padx=16, pady=12)
     header.pack(fill=tk.X)
@@ -385,7 +387,7 @@ def open_config_location_dialog(
         f = filedialog.askopenfilename(
             title="設定ファイル(config.json)を選択",
             initialdir=initial,
-            filetypes=[("JSON 設定ファイル", "*.json"), ("すべてのファイル", "*.*")],
+            filetypes=[("JSON 設定ファイル (*.json)", "*.json")],
             parent=win,
         )
         if f:
@@ -398,7 +400,7 @@ def open_config_location_dialog(
 
     ttk.Checkbutton(
         body,
-        text="変更前の設定ファイルの内容を、新しい保存先へ自動コピーして引き継ぐ",
+        text="移行先に設定ファイルがまだない場合のみ現在の設定を引き継ぐ（既存ファイルは上書き保護）",
         variable=copy_existing_var,
     ).pack(anchor="w", pady=(4, 10))
 
@@ -600,7 +602,7 @@ def open_column_filter_dialog(
     ttk.Button(footer, text="OK", style="Primary.TButton", command=_apply_filter).pack(side=tk.RIGHT, padx=(4, 0))
     ttk.Button(footer, text="キャンセル", command=win.destroy).pack(side=tk.RIGHT)
 
-    win.bind("<Escape>", lambda _e: win.destroy())
+    win.bind("<Escape>", lambda _e: (win.destroy(), "break")[1])
     win.bind("<Return>", lambda _e: _apply_filter())
 
 
@@ -623,6 +625,7 @@ def open_detail_preview_dialog(
     apply_window_icon(win, icon_path)
     win.geometry("980x740")
     win.minsize(860, 600)
+    win.bind("<Escape>", lambda _e: (win.destroy(), "break")[1])
 
     header = tk.Frame(win, bg="#1e293b", padx=16, pady=10)
     header.pack(fill=tk.X)
@@ -659,8 +662,11 @@ def open_detail_preview_dialog(
     tab_cmp = ttk.Frame(notebook, padding=8)
     notebook.add(tab_cmp, text="  ① 🔍 項目比較・診断レポート  ")
 
+    cmp_tree_frame = ttk.Frame(tab_cmp)
+    cmp_tree_frame.pack(fill=tk.BOTH, expand=True)
+
     cmp_cols = ("field", "order_val", "mgmt_val", "judge")
-    cmp_tree = ttk.Treeview(tab_cmp, columns=cmp_cols, show="headings", height=10)
+    cmp_tree = ttk.Treeview(cmp_tree_frame, columns=cmp_cols, show="headings", height=10)
     cmp_tree.heading("field", text="比較項目")
     cmp_tree.heading("order_val", text="注文書の記載内容")
     cmp_tree.heading("mgmt_val", text="注文品管理表の記載内容")
@@ -677,10 +683,12 @@ def open_detail_preview_dialog(
     cmp_tree.tag_configure("INFO", background="#f1f5f9", foreground="#334155")
     cmp_tree.tag_configure("IGNORED", background="#f8fafc", foreground="#64748b")
 
-    cmp_vsb = ttk.Scrollbar(tab_cmp, orient="vertical", command=cmp_tree.yview)
-    cmp_tree.configure(yscrollcommand=cmp_vsb.set)
-    cmp_tree.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
-    cmp_vsb.pack(side=tk.RIGHT, fill=tk.Y, in_=tab_cmp)
+    cmp_vsb = ttk.Scrollbar(cmp_tree_frame, orient="vertical", command=cmp_tree.yview)
+    cmp_hsb = ttk.Scrollbar(cmp_tree_frame, orient="horizontal", command=cmp_tree.xview)
+    cmp_tree.configure(yscrollcommand=cmp_vsb.set, xscrollcommand=cmp_hsb.set)
+    cmp_vsb.pack(side=tk.RIGHT, fill=tk.Y)
+    cmp_hsb.pack(side=tk.BOTTOM, fill=tk.X)
+    cmp_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
     comparison_rows = diag_data.get("comparison_rows", [])
     for row_item in comparison_rows:
@@ -760,8 +768,13 @@ def _build_sheet_preview_tree(parent, filepath: str, sheet_name: str, target_row
     tbl_frame.grid_rowconfigure(0, weight=1)
     tbl_frame.grid_columnconfigure(0, weight=1)
 
+    wb = None
+    tmp_dir = None
     try:
-        wb = openpyxl.load_workbook(filepath, data_only=True, read_only=True)
+        import shutil
+        from .matcher import _load_workbook_safely
+
+        wb, tmp_dir = _load_workbook_safely(filepath, data_only=True, read_only=True)
         ws = wb[sheet_name] if sheet_name in wb.sheetnames else wb.active
         for r_idx, row in enumerate(ws.iter_rows(max_row=120, max_col=max_preview_cols, values_only=True), start=1):
             if not any(v is not None for v in row):
@@ -781,9 +794,19 @@ def _build_sheet_preview_tree(parent, filepath: str, sheet_name: str, target_row
             item_id = tree.insert("", tk.END, values=vals, tags=tag)
             if target_row and r_idx == target_row:
                 tree.see(item_id)
-        wb.close()
     except Exception as e:
         ttk.Label(parent, text=f"シート読込エラー: {e}", foreground="#dc2626").pack(anchor="w")
+    finally:
+        if wb is not None:
+            try:
+                wb.close()
+            except Exception:
+                pass
+        if tmp_dir:
+            try:
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+            except Exception:
+                pass
 
 
 def _build_mgmt_preview_tree(parent, cached_mgmt_rows: list[dict], order_no: str, target_sheet: str, target_row: int | None):
@@ -1219,7 +1242,7 @@ def show_help_guide(parent: tk.Tk | tk.Toplevel, initial_tab: int = 0, icon_path
     btn_frame = tk.Frame(win, bg="#f1f5f9", padx=16, pady=8)
     btn_frame.pack(fill=tk.X, side=tk.BOTTOM)
     ttk.Button(btn_frame, text="閉じる (Esc)", style="Primary.TButton", command=win.destroy).pack(side=tk.RIGHT)
-    win.bind("<Escape>", lambda _e: win.destroy())
+    win.bind("<Escape>", lambda _e: (win.destroy(), "break")[1])
 
 
 def show_about(parent: tk.Tk | tk.Toplevel, icon_path: str | None = None):

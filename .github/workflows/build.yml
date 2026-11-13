@@ -29,17 +29,18 @@ jobs:
         --onefile 
         --noconsole 
         --clean 
-        --name "StockMatch_Miya-v1.5.0" 
+        --name "StockMatch_Miya-v1.5.1" 
         --icon icon.ico 
         --add-data "README.md;." 
         --add-data "icon.ico;." 
-        --collect-all PySide6 
         --collect-submodules modules 
-        --hidden-import jpholiday 
+        --hidden-import win32com.client 
+        --hidden-import pythoncom 
+        --hidden-import pywintypes 
         app.py
 
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: StockMatch_Miya-v1.5.0
-        path: dist/StockMatch_Miya-v1.5.0.exe
+        name: StockMatch_Miya-v1.5.1
+        path: dist/StockMatch_Miya-v1.5.1.exe

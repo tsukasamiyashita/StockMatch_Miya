@@ -3,8 +3,8 @@ StockMatch_Miya 定数定義モジュール
 アプリケーション全体で使用する定数、列設定、初期値、カラーマップを集約
 """
 
-APP_VERSION = "v1.5.0"
-APP_NAME = "StockMatch_Miya-v1.5.0"
+APP_VERSION = "v1.5.1"
+APP_NAME = f"StockMatch_Miya-{APP_VERSION}"
 APP_TITLE = f"{APP_NAME} - 注文品納期・現品/請求照合システム"
 APP_USER_MODEL_ID = f"StockMatch.Miya.{APP_VERSION}"
 

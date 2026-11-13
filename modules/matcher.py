@@ -6,6 +6,9 @@ StockMatch_Miya 照合エンジンモジュール
 import os
 import re
 import datetime
+import shutil
+import tempfile
+import threading
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
 try:
@@ -32,9 +35,79 @@ from .date_utils import (
     is_zero_quantity,
     clean_cell_str,
     extract_8digit_no,
+    extract_all_8digit_nos,
     is_order_no_excluded,
     classify_instruction_col,
 )
+
+
+def _is_yyyymmdd_date_token(token8: str) -> bool:
+    """8桁数字がYYYYMMDD形式の日付（例: 20261101）として妥当かを判定する。"""
+    if not token8 or len(token8) != 8 or not token8.isdigit():
+        return False
+    y = int(token8[:4])
+    m = int(token8[4:6])
+    d = int(token8[6:8])
+    if not (1995 <= y <= 2099 and 1 <= m <= 12 and 1 <= d <= 31):
+        return False
+    try:
+        datetime.date(y, m, d)
+        return True
+    except ValueError:
+        return False
+
+
+def _pick_order_no_candidate(text: str, valid_mgmt_order_nos: set[str] | None = None) -> tuple[str, bool]:
+    """
+    テキスト中の全8桁数字候補から、管理Noと推定される番号を返す。
+    戻り値: (解決した8桁管理Noまたは空文字, テキスト内に管理表外の非日付8桁管理Noが含まれていたか)
+    """
+    cands = extract_all_8digit_nos(text)
+    if not cands:
+        return "", False
+
+    if valid_mgmt_order_nos:
+        for c in cands:
+            if c in valid_mgmt_order_nos:
+                return c, False
+        # 管理表に一致しない候補群のうち、明確に日付形式ではないものがあれば対象外管理Noとみなす
+        non_date_cands = [c for c in cands if not _is_yyyymmdd_date_token(c)]
+        if non_date_cands:
+            return non_date_cands[0], True
+        # 日付8桁のみだった場合は管理No未確定扱い（スキップしない）
+        return "", False
+
+    non_date_cands = [c for c in cands if not _is_yyyymmdd_date_token(c)]
+    return (non_date_cands[0] if non_date_cands else cands[0]), False
+
+
+def _load_workbook_safely(
+    filepath: str,
+    data_only: bool = True,
+    read_only: bool = True,
+) -> tuple[object, str | None]:
+    """
+    openpyxl で Excel を安全に読み込む。
+    他プロセス (Excel 等) がロック中の場合は一時フォルダへコピーしてから開くことで回避する。
+    戻り値: (Workbook, 一時ディレクトリパスまたは None)
+    """
+    if openpyxl is None:
+        raise RuntimeError("openpyxl がインストールされていません。")
+
+    try:
+        wb = openpyxl.load_workbook(filepath, data_only=data_only, read_only=read_only)
+        return wb, None
+    except PermissionError:
+        tmp_dir = tempfile.mkdtemp(prefix="sm_excel_")
+        try:
+            _, ext = os.path.splitext(filepath)
+            tmp_path = os.path.join(tmp_dir, f"locked_copy{ext or '.xlsx'}")
+            shutil.copy2(filepath, tmp_path)
+            wb = openpyxl.load_workbook(tmp_path, data_only=data_only, read_only=read_only)
+            return wb, tmp_dir
+        except Exception:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            raise
 
 
 def collect_valid_order_files(
@@ -43,42 +116,53 @@ def collect_valid_order_files(
     valid_mgmt_order_nos: set[str],
     progress_cb=None,
     cancel_event=None,
+    order_cache: dict | None = None,
+    cache_lock=None,
+    excluded_order_nos: set[str] | list[str] | None = None,
 ) -> tuple[list[dict], int, int]:
     """
-    注文書フォルダ内（サブフォルダ含む全階層）から有効な注文書Excelファイルを高速探索・読み込み
-    枝刈りスキャン（管理表にない管理Noフォルダを丸ごとスキップ）と並列読み込みを実施
+    注文書フォルダ内（サブフォルダ含む全階層）から有効な注文書Excelファイルを高速探索・読み込み。
+    枝刈りスキャン（管理表外管理Noフォルダのスキップ、深い階層への管理No継承、ロック中一時コピー読込、
+    更新日時ベースのキャッシュ利用と並列パース）を実施する。
     """
-    if not os.path.isdir(order_dir):
+    if not order_dir or not os.path.isdir(order_dir):
         return [], 0, 0
 
     norm_mgmt = os.path.normcase(os.path.abspath(mgmt_file_path)) if mgmt_file_path else ""
-    target_files = []
+    norm_root_order = os.path.normcase(os.path.abspath(order_dir))
+    dir_inherited_map: dict[str, str] = {norm_root_order: ""}
+    target_files: list[tuple[str, str, str]] = []
     ignored_count = 0
 
-    # 1. 枝刈り探索
+    # 1. 階層継承対応・枝刈り探索
     for root, dirs, files in os.walk(order_dir):
         if cancel_event and cancel_event.is_set():
             raise AnalysisCancelledException("照合処理がユーザーによって中止されました。")
 
-        # 管理表にない管理Noフォルダを配下ごと丸ごとスキップ
-        if valid_mgmt_order_nos and root != order_dir:
+        norm_root = os.path.normcase(os.path.abspath(root))
+        current_inherited = dir_inherited_map.get(norm_root, "")
+
+        if norm_root != norm_root_order:
             dir_name = os.path.basename(root)
-            d_no8 = extract_8digit_no(dir_name)
-            if d_no8 and d_no8 not in valid_mgmt_order_nos:
+            d_cand, d_is_other = _pick_order_no_candidate(dir_name, valid_mgmt_order_nos)
+            if valid_mgmt_order_nos and d_is_other:
                 dirs.clear()
                 ignored_count += len(files)
                 continue
+            if d_cand:
+                current_inherited = d_cand
 
-        # サブフォルダ名も同様に検査
-        if valid_mgmt_order_nos:
-            keep_dirs = []
-            for d in dirs:
-                d_no = extract_8digit_no(d)
-                if d_no and d_no not in valid_mgmt_order_nos:
-                    ignored_count += 1
-                else:
-                    keep_dirs.append(d)
-            dirs[:] = keep_dirs
+        # 配下サブフォルダへの管理No継承 & 事前枝刈り
+        keep_dirs = []
+        for d in dirs:
+            d_cand, d_is_other = _pick_order_no_candidate(d, valid_mgmt_order_nos)
+            if valid_mgmt_order_nos and d_is_other:
+                ignored_count += 1
+                continue
+            child_abs = os.path.normcase(os.path.abspath(os.path.join(root, d)))
+            dir_inherited_map[child_abs] = d_cand or current_inherited
+            keep_dirs.append(d)
+        dirs[:] = keep_dirs
 
         for f in files:
             f_low = f.lower()
@@ -89,54 +173,127 @@ def collect_valid_order_files(
             if norm_mgmt and os.path.normcase(os.path.abspath(full_path)) == norm_mgmt:
                 continue
 
-            # 見積専用ファイルを事前除外
-            f_clean = f.replace(" ", "")
+            # 管理表・出力結果・見積専用ファイルを事前除外
+            f_clean = f.replace(" ", "").replace("　", "")
+            if any(k in f_clean for k in ("管理表", "納期超過チェック結果")):
+                ignored_count += 1
+                continue
             if "見積" in f_clean and not any(k in f_clean for k in ("注文", "発注")):
                 ignored_count += 1
                 continue
 
-            f_no8 = extract_8digit_no(f)
-            if not f_no8:
-                p_dir_name = os.path.basename(root)
-                f_no8 = extract_8digit_no(p_dir_name)
-
-            if valid_mgmt_order_nos and f_no8 and f_no8 not in valid_mgmt_order_nos:
+            f_cand, f_is_other = _pick_order_no_candidate(f, valid_mgmt_order_nos)
+            if valid_mgmt_order_nos and f_is_other and not current_inherited:
                 ignored_count += 1
                 continue
 
-            target_files.append((full_path, f, f_no8))
+            resolved_no8 = f_cand or current_inherited
+            if valid_mgmt_order_nos and resolved_no8 and resolved_no8 not in valid_mgmt_order_nos:
+                ignored_count += 1
+                continue
+
+            if excluded_order_nos and resolved_no8 and is_order_no_excluded(resolved_no8, excluded_order_nos):
+                ignored_count += 1
+                continue
+
+            target_files.append((full_path, f, resolved_no8))
 
     total_target = len(target_files)
     if total_target == 0:
         return [], 0, ignored_count
 
-    all_order_items = []
-    valid_file_count = 0
+    results_by_index: dict[int, list[dict]] = {}
+    uncached_jobs: list[tuple[int, str, str, str, float, int]] = []
 
-    # 2. マルチスレッド並列パース
-    max_workers = min(12, max(2, (os.cpu_count() or 4) * 2))
+    # 2. 更新日時 + サイズによる高速キャッシュチェック
+    for idx, (fpath, fname, fno8) in enumerate(target_files):
+        try:
+            st = os.stat(fpath)
+            mtime = st.st_mtime
+            fsize = st.st_size
+        except OSError:
+            mtime, fsize = 0.0, -1
 
-    def _worker(item):
-        if cancel_event and cancel_event.is_set():
-            return None, 0
-        fpath, fname, fno8 = item
-        items = parse_order_book(fpath, fname, fno8, cancel_event=cancel_event)
-        return items, len(items)
+        norm_path = os.path.normcase(os.path.abspath(fpath))
+        cached_hit = None
+        if order_cache is not None and fsize >= 0:
+            if cache_lock:
+                with cache_lock:
+                    cached_entry = order_cache.get(norm_path)
+            else:
+                cached_entry = order_cache.get(norm_path)
+            if cached_entry and len(cached_entry) >= 3:
+                c_mtime, c_size, c_items = cached_entry[0], cached_entry[1], cached_entry[2]
+                c_no8 = cached_entry[3] if len(cached_entry) >= 4 else fno8
+                if c_mtime == mtime and c_size == fsize and c_no8 == fno8:
+                    # キャッシュヒット：新規辞書にコピーし、除外設定を動的フィルタリング
+                    cached_hit = [
+                        dict(it)
+                        for it in c_items
+                        if not (excluded_order_nos and is_order_no_excluded(it.get("order_no_8") or it.get("order_no", ""), excluded_order_nos))
+                    ]
+                    results_by_index[idx] = cached_hit
+                    continue
 
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(_worker, it): it for it in target_files}
-        done_cnt = 0
-        for fut in as_completed(futures):
+        uncached_jobs.append((idx, fpath, fname, fno8, mtime, fsize))
+
+    total_uncached = len(uncached_jobs)
+    if progress_cb and total_uncached == 0:
+        progress_cb(73.0, f"[2/3] 注文書ファイルをキャッシュから高速復元完了 ({total_target} 件)")
+
+    # 3. 未キャッシュファイルのみマルチスレッド並列パース
+    if total_uncached > 0:
+        max_workers = min(12, max(2, (os.cpu_count() or 4) * 2))
+
+        def _worker(job):
+            idx, fpath, fname, fno8, mtime, fsize = job
             if cancel_event and cancel_event.is_set():
-                raise AnalysisCancelledException("照合処理がユーザーによって中止されました。")
-            done_cnt += 1
-            if progress_cb and (done_cnt == 1 or done_cnt % 5 == 0 or done_cnt == total_target):
-                pct = 35.0 + (38.0 * done_cnt / total_target)
-                progress_cb(pct, f"[2/3] 注文書ファイルを高速読込中 ({done_cnt}/{total_target} 件)...")
-            res, count = fut.result()
-            if res:
-                all_order_items.extend(res)
-                valid_file_count += 1
+                return idx, None, fpath, fno8, mtime, fsize
+            raw_items = parse_order_book(
+                fpath,
+                fname,
+                fno8,
+                cancel_event=cancel_event,
+                valid_mgmt_order_nos=valid_mgmt_order_nos,
+            )
+            return idx, raw_items, fpath, fno8, mtime, fsize
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(_worker, jb): jb for jb in uncached_jobs}
+            done_cnt = 0
+            for fut in as_completed(futures):
+                if cancel_event and cancel_event.is_set():
+                    raise AnalysisCancelledException("照合処理がユーザーによって中止されました。")
+                done_cnt += 1
+                if progress_cb and (done_cnt == 1 or done_cnt % 5 == 0 or done_cnt == total_uncached):
+                    pct = 35.0 + (38.0 * done_cnt / total_uncached)
+                    progress_cb(pct, f"[2/3] 注文書ファイルを高速読込中 ({done_cnt}/{total_uncached} 件 / 全{total_target}件)...")
+
+                idx, parsed_items, fpath, fno8, mtime, fsize = fut.result()
+                if parsed_items is None:
+                    continue
+                if order_cache is not None and fsize >= 0:
+                    norm_path = os.path.normcase(os.path.abspath(fpath))
+                    frozen_copy = [dict(it) for it in parsed_items]
+                    if cache_lock:
+                        with cache_lock:
+                            order_cache[norm_path] = (mtime, fsize, frozen_copy, fno8)
+                    else:
+                        order_cache[norm_path] = (mtime, fsize, frozen_copy, fno8)
+
+                results_by_index[idx] = [
+                    dict(it)
+                    for it in parsed_items
+                    if not (excluded_order_nos and is_order_no_excluded(it.get("order_no_8") or it.get("order_no", ""), excluded_order_nos))
+                ]
+
+    all_order_items: list[dict] = []
+    valid_file_count = 0
+    for idx in range(total_target):
+        items = results_by_index.get(idx, [])
+        if items:
+            all_order_items.extend(items)
+            valid_file_count += 1
 
     return all_order_items, valid_file_count, ignored_count
 
@@ -145,346 +302,394 @@ def parse_management_book(
     filepath: str,
     progress_cb=None,
     cancel_event=None,
+    mgmt_cache_holder: dict | None = None,
 ) -> list[dict]:
-    """注文品管理表Excelを読み込み、明細行リストを生成して返す"""
+    """注文品管理表Excelを読み込み、明細行リストを生成して返す（キャッシュ・ロック保護対応）。"""
     if not os.path.isfile(filepath):
         return []
 
-    wb = openpyxl.load_workbook(filepath, data_only=True, read_only=True)
-    mgmt_rows = []
-    sheet_names = wb.sheetnames
-    total_sheets = len(sheet_names)
+    norm_path = os.path.normcase(os.path.abspath(filepath))
+    try:
+        st = os.stat(filepath)
+        mtime, fsize = st.st_mtime, st.st_size
+    except OSError:
+        mtime, fsize = 0.0, -1
 
-    for s_idx, sheet_name in enumerate(sheet_names, start=1):
-        if cancel_event and cancel_event.is_set():
-            wb.close()
-            raise AnalysisCancelledException("照合処理がユーザーによって中止されました。")
-        if progress_cb:
-            pct = 5.0 + (28.0 * s_idx / max(1, total_sheets))
-            progress_cb(
-                pct,
-                f"[1/3] 注文品管理表を読み込み中 ({s_idx}/{total_sheets} シート: {sheet_name})...",
-            )
-
-        s_clean = sheet_name.replace(" ", "")
-        if any(k in s_clean for k in ("購入品", "購入", "購入依頼")):
-            sheet_cat = "PURCHASE"
-            sheet_cat_label = "購入依頼"
-        elif any(k in s_clean for k in ("外注加工", "外注", "外依")):
-            sheet_cat = "OUTSOURCE"
-            sheet_cat_label = "外注依頼"
-        else:
-            sheet_cat = "OTHER"
-            sheet_cat_label = "管理表品目"
-
-        sheet_default_order_no = extract_8digit_no(sheet_name)
-
-        ws = wb[sheet_name]
-        raw_rows = []
-        empty_streak = 0
-        for r_idx, row_tuple in enumerate(ws.iter_rows(max_col=42, values_only=True), start=1):
-            if not row_tuple or not any(v is not None and str(v).strip() != "" for v in row_tuple):
-                empty_streak += 1
-                if r_idx > 20 and empty_streak >= 60:
-                    break
-                continue
-            empty_streak = 0
-            raw_rows.append((r_idx, row_tuple))
-
-        if not raw_rows:
-            continue
-
-        header_pos_in_list = None
-        col_map = {}
-
-        # ヘッダー探索（先頭18行以内）
-        for list_i, (r_idx, row_tuple) in enumerate(raw_rows[:18]):
-            if r_idx > 25:
-                break
-            prev_tuple = raw_rows[list_i - 1][1] if list_i > 0 and raw_rows[list_i - 1][0] == r_idx - 1 else ()
-            row_vals = []
-            for c_idx in range(1, len(row_tuple) + 1):
-                v_curr = unicodedata.normalize("NFKC", str(row_tuple[c_idx - 1] or "").strip())
-                v_above = (
-                    unicodedata.normalize("NFKC", str(prev_tuple[c_idx - 1] or "").strip())
-                    if c_idx - 1 < len(prev_tuple)
-                    else ""
-                )
-                combined = re.sub(r"\s+", "", f"{v_above}{v_curr}")
-                row_vals.append((c_idx, combined, re.sub(r"\s+", "", v_curr)))
-
-            joined = " ".join(v[1] for v in row_vals)
-            if ("品名" in joined or "購入数" in joined) and (
-                "図面" in joined or "品番" in joined or "仕様" in joined or "現品" in joined or "メーカー" in joined or "管理" in joined
+    if mgmt_cache_holder is not None and fsize >= 0:
+        entry = mgmt_cache_holder.get("entry")
+        if entry and entry[0] == norm_path and entry[1] == mtime and entry[2] == fsize:
+            cached_rows = entry[3]
+            if not cached_rows or (
+                "instruction_state" in cached_rows[0]
+                and "project_name" in cached_rows[0]
+                and "supplier" in cached_rows[0]
             ):
-                header_pos_in_list = list_i
-                for c_idx, v_comb, v_curr in row_vals:
-                    if not v_comb:
-                        continue
-                    v_up = v_comb.upper()
+                if progress_cb:
+                    progress_cb(33.0, "[1/3] 注文品管理表をキャッシュから高速復元中...")
+                return [dict(r, matched=False, matched_by="") for r in cached_rows]
 
-                    if "現品確認" in v_comb or (c_idx == 1 and "現品" in v_comb):
-                        col_map.setdefault("actual_date", c_idx)
-                    elif "請求日" in v_comb or (c_idx >= 30 and "請求" in v_comb):
-                        col_map.setdefault("invoice_date", c_idx)
-                    elif any(
-                        k in v_up
-                        for k in ("管理NO", "管理番号", "注文番号", "発注番号", "手配番号", "工事番号", "工事NO", "製番")
-                    ):
-                        col_map.setdefault("order_no", c_idx)
-                    elif "プロジェクト" in v_comb or "プロジェクト名" in v_comb or "PJ名" in v_comb:
-                        col_map.setdefault("project_name", c_idx)
-                    elif "発注日" in v_comb or "注文日" in v_comb:
-                        col_map.setdefault("order_date", c_idx)
-                    elif "図面番号" in v_comb or "図番" in v_comb:
-                        col_map.setdefault("drawing_no", c_idx)
-                    elif "品番" in v_comb or "型番" in v_comb or "部品番号" in v_comb:
-                        col_map.setdefault("part_no", c_idx)
-                    elif "出荷先" in v_comb or "納入先" in v_comb or "客先" in v_comb or "得意先" in v_comb:
-                        col_map.setdefault("ship_to", c_idx)
-                    elif "製品詳細" in v_comb or "詳細" in v_comb:
-                        col_map.setdefault("product_detail", c_idx)
-                    elif "ライン名" in v_comb or "品名、ライン名" in v_comb or "品名・ライン名" in v_comb:
-                        col_map["line_name"] = c_idx
-                    elif ("品名" in v_comb or "名称" in v_comb or "商品名" in v_comb) and "品名、ライン名" not in v_comb:
-                        if c_idx >= 15:
-                            col_map["item_name"] = c_idx
-                        elif "item_name" not in col_map:
-                            col_map["item_name"] = c_idx
-                    elif "仕入先" in v_comb:
-                        col_map.setdefault("supplier", c_idx)
-                    elif "メーカー" in v_comb or "発注先" in v_comb or "業者" in v_comb:
-                        col_map.setdefault("maker", c_idx)
-                    elif "製作数" in v_comb or "作数" in v_comb:
-                        col_map.setdefault("prod_qty", c_idx)
-                    elif "単数" in v_comb:
-                        col_map.setdefault("unit_qty", c_idx)
-                    elif "仕様" in v_comb or "規格" in v_comb or "材質" in v_comb or "寸法" in v_comb:
-                        col_map.setdefault("spec", c_idx)
-                    elif "購入数" in v_comb or v_curr == "購入数":
-                        col_map["qty"] = c_idx
-                    elif "必要数" in v_comb or v_curr == "必要数":
-                        col_map.setdefault("req_qty", c_idx)
-                    elif "在庫数" in v_comb or v_curr == "在庫数":
-                        col_map.setdefault("stock_qty", c_idx)
-                    elif ("数量" in v_comb or v_curr in ("数", "発注数")) and "購入数" not in col_map:
-                        col_map.setdefault("qty", c_idx)
-                    elif "単価" in v_curr and "金額" not in v_curr and "必要数" not in v_curr:
-                        col_map.setdefault("unit_price", c_idx)
-                    elif "金額" in v_comb or "単価X必要数" in v_comb or "単価×必要数" in v_comb:
-                        col_map.setdefault("amount", c_idx)
-                    elif "納期" in v_comb or "納入日" in v_comb:
-                        col_map.setdefault("due_date", c_idx)
-                    elif "担当" in v_comb:
-                        col_map.setdefault("person", c_idx)
-                    elif "指示書" in v_comb:
-                        col_map.setdefault("instruction_doc", c_idx)
-                break
+    wb, tmp_dir = _load_workbook_safely(filepath, data_only=True, read_only=True)
+    mgmt_rows = []
+    try:
+        sheet_names = wb.sheetnames
+        total_sheets = len(sheet_names)
 
-        if header_pos_in_list is None:
-            continue
+        for s_idx, sheet_name in enumerate(sheet_names, start=1):
+            if cancel_event and cancel_event.is_set():
+                raise AnalysisCancelledException("照合処理がユーザーによって中止されました。")
+            if progress_cb:
+                pct = 5.0 + (28.0 * s_idx / max(1, total_sheets))
+                progress_cb(
+                    pct,
+                    f"[1/3] 注文品管理表を読み込み中 ({s_idx}/{total_sheets} シート: {sheet_name})...",
+                )
 
-        col_map.setdefault("actual_date", 1)       # A列: 現品確認日
-        col_map.setdefault("instruction_doc", 10)  # J列: 指示書
-        col_map.setdefault("project_name", 11)     # K列: プロジェクト名
-        col_map.setdefault("order_no", 13)         # M列: 管理No
-        col_map.setdefault("ship_to", 14)          # N列: 出荷先
-        col_map.setdefault("line_name", 15)        # O列: 品名、ライン名等
-        col_map.setdefault("product_detail", 16)   # P列: 製品詳細
-        col_map.setdefault("prod_qty", 17)         # Q列: 製作数
-        col_map.setdefault("drawing_no", 18)       # R列: 図面番号
-        col_map.setdefault("part_no", 19)          # S列: 品番
-        col_map.setdefault("item_name", 20)        # T列: 品名
-        col_map.setdefault("maker", 21)            # U列: メーカー
-        col_map.setdefault("unit_qty", 22)         # V列: 単数
-        col_map.setdefault("spec", 23)             # W列: 仕様
-        col_map.setdefault("supplier", 24)         # X列: 仕入先
-        col_map.setdefault("stock_qty", 27)        # AA列: 在庫数
-        col_map["qty"] = 28                        # AB列: 購入数
-        col_map.setdefault("order_date", 33)       # AG列: 注文日
-        col_map.setdefault("due_date", 34)         # AH列: 納期
-        col_map.setdefault("invoice_date", 35)     # AI列: 請求日
+            s_clean = sheet_name.replace(" ", "")
+            if any(k in s_clean for k in ("購入品", "購入", "購入依頼")):
+                sheet_cat = "PURCHASE"
+                sheet_cat_label = "購入依頼"
+            elif any(k in s_clean for k in ("外注加工", "外注", "外依")):
+                sheet_cat = "OUTSOURCE"
+                sheet_cat_label = "外注依頼"
+            else:
+                sheet_cat = "OTHER"
+                sheet_cat_label = "管理表品目"
 
-        data_slice = raw_rows[header_pos_in_list + 1 :]
+            sheet_default_order_no = extract_8digit_no(sheet_name)
 
-        def _get_col(rtuple: tuple, col_1based: int | None):
-            if not col_1based or col_1based < 1 or col_1based > len(rtuple):
-                return None
-            return rtuple[col_1based - 1]
+            ws = wb[sheet_name]
+            raw_rows = []
+            empty_streak = 0
+            for r_idx, row_tuple in enumerate(ws.iter_rows(max_col=42, values_only=True), start=1):
+                if not row_tuple or not any(v is not None and str(v).strip() != "" for v in row_tuple):
+                    empty_streak += 1
+                    if r_idx > 20 and empty_streak >= 60:
+                        break
+                    continue
+                empty_streak = 0
+                raw_rows.append((r_idx, row_tuple))
 
-        last_seen_order_no_8 = sheet_default_order_no
-
-        for r_idx, row_tuple in data_slice:
-            project_name_val = _get_col(row_tuple, col_map.get("project_name"))
-            drawing_val = _get_col(row_tuple, col_map.get("drawing_no"))
-            part_val = _get_col(row_tuple, col_map.get("part_no"))
-            item_val = _get_col(row_tuple, col_map.get("item_name"))
-            maker_val = _get_col(row_tuple, col_map.get("maker"))
-            spec_val = _get_col(row_tuple, col_map.get("spec"))
-            ship_to_val = _get_col(row_tuple, col_map.get("ship_to"))
-            line_val = _get_col(row_tuple, col_map.get("line_name"))
-            prod_detail_val = _get_col(row_tuple, col_map.get("product_detail"))
-            order_no_val = _get_col(row_tuple, col_map.get("order_no"))
-            prod_qty_val = _get_col(row_tuple, col_map.get("prod_qty"))
-            unit_qty_val = _get_col(row_tuple, col_map.get("unit_qty"))
-            supplier_val = _get_col(row_tuple, col_map.get("supplier"))
-            stock_qty_val = _get_col(row_tuple, col_map.get("stock_qty"))
-
-            qty_val = _get_col(row_tuple, 28)
-            if qty_val is None:
-                qty_val = _get_col(row_tuple, col_map.get("qty"))
-
-            if not any([project_name_val, drawing_val, part_val, item_val, spec_val, maker_val, line_val, prod_detail_val]):
+            if not raw_rows:
                 continue
 
-            order_date_raw = _get_col(row_tuple, col_map.get("order_date"))
-            order_date = parse_flexible_date(order_date_raw, allow_period=False)
-            inferred_year = order_date.year if order_date else datetime.date.today().year
+            header_pos_in_list = None
+            col_map = {}
 
-            a_col_val = _get_col(row_tuple, 1)
-            mapped_actual_val = _get_col(row_tuple, col_map.get("actual_date"))
-            actual_raw = a_col_val if is_filled_confirmation(a_col_val) else mapped_actual_val
+            # ヘッダー探索（先頭18行以内）
+            for list_i, (r_idx, row_tuple) in enumerate(raw_rows[:18]):
+                if r_idx > 25:
+                    break
+                prev_tuple = raw_rows[list_i - 1][1] if list_i > 0 and raw_rows[list_i - 1][0] == r_idx - 1 else ()
+                row_vals = []
+                for c_idx in range(1, len(row_tuple) + 1):
+                    v_curr = unicodedata.normalize("NFKC", str(row_tuple[c_idx - 1] or "").strip())
+                    v_above = (
+                        unicodedata.normalize("NFKC", str(prev_tuple[c_idx - 1] or "").strip())
+                        if c_idx - 1 < len(prev_tuple)
+                        else ""
+                    )
+                    combined = re.sub(r"\s+", "", f"{v_above}{v_curr}")
+                    row_vals.append((c_idx, combined, re.sub(r"\s+", "", v_curr)))
 
-            ai_col_val = _get_col(row_tuple, 35)
-            mapped_inv_val = _get_col(row_tuple, col_map.get("invoice_date"))
-            invoice_raw = ai_col_val if is_filled_confirmation(ai_col_val) else mapped_inv_val
+                joined = " ".join(v[1] for v in row_vals)
+                if ("品名" in joined or "購入数" in joined) and (
+                    "図面" in joined or "品番" in joined or "仕様" in joined or "現品" in joined or "メーカー" in joined or "管理" in joined
+                ):
+                    header_pos_in_list = list_i
+                    for c_idx, v_comb, v_curr in row_vals:
+                        if not v_comb:
+                            continue
+                        v_up = v_comb.upper()
 
-            # AH列 (34列目) の納期セル値を優先取得
-            ah_col_val = _get_col(row_tuple, 34)
-            mapped_due_val = _get_col(row_tuple, col_map.get("due_date"))
-            due_raw = ah_col_val if (ah_col_val is not None and str(ah_col_val).strip() != "") else mapped_due_val
+                        if "現品確認" in v_comb or (c_idx == 1 and "現品" in v_comb):
+                            col_map.setdefault("actual_date", c_idx)
+                        elif "請求日" in v_comb or (c_idx >= 30 and "請求" in v_comb):
+                            col_map.setdefault("invoice_date", c_idx)
+                        elif any(
+                            k in v_up
+                            for k in ("管理NO", "管理番号", "注文番号", "発注番号", "手配番号", "工事番号", "工事NO", "製番")
+                        ):
+                            col_map.setdefault("order_no", c_idx)
+                        elif "プロジェクト" in v_comb or "プロジェクト名" in v_comb or "PJ名" in v_comb:
+                            col_map.setdefault("project_name", c_idx)
+                        elif "発注日" in v_comb or "注文日" in v_comb:
+                            col_map.setdefault("order_date", c_idx)
+                        elif "図面番号" in v_comb or "図番" in v_comb:
+                            col_map.setdefault("drawing_no", c_idx)
+                        elif "品番" in v_comb or "型番" in v_comb or "部品番号" in v_comb:
+                            col_map.setdefault("part_no", c_idx)
+                        elif "出荷先" in v_comb or "納入先" in v_comb or "客先" in v_comb or "得意先" in v_comb:
+                            col_map.setdefault("ship_to", c_idx)
+                        elif "製品詳細" in v_comb or "詳細" in v_comb:
+                            col_map.setdefault("product_detail", c_idx)
+                        elif "ライン名" in v_comb or "品名、ライン名" in v_comb or "品名・ライン名" in v_comb:
+                            col_map["line_name"] = c_idx
+                        elif ("品名" in v_comb or "名称" in v_comb or "商品名" in v_comb) and "品名、ライン名" not in v_comb:
+                            if c_idx >= 15:
+                                col_map["item_name"] = c_idx
+                            elif "item_name" not in col_map:
+                                col_map["item_name"] = c_idx
+                        elif "仕入先" in v_comb:
+                            col_map.setdefault("supplier", c_idx)
+                        elif "メーカー" in v_comb or "発注先" in v_comb or "業者" in v_comb:
+                            col_map.setdefault("maker", c_idx)
+                        elif "製作数" in v_comb or "作数" in v_comb:
+                            col_map.setdefault("prod_qty", c_idx)
+                        elif "単数" in v_comb:
+                            col_map.setdefault("unit_qty", c_idx)
+                        elif "仕様" in v_comb or "規格" in v_comb or "材質" in v_comb or "寸法" in v_comb:
+                            col_map.setdefault("spec", c_idx)
+                        elif "購入数" in v_comb or v_curr == "購入数":
+                            col_map["qty"] = c_idx
+                        elif "必要数" in v_comb or v_curr == "必要数":
+                            col_map.setdefault("req_qty", c_idx)
+                        elif "在庫数" in v_comb or v_curr == "在庫数":
+                            col_map.setdefault("stock_qty", c_idx)
+                        elif ("数量" in v_comb or v_curr in ("数", "発注数")) and "購入数" not in col_map:
+                            col_map.setdefault("qty", c_idx)
+                        elif "単価" in v_curr and "金額" not in v_curr and "必要数" not in v_curr:
+                            col_map.setdefault("unit_price", c_idx)
+                        elif "金額" in v_comb or "単価X必要数" in v_comb or "単価×必要数" in v_comb:
+                            col_map.setdefault("amount", c_idx)
+                        elif "納期" in v_comb or "納入日" in v_comb:
+                            col_map.setdefault("due_date", c_idx)
+                        elif "担当" in v_comb:
+                            col_map.setdefault("person", c_idx)
+                        elif "指示書" in v_comb:
+                            col_map.setdefault("instruction_doc", c_idx)
+                    break
 
-            actual_date = parse_flexible_date(actual_raw, default_year=inferred_year, allow_period=False)
-            actual_filled = actual_date is not None or is_filled_confirmation(actual_raw)
+            if header_pos_in_list is None:
+                continue
 
-            invoice_date = parse_flexible_date(invoice_raw, default_year=inferred_year, allow_period=False)
-            invoice_filled = invoice_date is not None or is_filled_confirmation(invoice_raw)
+            col_map.setdefault("actual_date", 1)       # A列: 現品確認日
+            col_map.setdefault("instruction_doc", 10)  # J列: 指示書
+            col_map.setdefault("project_name", 11)     # K列: プロジェクト名
+            col_map.setdefault("order_no", 13)         # M列: 管理No
+            col_map.setdefault("ship_to", 14)          # N列: 出荷先
+            col_map.setdefault("line_name", 15)        # O列: 品名、ライン名等
+            col_map.setdefault("product_detail", 16)   # P列: 製品詳細
+            col_map.setdefault("prod_qty", 17)         # Q列: 製作数
+            col_map.setdefault("drawing_no", 18)       # R列: 図面番号
+            col_map.setdefault("part_no", 19)          # S列: 品番
+            col_map.setdefault("item_name", 20)        # T列: 品名
+            col_map.setdefault("maker", 21)            # U列: メーカー
+            col_map.setdefault("unit_qty", 22)         # V列: 単数
+            col_map.setdefault("spec", 23)             # W列: 仕様
+            col_map.setdefault("supplier", 24)         # X列: 仕入先
+            col_map.setdefault("stock_qty", 27)        # AA列: 在庫数
+            col_map["qty"] = 28                        # AB列: 購入数
+            col_map.setdefault("order_date", 33)       # AG列: 注文日
+            col_map.setdefault("due_date", 34)         # AH列: 納期
+            col_map.setdefault("invoice_date", 35)     # AI列: 請求日
 
-            # 注文品管理表の納期(AH列)の日付パースおよび判定:
-            # セル値が datetime.datetime / datetime.date 型はもちろん、
-            # 文字列形式（例: "2026-07-30 00:00:00", "2026-07-30", "2026/07/30"）や
-            # エクセルのシリアル値であっても parse_flexible_date により日付型(datetime.date)として復元する。
-            # 「未定」「納期30〜40日間」「8500円/本」「-」などのメモ・非日付文字列・空欄の場合は None となる。
-            mgmt_due_date = parse_flexible_date(due_raw, default_year=inferred_year, allow_period=True)
-            mgmt_due_is_date_type = mgmt_due_date is not None
+            data_slice = raw_rows[header_pos_in_list + 1 :]
 
-            project_name_str = clean_cell_str(project_name_val)
-            drawing_str = clean_cell_str(drawing_val)
-            part_str = clean_cell_str(part_val)
-            item_str = clean_cell_str(item_val)
-            maker_str = clean_cell_str(maker_val)
-            spec_str = clean_cell_str(spec_val)
-            ship_to_str = clean_cell_str(ship_to_val)
-            line_str = clean_cell_str(line_val)
-            prod_detail_str = clean_cell_str(prod_detail_val)
-            prod_qty_str = clean_cell_str(prod_qty_val)
-            unit_qty_str = clean_cell_str(unit_qty_val)
-            supplier_str = clean_cell_str(supplier_val) or maker_str
-            stock_qty_str = clean_cell_str(stock_qty_val)
-            qty_str = clean_cell_str(qty_val)
-            unit_price_str = clean_cell_str(_get_col(row_tuple, col_map.get("unit_price")))
-            amount_str = clean_cell_str(_get_col(row_tuple, col_map.get("amount")))
+            def _get_col(rtuple: tuple, col_1based: int | None):
+                if not col_1based or col_1based < 1 or col_1based > len(rtuple):
+                    return None
+                return rtuple[col_1based - 1]
 
-            raw_order_no_str = clean_cell_str(order_no_val)
-            exact_order_no_8 = extract_8digit_no(raw_order_no_str)
+            last_seen_order_no_8 = sheet_default_order_no
 
-            if not exact_order_no_8:
-                for c_scan in (13, 11, 2, 3, 4):
-                    cand_8 = extract_8digit_no(_get_col(row_tuple, c_scan))
-                    if cand_8 and not cand_8.startswith("202"):
-                        exact_order_no_8 = cand_8
-                        if not raw_order_no_str:
-                            raw_order_no_str = cand_8
-                        break
+            for r_idx, row_tuple in data_slice:
+                project_name_val = _get_col(row_tuple, col_map.get("project_name"))
+                drawing_val = _get_col(row_tuple, col_map.get("drawing_no"))
+                part_val = _get_col(row_tuple, col_map.get("part_no"))
+                item_val = _get_col(row_tuple, col_map.get("item_name"))
+                maker_val = _get_col(row_tuple, col_map.get("maker"))
+                spec_val = _get_col(row_tuple, col_map.get("spec"))
+                ship_to_val = _get_col(row_tuple, col_map.get("ship_to"))
+                line_val = _get_col(row_tuple, col_map.get("line_name"))
+                prod_detail_val = _get_col(row_tuple, col_map.get("product_detail"))
+                order_no_val = _get_col(row_tuple, col_map.get("order_no"))
+                prod_qty_val = _get_col(row_tuple, col_map.get("prod_qty"))
+                unit_qty_val = _get_col(row_tuple, col_map.get("unit_qty"))
+                supplier_val = _get_col(row_tuple, col_map.get("supplier"))
+                stock_qty_val = _get_col(row_tuple, col_map.get("stock_qty"))
 
-            if exact_order_no_8:
-                last_seen_order_no_8 = exact_order_no_8
-            elif last_seen_order_no_8:
-                exact_order_no_8 = last_seen_order_no_8
+                qty_val = _get_col(row_tuple, 28)
+                if qty_val is None:
+                    qty_val = _get_col(row_tuple, col_map.get("qty"))
 
-            order_no_str = raw_order_no_str or exact_order_no_8 or sheet_default_order_no
-            person_str = clean_cell_str(_get_col(row_tuple, col_map.get("person")))
+                if not any([project_name_val, drawing_val, part_val, item_val, spec_val, maker_val, line_val, prod_detail_val]):
+                    continue
 
-            # J列 (10列目) の指示書列を読み取り
-            j_col_val = _get_col(row_tuple, 10)
-            mapped_inst_val = _get_col(row_tuple, col_map.get("instruction_doc"))
-            inst_raw_val = j_col_val if (j_col_val is not None and str(j_col_val).strip() != "") else mapped_inst_val
-            instruction_raw = clean_cell_str(inst_raw_val)
-            instruction_state = classify_instruction_col(instruction_raw)
-            instruction_disp = instruction_raw if instruction_raw else "(空白)"
+                order_date_raw = _get_col(row_tuple, col_map.get("order_date"))
+                order_date = parse_flexible_date(order_date_raw, allow_period=False)
+                inferred_year = order_date.year if order_date else datetime.date.today().year
+                inferred_month = order_date.month if order_date else datetime.date.today().month
 
-            model_display_parts = [p for p in (drawing_str, part_str, spec_str) if p and p != "-"]
-            model_spec_display = " / ".join(dict.fromkeys(model_display_parts))
+                a_col_val = _get_col(row_tuple, 1)
+                mapped_actual_val = _get_col(row_tuple, col_map.get("actual_date"))
+                actual_raw = a_col_val if is_filled_confirmation(a_col_val) else mapped_actual_val
 
-            norm_drawing = normalize_key(drawing_str)
-            norm_part = normalize_key(part_str)
-            norm_item = normalize_key(item_str)
-            norm_spec = normalize_key(spec_str)
-            norm_line = normalize_key(line_str)
-            norm_maker = clean_company_name(maker_str)
-            norm_combined = normalize_key(f"{drawing_str} {part_str} {item_str} {spec_str} {line_str}")
+                ai_col_val = _get_col(row_tuple, 35)
+                mapped_inv_val = _get_col(row_tuple, col_map.get("invoice_date"))
+                invoice_raw = ai_col_val if is_filled_confirmation(ai_col_val) else mapped_inv_val
 
-            mgmt_rows.append(
-                {
-                    "sheet": sheet_name,
-                    "sheet_cat": sheet_cat,
-                    "sheet_cat_label": sheet_cat_label,
-                    "row": r_idx,
-                    "project_name": project_name_str,
-                    "order_no": order_no_str,
-                    "order_no_8": exact_order_no_8,
-                    "norm_order_no": normalize_key(order_no_str),
-                    "order_date": order_date,
-                    "instruction_raw": instruction_raw,
-                    "instruction_disp": instruction_disp,
-                    "instruction_state": instruction_state,
-                    "ship_to": ship_to_str,
-                    "product_detail": prod_detail_str,
-                    "prod_qty": prod_qty_str,
-                    "drawing_no": drawing_str,
-                    "part_no": part_str,
-                    "item_name": item_str,
-                    "line_name": line_str,
-                    "maker": maker_str,
-                    "unit_qty": unit_qty_str,
-                    "supplier": supplier_str,
-                    "stock_qty": stock_qty_str,
-                    "spec": spec_str,
-                    "model_spec": model_spec_display,
-                    "qty": qty_str,
-                    "qty_num": extract_leading_number(qty_str),
-                    "unit_price": unit_price_str,
-                    "amount": amount_str,
-                    "actual_date": actual_date,
-                    "actual_raw": clean_cell_str(actual_raw),
-                    "actual_filled": actual_filled,
-                    "invoice_date": invoice_date,
-                    "invoice_raw": clean_cell_str(invoice_raw),
-                    "invoice_filled": invoice_filled,
-                    "mgmt_due_date": mgmt_due_date,
-                    "mgmt_due_is_date_type": mgmt_due_is_date_type,
-                    "mgmt_due_raw": clean_cell_str(due_raw),
-                    "person": person_str,
-                    "norm_drawing": norm_drawing,
-                    "bg_drawing": make_bigrams(norm_drawing),
-                    "norm_part": norm_part,
-                    "bg_part": make_bigrams(norm_part),
-                    "norm_item": norm_item,
-                    "bg_item": make_bigrams(norm_item),
-                    "norm_line": norm_line,
-                    "bg_line": make_bigrams(norm_line),
-                    "norm_spec": norm_spec,
-                    "bg_spec": make_bigrams(norm_spec),
-                    "norm_maker": norm_maker,
-                    "bg_maker": make_bigrams(norm_maker),
-                    "norm_combined": norm_combined,
-                    "bg_combined": make_bigrams(norm_combined),
-                    "matched": False,
-                    "matched_by": "",
-                }
-            )
+                # AH列 (34列目) の納期セル値を優先取得
+                ah_col_val = _get_col(row_tuple, 34)
+                mapped_due_val = _get_col(row_tuple, col_map.get("due_date"))
+                due_raw = ah_col_val if (ah_col_val is not None and str(ah_col_val).strip() != "") else mapped_due_val
 
-    wb.close()
+                actual_date = parse_flexible_date(
+                    actual_raw,
+                    default_year=inferred_year,
+                    ref_month=inferred_month,
+                    allow_period=False,
+                )
+                actual_filled = actual_date is not None or is_filled_confirmation(actual_raw)
+
+                invoice_date = parse_flexible_date(
+                    invoice_raw,
+                    default_year=inferred_year,
+                    ref_month=inferred_month,
+                    allow_period=False,
+                )
+                invoice_filled = invoice_date is not None or is_filled_confirmation(invoice_raw)
+
+                mgmt_due_date = parse_flexible_date(
+                    due_raw,
+                    default_year=inferred_year,
+                    ref_month=inferred_month,
+                    allow_period=True,
+                )
+                mgmt_due_is_date_type = mgmt_due_date is not None
+
+                project_name_str = clean_cell_str(project_name_val)
+                drawing_str = clean_cell_str(drawing_val)
+                part_str = clean_cell_str(part_val)
+                item_str = clean_cell_str(item_val)
+                maker_str = clean_cell_str(maker_val)
+                spec_str = clean_cell_str(spec_val)
+                ship_to_str = clean_cell_str(ship_to_val)
+                line_str = clean_cell_str(line_val)
+                prod_detail_str = clean_cell_str(prod_detail_val)
+                prod_qty_str = clean_cell_str(prod_qty_val)
+                unit_qty_str = clean_cell_str(unit_qty_val)
+                supplier_str = clean_cell_str(supplier_val) or maker_str
+                stock_qty_str = clean_cell_str(stock_qty_val)
+                qty_str = clean_cell_str(qty_val)
+                unit_price_str = clean_cell_str(_get_col(row_tuple, col_map.get("unit_price")))
+                amount_str = clean_cell_str(_get_col(row_tuple, col_map.get("amount")))
+
+                raw_order_no_str = clean_cell_str(order_no_val)
+                exact_order_no_8, _ = _pick_order_no_candidate(raw_order_no_str)
+
+                if not exact_order_no_8:
+                    for c_scan in (13, 11, 2, 3, 4):
+                        cand_8, _ = _pick_order_no_candidate(clean_cell_str(_get_col(row_tuple, c_scan)))
+                        if cand_8 and not _is_yyyymmdd_date_token(cand_8):
+                            exact_order_no_8 = cand_8
+                            if not raw_order_no_str:
+                                raw_order_no_str = cand_8
+                            break
+
+                if exact_order_no_8:
+                    last_seen_order_no_8 = exact_order_no_8
+                elif last_seen_order_no_8:
+                    exact_order_no_8 = last_seen_order_no_8
+
+                order_no_str = raw_order_no_str or exact_order_no_8 or sheet_default_order_no
+                person_str = clean_cell_str(_get_col(row_tuple, col_map.get("person")))
+
+                # J列 (10列目) の指示書列を読み取り
+                j_col_val = _get_col(row_tuple, 10)
+                mapped_inst_val = _get_col(row_tuple, col_map.get("instruction_doc"))
+                inst_raw_val = j_col_val if (j_col_val is not None and str(j_col_val).strip() != "") else mapped_inst_val
+                instruction_raw = clean_cell_str(inst_raw_val)
+                instruction_state = classify_instruction_col(instruction_raw)
+                instruction_disp = instruction_raw if instruction_raw else "(空白)"
+
+                model_display_parts = [p for p in (drawing_str, part_str, spec_str) if p and p != "-"]
+                model_spec_display = " / ".join(dict.fromkeys(model_display_parts))
+
+                norm_drawing = normalize_key(drawing_str)
+                norm_part = normalize_key(part_str)
+                norm_item = normalize_key(item_str)
+                norm_spec = normalize_key(spec_str)
+                norm_line = normalize_key(line_str)
+                norm_maker = clean_company_name(maker_str)
+                norm_supplier = clean_company_name(supplier_str)
+                norm_combined = normalize_key(f"{drawing_str} {part_str} {item_str} {spec_str} {line_str}")
+
+                mgmt_rows.append(
+                    {
+                        "sheet": sheet_name,
+                        "sheet_cat": sheet_cat,
+                        "sheet_cat_label": sheet_cat_label,
+                        "row": r_idx,
+                        "project_name": project_name_str,
+                        "order_no": order_no_str,
+                        "order_no_8": exact_order_no_8,
+                        "norm_order_no": normalize_key(order_no_str),
+                        "order_date": order_date,
+                        "instruction_raw": instruction_raw,
+                        "instruction_disp": instruction_disp,
+                        "instruction_state": instruction_state,
+                        "ship_to": ship_to_str,
+                        "product_detail": prod_detail_str,
+                        "prod_qty": prod_qty_str,
+                        "drawing_no": drawing_str,
+                        "part_no": part_str,
+                        "item_name": item_str,
+                        "line_name": line_str,
+                        "maker": maker_str,
+                        "unit_qty": unit_qty_str,
+                        "supplier": supplier_str,
+                        "norm_supplier": norm_supplier,
+                        "stock_qty": stock_qty_str,
+                        "spec": spec_str,
+                        "model_spec": model_spec_display,
+                        "qty": qty_str,
+                        "qty_num": extract_leading_number(qty_str),
+                        "unit_price": unit_price_str,
+                        "amount": amount_str,
+                        "actual_date": actual_date,
+                        "actual_raw": clean_cell_str(actual_raw),
+                        "actual_filled": actual_filled,
+                        "invoice_date": invoice_date,
+                        "invoice_raw": clean_cell_str(invoice_raw),
+                        "invoice_filled": invoice_filled,
+                        "mgmt_due_date": mgmt_due_date,
+                        "mgmt_due_is_date_type": mgmt_due_is_date_type,
+                        "mgmt_due_raw": clean_cell_str(due_raw),
+                        "person": person_str,
+                        "norm_drawing": norm_drawing,
+                        "bg_drawing": make_bigrams(norm_drawing),
+                        "norm_part": norm_part,
+                        "bg_part": make_bigrams(norm_part),
+                        "norm_item": norm_item,
+                        "bg_item": make_bigrams(norm_item),
+                        "norm_line": norm_line,
+                        "bg_line": make_bigrams(norm_line),
+                        "norm_spec": norm_spec,
+                        "bg_spec": make_bigrams(norm_spec),
+                        "norm_maker": norm_maker,
+                        "bg_maker": make_bigrams(norm_maker),
+                        "norm_combined": norm_combined,
+                        "bg_combined": make_bigrams(norm_combined),
+                        "matched": False,
+                        "matched_by": "",
+                    }
+                )
+    finally:
+        try:
+            wb.close()
+        except Exception:
+            pass
+        if tmp_dir:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    if mgmt_cache_holder is not None and fsize >= 0:
+        mgmt_cache_holder["entry"] = (
+            norm_path,
+            mtime,
+            fsize,
+            [dict(r, matched=False, matched_by="") for r in mgmt_rows],
+        )
+
     return mgmt_rows
 
 
@@ -493,11 +698,12 @@ def parse_order_book(
     filename: str,
     file_order_no_8: str | None = None,
     cancel_event=None,
+    valid_mgmt_order_nos: set[str] | None = None,
 ) -> list[dict]:
-    """1つの注文書Excelファイルを読み込み、明細行のリストを生成して返す"""
+    """1つの注文書Excelファイルを読み込み、明細行のリストを生成して返す（ロック保護・結合ズレ耐性対応）。"""
     extracted_items = []
     try:
-        wb = openpyxl.load_workbook(filepath, data_only=True, read_only=True)
+        wb, tmp_dir = _load_workbook_safely(filepath, data_only=True, read_only=True)
     except Exception:
         return []
 
@@ -509,7 +715,12 @@ def parse_order_book(
     elif "_" in filename:
         parts = filename.split("_")
         if len(parts) >= 2 and parts[1].strip():
-            file_supplier = parts[1].strip()
+            cand_part = parts[1].strip()
+            if not re.fullmatch(r"\d{6,8}", cand_part) and not any(k in cand_part for k in ("注文書", "発注書", "見積")):
+                file_supplier = cand_part
+
+    file_is_outsource = any(k in f_clean for k in ("外注", "加工", "外依"))
+    file_is_purchase = any(k in f_clean for k in ("購入", "購買"))
 
     try:
         for sheet_name in wb.sheetnames:
@@ -539,7 +750,7 @@ def parse_order_book(
                     row2_text = " ".join(
                         unicodedata.normalize("NFKC", str(v or "")).strip() for v in row_tuple if v is not None
                     )
-                    if "見積" in row2_text:
+                    if "見積" in row2_text and not any(k in row2_text for k in ("注文", "発注")):
                         skip_as_estimate = True
                         break
                     if row2_text and not any(k in row2_text for k in ("注文", "発注")):
@@ -557,10 +768,25 @@ def parse_order_book(
             ):
                 continue
 
-            sheet_order_no = file_order_no_8
+            # 購入 / 外注カテゴリの判定（後段スコアの重み付け用）
+            title_check = f"{s_clean} {row2_text}"
+            if any(k in title_check for k in ("外注", "加工", "外依")) or (
+                file_is_outsource and not any(k in title_check for k in ("購入", "購買"))
+            ):
+                req_type_code = "OUTSOURCE"
+                req_type_label = "外注依頼"
+            elif any(k in title_check for k in ("購入", "購買")) or file_is_purchase:
+                req_type_code = "PURCHASE"
+                req_type_label = "購入依頼"
+            else:
+                req_type_code = "UNKNOWN"
+                req_type_label = "注文"
+
+            sheet_order_no = ""
             sheet_supplier = file_supplier
             sheet_order_date = None
             default_year = datetime.date.today().year
+            default_month = datetime.date.today().month
 
             # 4行目にある注文日付の明示的探索
             for r_idx, row_tuple in raw_rows:
@@ -571,6 +797,7 @@ def parse_order_book(
                             if d_cand4:
                                 sheet_order_date = d_cand4
                                 default_year = d_cand4.year
+                                default_month = d_cand4.month
                                 break
                     break
 
@@ -583,26 +810,35 @@ def parse_order_book(
                         continue
 
                     if not sheet_order_no and (
-                        "注文番号" in cell_val or "発注番号" in cell_val or "管理No" in cell_val or "No." in cell_val
+                        "注文番号" in cell_val
+                        or "発注番号" in cell_val
+                        or "管理No" in cell_val
+                        or "管理NO" in cell_val.upper()
+                        or "製番" in cell_val
+                        or "手配番号" in cell_val
+                        or "No." in cell_val
                     ):
-                        m_in = extract_8digit_no(cell_val)
-                        if m_in:
-                            sheet_order_no = m_in
+                        cand_in, is_other_in = _pick_order_no_candidate(cell_val, valid_mgmt_order_nos)
+                        if cand_in and not is_other_in:
+                            sheet_order_no = cand_in
                         else:
                             for offset in range(1, 9):
                                 if c_idx - 1 + offset >= len(row_tuple):
                                     break
                                 right_val = str(row_tuple[c_idx - 1 + offset] or "").strip()
-                                m_r8 = extract_8digit_no(right_val)
-                                if m_r8:
-                                    sheet_order_no = m_r8
+                                if not right_val:
+                                    continue
+                                cand_r, _ = _pick_order_no_candidate(right_val, valid_mgmt_order_nos)
+                                if cand_r:
+                                    sheet_order_no = cand_r
                                     break
 
-                    if "注文日" in cell_val or "発注日" in cell_val:
+                    if "注文日" in cell_val or "発注日" in cell_val or "発行日" in cell_val:
                         d_in_cell = parse_flexible_date(cell_val, allow_period=False)
                         if d_in_cell:
                             sheet_order_date = d_in_cell
                             default_year = d_in_cell.year
+                            default_month = d_in_cell.month
                         else:
                             for offset in range(1, 9):
                                 if c_idx - 1 + offset >= len(row_tuple):
@@ -611,22 +847,33 @@ def parse_order_book(
                                 if d_candidate:
                                     sheet_order_date = d_candidate
                                     default_year = d_candidate.year
+                                    default_month = d_candidate.month
                                     break
 
-                    if "御中" in cell_val:
-                        cleaned_sup = re.sub(r"(御中|様|殿)$", "", cell_val).strip()
-                        if cleaned_sup:
+                    if any(honor in cell_val for honor in ("御中", "様", "殿")):
+                        cleaned_sup = re.sub(r"\s*(?:御中|様|殿)\s*$", "", cell_val).strip()
+                        if not cleaned_sup:
                             for offset in range(1, 6):
                                 if c_idx - 1 - offset >= 0:
                                     left_val = str(row_tuple[c_idx - 1 - offset] or "").strip()
-                                    if left_val and not any(k in left_val for k in ("注文", "発注", "No")):
-                                        cleaned_sup = f"{left_val} {cleaned_sup}".strip()
+                                    if left_val and not any(
+                                        k in left_val for k in ("注文", "発注", "No", "TEL", "FAX", "〒", "住所", "担当")
+                                    ):
+                                        cleaned_sup = left_val
                                         break
+                        if cleaned_sup and len(cleaned_sup) >= 2:
                             sheet_supplier = cleaned_sup
+
+            if not sheet_order_no:
+                sheet_order_no = file_order_no_8 or ""
+
+            if valid_mgmt_order_nos:
+                if not sheet_order_no or sheet_order_no not in valid_mgmt_order_nos:
+                    continue
 
             # 明細ヘッダー探索（6〜25行目）
             header_idx = None
-            col_map = {}
+            col_map: dict[str, int] = {}
             for list_i, (r_idx, row_tuple) in enumerate(raw_rows):
                 if r_idx < 6:
                     continue
@@ -634,7 +881,12 @@ def parse_order_book(
                     break
                 row_str = " ".join(unicodedata.normalize("NFKC", str(v or "")).strip() for v in row_tuple)
                 if ("品名" in row_str or "数量" in row_str) and (
-                    "図面" in row_str or "品番" in row_str or "型番" in row_str or "仕様" in row_str or "単価" in row_str or "納期" in row_str
+                    "図面" in row_str
+                    or "品番" in row_str
+                    or "型番" in row_str
+                    or "仕様" in row_str
+                    or "単価" in row_str
+                    or "納期" in row_str
                 ):
                     header_idx = list_i
                     for c_idx in range(1, len(row_tuple) + 1):
@@ -651,7 +903,9 @@ def parse_order_book(
                             col_map.setdefault("maker", c_idx)
                         elif "仕様" in v or "規格" in v or "寸法" in v:
                             col_map.setdefault("spec", c_idx)
-                        elif "数量" in v or "数" == v:
+                        elif "単位" in v:
+                            col_map.setdefault("unit", c_idx)
+                        elif ("数量" in v or v == "数") and "単価" not in v:
                             col_map.setdefault("qty", c_idx)
                         elif "単価" in v:
                             col_map.setdefault("unit_price", c_idx)
@@ -664,20 +918,32 @@ def parse_order_book(
             if header_idx is None:
                 continue
 
-            def _get_val(rtuple: tuple, col_1b: int | None):
+            mapped_cols = set(col_map.values())
+
+            def _get_non_empty_in_span(rtuple: tuple, col_1b: int | None):
                 if not col_1b or col_1b < 1 or col_1b > len(rtuple):
                     return None
-                return rtuple[col_1b - 1]
+                val = rtuple[col_1b - 1]
+                if val is not None and str(val).strip() != "":
+                    return val
+                next_1b = col_1b + 1
+                if next_1b <= len(rtuple) and next_1b not in mapped_cols:
+                    nval = rtuple[next_1b - 1]
+                    if nval is not None and str(nval).strip() != "":
+                        return nval
+                return None
 
+            stop_words = ("合計", "小計", "消費税", "総合計", "特記事項", "以上", "振込", "備考", "御請求金額", "税額")
             data_rows = raw_rows[header_idx + 1 :]
             for r_idx, row_tuple in data_rows:
-                drawing_val = _get_val(row_tuple, col_map.get("drawing_no"))
-                part_val = _get_val(row_tuple, col_map.get("part_no"))
-                item_val = _get_val(row_tuple, col_map.get("item_name"))
-                maker_val = _get_val(row_tuple, col_map.get("maker"))
-                spec_val = _get_val(row_tuple, col_map.get("spec"))
-                qty_val = _get_val(row_tuple, col_map.get("qty"))
-                due_val = _get_val(row_tuple, col_map.get("due_date"))
+                drawing_val = _get_non_empty_in_span(row_tuple, col_map.get("drawing_no"))
+                part_val = _get_non_empty_in_span(row_tuple, col_map.get("part_no"))
+                item_val = _get_non_empty_in_span(row_tuple, col_map.get("item_name"))
+                maker_val = _get_non_empty_in_span(row_tuple, col_map.get("maker"))
+                spec_val = _get_non_empty_in_span(row_tuple, col_map.get("spec"))
+                qty_val = _get_non_empty_in_span(row_tuple, col_map.get("qty"))
+                unit_val = _get_non_empty_in_span(row_tuple, col_map.get("unit"))
+                due_val = _get_non_empty_in_span(row_tuple, col_map.get("due_date"))
 
                 if not any([drawing_val, part_val, item_val, spec_val, maker_val, qty_val]):
                     continue
@@ -687,18 +953,37 @@ def parse_order_book(
                 i_str = clean_cell_str(item_val)
                 m_str = clean_cell_str(maker_val)
                 s_str = clean_cell_str(spec_val)
-                q_str = clean_cell_str(qty_val)
+                q_raw_str = clean_cell_str(qty_val)
+                u_str = clean_cell_str(unit_val)
 
-                if is_zero_quantity(q_str):
+                joined_check = unicodedata.normalize("NFKC", f"{d_str} {p_str} {i_str} {s_str}").replace(" ", "")
+                if any(sw in joined_check for sw in stop_words) and not (d_str and p_str):
+                    if any(sw in joined_check for sw in ("小計", "合計", "総合計", "消費税")):
+                        break
                     continue
 
-                due_date = parse_flexible_date(due_val, default_year=default_year, allow_period=True)
+                if not any([d_str, p_str, i_str, s_str]):
+                    continue
 
-                req_type_label = "購入依頼"
-                if any(k in s_clean for k in ("外注", "加工", "外依")) or any(
-                    k in filename for k in ("外注", "加工", "外依")
-                ):
-                    req_type_label = "外注依頼"
+                if is_zero_quantity(q_raw_str):
+                    continue
+
+                qty_num = extract_leading_number(q_raw_str)
+                q_str = (
+                    f"{q_raw_str}{u_str}"
+                    if (q_raw_str and u_str and u_str not in q_raw_str and re.fullmatch(r"[\d.,]+", q_raw_str))
+                    else q_raw_str
+                )
+
+                due_date = parse_flexible_date(
+                    due_val,
+                    default_year=default_year,
+                    ref_month=default_month,
+                    allow_period=True,
+                )
+
+                if qty_num is None and due_date is None and not (d_str or p_str):
+                    continue
 
                 model_spec_parts = [p for p in (d_str, p_str, s_str) if p and p != "-"]
                 model_spec_disp = " / ".join(dict.fromkeys(model_spec_parts))
@@ -717,6 +1002,7 @@ def parse_order_book(
                         "full_path": filepath,
                         "sheet": sheet_name,
                         "row": r_idx,
+                        "req_type_code": req_type_code,
                         "req_type_label": req_type_label,
                         "order_no": sheet_order_no or "",
                         "order_no_8": sheet_order_no or "",
@@ -740,17 +1026,22 @@ def parse_order_book(
                         "bg_spec": make_bigrams(norm_spec),
                         "model_spec": model_spec_disp,
                         "qty": q_str,
-                        "qty_num": extract_leading_number(q_str),
+                        "qty_num": qty_num,
                         "due_date": due_date,
                         "due_raw": clean_cell_str(due_val),
-                        "unit_price": clean_cell_str(_get_val(row_tuple, col_map.get("unit_price"))),
-                        "amount": clean_cell_str(_get_val(row_tuple, col_map.get("amount"))),
+                        "unit_price": clean_cell_str(_get_non_empty_in_span(row_tuple, col_map.get("unit_price"))),
+                        "amount": clean_cell_str(_get_non_empty_in_span(row_tuple, col_map.get("amount"))),
                         "norm_combined": norm_combined,
                         "bg_combined": make_bigrams(norm_combined),
                     }
                 )
     finally:
-        wb.close()
+        try:
+            wb.close()
+        except Exception:
+            pass
+        if tmp_dir:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
 
     return extracted_items
 
@@ -760,17 +1051,28 @@ def score_candidate_pair(o_item: dict, m_row: dict) -> float:
     o_sup = o_item.get("norm_supplier", "")
     o_mkr = o_item.get("norm_maker", "")
     m_mkr = m_row.get("norm_maker", "")
+    m_sup = m_row.get("norm_supplier", "")
 
     sup_matched = False
-    if o_sup and m_mkr:
-        if o_sup == m_mkr or o_sup in m_mkr or m_mkr in o_sup:
-            sup_matched = True
-    if o_mkr and m_mkr:
-        if o_mkr == m_mkr or o_mkr in m_mkr or m_mkr in o_mkr:
-            sup_matched = True
+    for o_c in (o_sup, o_mkr):
+        if not o_c:
+            continue
+        for m_c in (m_sup, m_mkr):
+            if not m_c:
+                continue
+            if o_c == m_c or o_c in m_c or m_c in o_c:
+                sup_matched = True
+                break
+        if sup_matched:
+            break
 
-    if o_sup and m_mkr and len(o_sup) >= 2 and len(m_mkr) >= 2 and not sup_matched:
-        if not any(k in m_mkr for k in ("市販", "購入", "外注", "製作")) and not any(k in o_sup for k in ("市販", "購入")):
+    m_cmp = m_sup or m_mkr
+    if o_sup and m_cmp and len(o_sup) >= 2 and len(m_cmp) >= 2 and not sup_matched:
+        if (
+            not any(k in m_cmp for k in ("市販", "購入", "外注", "製作"))
+            and not any(k in m_mkr for k in ("市販", "購入", "外注", "製作"))
+            and not any(k in o_sup for k in ("市販", "購入"))
+        ):
             return -800.0
 
     o_d = o_item["norm_drawing"]
@@ -790,6 +1092,14 @@ def score_candidate_pair(o_item: dict, m_row: dict) -> float:
     if sup_matched:
         score += 250.0
 
+    o_cat = o_item.get("req_type_code", "UNKNOWN")
+    m_cat = m_row.get("sheet_cat", "OTHER")
+    if o_cat in ("PURCHASE", "OUTSOURCE") and m_cat in ("PURCHASE", "OUTSOURCE"):
+        if o_cat == m_cat:
+            score += 80.0
+        else:
+            score -= 60.0
+
     if o_d and m_d:
         if o_d == m_d:
             score += 500.0
@@ -807,6 +1117,22 @@ def score_candidate_pair(o_item: dict, m_row: dict) -> float:
         else:
             if len(o_p) >= 2 and len(m_p) >= 2:
                 score -= 150.0
+
+    # 仕様・規格 (o_s vs m_s) の評価
+    if o_s and m_s:
+        if o_s == m_s:
+            score += 350.0
+            strong_evidence = True
+        elif len(o_s) >= 3 and len(m_s) >= 3 and (o_s in m_s or m_s in o_s):
+            score += 200.0
+            strong_evidence = True
+        else:
+            spec_sim = fast_similarity(o_s, m_s, o_item.get("bg_spec"), m_row.get("bg_spec"))
+            if spec_sim >= 0.7:
+                score += 180.0 * spec_sim
+                strong_evidence = True
+            elif spec_sim >= 0.45:
+                score += 70.0 * spec_sim
 
     o_long_codes = [c for c in (o_d, o_p, o_s) if len(c) >= 4]
     m_long_codes = [c for c in (m_d, m_p, m_s) if len(c) >= 4]
@@ -1371,17 +1697,24 @@ def match_and_evaluate(
                     is_fallback = True
 
                 rec = evaluate_single_record(
+                    project_name="",
                     req_type=o_item.get("req_type_label", "注文"),
                     order_no=o_no,
-                    instruction_raw="",
-                    instruction_disp="(未記載)",
-                    instruction_state="BLANK",
-                    ship_to="",
-                    line_name="",
-                    product_detail="",
-                    supplier=o_item.get("supplier", ""),
-                    maker=o_item.get("maker", ""),
+                    instruction_raw=diag_data.get("best_cand_instruction_raw", ""),
+                    instruction_disp=diag_data.get("best_cand_instruction_disp", "(未記載)"),
+                    instruction_state=diag_data.get("best_cand_instruction_state", "BLANK"),
+                    ship_to=diag_data.get("best_cand_ship_to", ""),
+                    line_name=diag_data.get("best_cand_line_name", ""),
+                    product_detail=diag_data.get("best_cand_product_detail", ""),
+                    prod_qty="",
+                    drawing_no=o_item.get("drawing_no", ""),
+                    part_no=o_item.get("part_no", ""),
                     item_name=o_item.get("item_name", ""),
+                    maker=o_item.get("maker", ""),
+                    unit_qty="",
+                    spec=o_item.get("spec", ""),
+                    supplier=o_item.get("supplier", ""),
+                    stock_qty="",
                     model_spec=o_item.get("model_spec", ""),
                     qty=o_item.get("qty", ""),
                     due_date=final_due,
@@ -1461,7 +1794,12 @@ def match_and_evaluate(
                 # どちらにも納期がない場合、注文日(注文書優先、なければ管理表)＋猶予日数でフォールバック計算。
                 mgmt_due = matched_mgmt.get("mgmt_due_date") if matched_mgmt else None
                 if not mgmt_due and matched_mgmt and matched_mgmt.get("mgmt_due_raw"):
-                    mgmt_due = parse_flexible_date(matched_mgmt.get("mgmt_due_raw"), allow_period=True)
+                    mgmt_due = parse_flexible_date(
+                        matched_mgmt.get("mgmt_due_raw"),
+                        default_year=order_dt.year if order_dt else None,
+                        ref_month=order_dt.month if order_dt else None,
+                        allow_period=True,
+                    )
 
                 if mgmt_due:
                     final_due = mgmt_due
@@ -1615,7 +1953,6 @@ def match_and_evaluate(
             "actual_date": m["actual_date"].strftime("%Y-%m-%d") if m.get("actual_date") else (m.get("actual_raw") or "未入力"),
             "invoice_date": m["invoice_date"].strftime("%Y-%m-%d") if m.get("invoice_date") else (m.get("invoice_raw") or "未入力"),
             "person": m.get("person", ""),
-            "mismatch_reason": reason_txt,
             "source_info": f"管理表:{m['sheet']}(行{m['row']})",
             "row_tag": "MISSING_ORDER",
             "diagnostic_data": diag_data,
@@ -1627,6 +1964,15 @@ def match_and_evaluate(
             not (r["is_unmatched"] or r["is_any_delay"]),
             not r["is_unmatched"],
             -(r["overdue_days_num"] or -9999),
+            str(r.get("order_no", "")),
+            str(r.get("source_info", "")),
+        )
+    )
+    missing_order_results.sort(
+        key=lambda r: (
+            str(r.get("mgmt_sheet", "")),
+            int(r["mgmt_row"]) if str(r.get("mgmt_row", "")).isdigit() else 999999,
+            str(r.get("order_no", "")),
         )
     )
 

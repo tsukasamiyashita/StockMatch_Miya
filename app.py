@@ -1,52 +1,33 @@
 import os
 import sys
-import re
 import json
 import ctypes
-import calendar
 import unicodedata
 import datetime
-import difflib
 import threading
 import queue
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
-try:
-    import pandas as pd  # type: ignore
-except ImportError:
-    pd = None
 
-try:
-    import openpyxl  # type: ignore
-except ImportError:
-    openpyxl = None
-
-try:
-    from scipy.optimize import linear_sum_assignment  # type: ignore
-    HAS_SCIPY = True
-except ImportError:
-    linear_sum_assignment = None
-    HAS_SCIPY = False
-
-try:
-    import win32com.client  # type: ignore
-    import pythoncom  # type: ignore
-    HAS_WIN32COM = True
-except ImportError:
-    win32com = None
-    pythoncom = None
-    HAS_WIN32COM = False
-
-
-class AnalysisCancelledException(Exception):
-    """ユーザーによって照合処理が中断された場合のカスタム例外"""
-    pass
+from modules.config_manager import ConfigManager
+from modules.constants import APP_NAME, APP_TITLE, APP_USER_MODEL_ID
+from modules.date_utils import (
+    AnalysisCancelledException,
+    add_months,
+    is_order_date_expired,
+    classify_instruction_col,
+    is_instruction_matched,
+    parse_lines_to_order_nos,
+    extract_all_8digit_nos,
+    is_order_no_excluded,
+    parse_flexible_date,
+    get_record_display_value,
+)
 
 
 class StockMatchApp:
     """
-    StockMatch_Miya-v1.5.0
+    StockMatch_Miya-v1.5.1
     注文品管理表（1つのファイル）と注文書フォルダ内（サブフォルダ含む全階層）の全注文書Excelを双方向照合し、
     ・納期超過（現品確認日・請求日）および管理表未記載の注文書
     ・注文書未検出（管理表にあるのに注文書が見当たらない未発注明細 / ※AB列購入数0は自動除外）
@@ -60,8 +41,8 @@ class StockMatchApp:
         APP_DIR = os.path.dirname(os.path.abspath(__file__))
         RESOURCE_DIR = APP_DIR
 
-    DEFAULT_CONFIG_FILE_PATH = os.path.join(APP_DIR, "config.json")
-    CONFIG_POINTER_FILE_PATH = os.path.join(APP_DIR, "config_location.txt")
+    DEFAULT_CONFIG_FILE_PATH = ConfigManager(app_dir=APP_DIR).get_default_config_path()
+    CONFIG_POINTER_FILE_PATH = ConfigManager(app_dir=APP_DIR).get_pointer_file_path()
     CONFIG_FILE_PATH = DEFAULT_CONFIG_FILE_PATH
     ICON_FILE_PATH = os.path.join(APP_DIR, "icon.ico")
 
@@ -98,7 +79,7 @@ class StockMatchApp:
 
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("StockMatch_Miya-v1.5.0 - 注文品納期・現品/請求照合システム")
+        self.root.title(APP_TITLE)
 
         # メインウィンドウおよび全Toplevelウィンドウに icon.ico を適用
         self._apply_window_icon(self.root, is_main=True)
@@ -111,8 +92,9 @@ class StockMatchApp:
 
         self.root.minsize(1080, 720)
 
-        # 設定ファイルの保存先パス管理（ポインタファイルまたはデフォルト）
-        self.config_file_path = tk.StringVar(value=self._resolve_initial_config_path())
+        # 設定ファイルの保存先パス管理（ConfigManagerに統合）
+        self.config_mgr = ConfigManager(app_dir=self.APP_DIR)
+        self.config_file_path = tk.StringVar(value=self.config_mgr.get_active_config_path())
 
         # 状態保持用変数
         self.mgmt_file_path = tk.StringVar()
@@ -143,7 +125,8 @@ class StockMatchApp:
         self.cached_mgmt_rows = []       # 注文品管理表の全行キャッシュ（プレビュー参照用）
 
         # 高速化用インメモリキャッシュ（更新日時・ファイルサイズベースで未変更ファイルの再読込を省略）
-        self._mgmt_file_cache = None     # (norm_path, mtime, size, mgmt_rows)
+        self._mgmt_cache_holder = {"entry": None}
+        self._mgmt_file_cache = None     # 互換維持用
         self._order_file_cache = {}      # norm_path -> (mtime, size, extracted_items)
         self._cache_lock = threading.Lock()
 
@@ -179,11 +162,7 @@ class StockMatchApp:
     @staticmethod
     def _add_months(d: datetime.date, months: int) -> datetime.date:
         """指定された日付 d に months ヶ月を加算した日付を返す（月末日補正あり）"""
-        total_months = (d.year * 12 + (d.month - 1)) + months
-        target_year = total_months // 12
-        target_month = (total_months % 12) + 1
-        max_day = calendar.monthrange(target_year, target_month)[1]
-        return datetime.date(target_year, target_month, min(d.day, max_day))
+        return add_months(d, months)
 
     def _is_order_date_expired(
         self,
@@ -192,38 +171,16 @@ class StockMatchApp:
         exclude_months: int | None = None,
     ) -> bool:
         """注文日(order_date)から指定ヶ月数(exclude_months)以上が経過しているかを判定"""
-        if order_date is None:
-            return False
         if exclude_months is None:
             exclude_months = self._get_exclude_months()
-        if exclude_months <= 0:
-            return False
         if base_date is None:
-            base_date = self._parse_flexible_date(self.base_date_str.get()) or datetime.date.today()
-        cutoff_date = self._add_months(order_date, exclude_months)
-        return base_date >= cutoff_date
+            base_date = self._parse_flexible_date(self.base_date_str.get(), allow_period=False) or datetime.date.today()
+        return is_order_date_expired(order_date, base_date=base_date, exclude_months=exclude_months)
 
     @staticmethod
     def _classify_instruction_col(raw_val: str) -> str:
-        """
-        注文品管理表の指示書列(J列)の値を判定する:
-          - "BLANK": 空白（未記入）
-          - "HAS"  : 有り（「有」「有り」「あり」「○」「済」等）
-          - "NONE" : 無し・その他（「無」「無し」「なし」「不要」「-」「×」等）
-        """
-        s = unicodedata.normalize("NFKC", str(raw_val or "")).strip()
-        if not s:
-            return "BLANK"
-        s_clean = re.sub(r"\s+", "", s).upper()
-        if not s_clean:
-            return "BLANK"
-        if any(k in s_clean for k in ("無", "なし", "ナシ", "不要", "対象外", "否", "×", "✕", "✗")):
-            return "NONE"
-        if s_clean in ("-", "ー", "―", "‐", "NO", "NONE", "N/A", "0", "FALSE"):
-            return "NONE"
-        if any(k in s_clean for k in ("有", "あり", "アリ", "○", "◯", "◎", "済", "完", "YES", "OK")):
-            return "HAS"
-        return "NONE"
+        """注文品管理表の指示書列(J列)の値を判定する"""
+        return classify_instruction_col(raw_val)
 
     def _get_instruction_filter_mode(self) -> str:
         """現在の指示書列(J列)フィルターモードコードを取得"""
@@ -248,47 +205,17 @@ class StockMatchApp:
     @staticmethod
     def _is_instruction_matched(inst_state: str, filter_mode: str) -> bool:
         """レコードの指示書列状態(inst_state)がフィルター条件(filter_mode)に一致するか判定"""
-        state = (inst_state or "BLANK").upper()
-        if filter_mode == "ALL":
-            return True
-        if filter_mode == "HAS_OR_BLANK":
-            return state in ("HAS", "BLANK")
-        if filter_mode == "HAS_ONLY":
-            return state == "HAS"
-        if filter_mode == "BLANK_ONLY":
-            return state == "BLANK"
-        return state == "HAS"
+        return is_instruction_matched(inst_state, filter_mode)
 
-    def _parse_lines_to_order_nos(self, text: str) -> list[str]:
+    @staticmethod
+    def _parse_lines_to_order_nos(text: str) -> list[str]:
         """行区切りテキスト（Excel貼り付け・カンマ区切り含む）から管理Noリストを抽出・重複除去して返す"""
-        if not text:
-            return []
-        norm = unicodedata.normalize("NFKC", str(text))
-        lines = norm.splitlines()
-        seen = set()
-        result = []
-        for line in lines:
-            line_clean = line.strip()
-            if not line_clean:
-                continue
-            # カンマやタブ、セミコロンで分割
-            tokens = re.split(r"[\t,;\s、，:：]+", line_clean)
-            for token in tokens:
-                t = token.strip().upper()
-                if not t:
-                    continue
-                # 8桁数字があればそれを優先抽出
-                m8 = re.search(r"\b\d{8}\b", t)
-                val = m8.group(0) if m8 else t
-                if val and val not in seen:
-                    seen.add(val)
-                    result.append(val)
-        return result
+        return parse_lines_to_order_nos(text)
 
     def _get_excluded_order_nos_list(self) -> list[str]:
         """現在設定されている除外管理Noの重複なしリストを取得"""
         raw = self.excluded_order_nos_str.get().strip()
-        return self._parse_lines_to_order_nos(raw)
+        return parse_lines_to_order_nos(raw)
 
     def _get_excluded_order_nos(self) -> set[str]:
         """一覧から除外する管理Noの集合（set）を大文字・正規化済みで取得"""
@@ -298,26 +225,15 @@ class StockMatchApp:
             clean = it.strip().upper()
             if clean:
                 res.add(clean)
-                m8 = re.search(r"\b\d{8}\b", clean)
-                if m8:
-                    res.add(m8.group(0))
+                for no8 in extract_all_8digit_nos(clean):
+                    res.add(no8)
         return res
 
     def _is_order_no_excluded(self, order_no_val: str, excluded_set: set[str] | None = None) -> bool:
         """指定された管理Noが除外対象に含まれるかを判定"""
         if excluded_set is None:
             excluded_set = self._get_excluded_order_nos()
-        if not excluded_set or not order_no_val:
-            return False
-        val_norm = unicodedata.normalize("NFKC", str(order_no_val)).strip().upper()
-        if not val_norm:
-            return False
-        if val_norm in excluded_set:
-            return True
-        m8 = re.search(r"\b\d{8}\b", val_norm)
-        if m8 and m8.group(0) in excluded_set:
-            return True
-        return False
+        return is_order_no_excluded(order_no_val, excluded_set)
 
     def _is_record_excluded(
         self,
@@ -341,7 +257,7 @@ class StockMatchApp:
     def _get_visible_main_records(self) -> list[dict]:
         """除外設定（除外管理No・注文日経過月数・指示書列フィルター）を反映したタブ1の有効レコード一覧を取得"""
         excluded_nos = self._get_excluded_order_nos()
-        base_date = self._parse_flexible_date(self.base_date_str.get()) or datetime.date.today()
+        base_date = self._parse_flexible_date(self.base_date_str.get(), allow_period=False) or datetime.date.today()
         exclude_months = self._get_exclude_months()
         inst_mode = self._get_instruction_filter_mode()
         return [
@@ -352,7 +268,7 @@ class StockMatchApp:
     def _get_visible_missing_records(self) -> list[dict]:
         """除外設定（除外管理No・注文日経過月数・指示書列フィルター）を反映したタブ2の有効レコード一覧を取得"""
         excluded_nos = self._get_excluded_order_nos()
-        base_date = self._parse_flexible_date(self.base_date_str.get()) or datetime.date.today()
+        base_date = self._parse_flexible_date(self.base_date_str.get(), allow_period=False) or datetime.date.today()
         exclude_months = self._get_exclude_months()
         inst_mode = self._get_instruction_filter_mode()
         return [
@@ -406,7 +322,11 @@ class StockMatchApp:
     def _open_exclude_dialog(self):
         from modules.dialogs import open_exclude_dialog
 
-        def on_apply(text_val):
+        def on_apply(selected_items):
+            if isinstance(selected_items, (list, tuple, set)):
+                text_val = "\n".join(str(x) for x in selected_items if str(x).strip())
+            else:
+                text_val = str(selected_items or "")
             self.excluded_order_nos_str.set(text_val)
             self._update_excluded_summary_badge()
             self._on_date_or_month_filter_changed()
@@ -443,15 +363,47 @@ class StockMatchApp:
             pass
 
     def _setup_styles(self):
-        """UIテーマ・スタイルの設定（タブ選択状態の視認性を劇的に向上）"""
+        """UIテーマ・スタイルの設定（常にライトモード固定・タブ選択状態の視認性を向上）"""
+        try:
+            self.root.tk_setPalette(
+                background="#f8fafc",
+                foreground="#0f172a",
+                activeBackground="#e2e8f0",
+                activeForeground="#0f172a",
+                selectBackground="#2563eb",
+                selectForeground="#ffffff",
+                insertBackground="#0f172a",
+            )
+            self.root.option_add("*TCombobox*Listbox.background", "#ffffff")
+            self.root.option_add("*TCombobox*Listbox.foreground", "#0f172a")
+            self.root.option_add("*TCombobox*Listbox.selectBackground", "#2563eb")
+            self.root.option_add("*TCombobox*Listbox.selectForeground", "#ffffff")
+            self.root.option_add("*Menu.background", "#ffffff")
+            self.root.option_add("*Menu.foreground", "#0f172a")
+            self.root.option_add("*Menu.activeBackground", "#dbeafe")
+            self.root.option_add("*Menu.activeForeground", "#0f172a")
+        except Exception:
+            pass
+
         style = ttk.Style()
         if "clam" in style.theme_names():
             style.theme_use("clam")
 
         style.configure("TFrame", background="#f8fafc")
         style.configure("Card.TFrame", background="#ffffff", relief="solid", borderwidth=1)
-        style.configure("TLabel", background="#f8fafc", font=("Meiryo UI", 9))
-        style.configure("Card.TLabel", background="#ffffff", font=("Meiryo UI", 9))
+        style.configure("TLabel", background="#f8fafc", foreground="#0f172a", font=("Meiryo UI", 9))
+        style.configure("Card.TLabel", background="#ffffff", foreground="#0f172a", font=("Meiryo UI", 9))
+        style.configure("TCheckbutton", background="#ffffff", foreground="#0f172a", font=("Meiryo UI", 9))
+        style.configure("TRadiobutton", background="#ffffff", foreground="#0f172a", font=("Meiryo UI", 9))
+        style.configure("TEntry", fieldbackground="#ffffff", foreground="#0f172a", insertcolor="#0f172a")
+        style.configure("TCombobox", fieldbackground="#ffffff", background="#f1f5f9", foreground="#0f172a")
+        style.map(
+            "TCombobox",
+            fieldbackground=[("readonly", "#ffffff")],
+            foreground=[("readonly", "#0f172a")],
+            selectbackground=[("readonly", "#ffffff")],
+            selectforeground=[("readonly", "#0f172a")],
+        )
         style.configure("Header.TLabel", background="#1e293b", foreground="#ffffff", font=("Meiryo UI", 13, "bold"))
         style.configure("SubHeader.TLabel", background="#1e293b", foreground="#cbd5e1", font=("Meiryo UI", 9))
 
@@ -636,12 +588,24 @@ class StockMatchApp:
 
         self.root.config(menu=menubar)
 
-        self.root.bind_all("<F1>", lambda _e: self._show_help_guide(tab_index=0))
-        self.root.bind_all("<F5>", lambda _e: self.run_analysis())
-        self.root.bind_all("<Escape>", lambda _e: self.cancel_active_task())
-        self.root.bind_all("<Control-o>", lambda _e: self._select_mgmt_file())
-        self.root.bind_all("<Control-d>", lambda _e: self._select_order_dir())
-        self.root.bind_all("<Control-s>", lambda _e: self._open_in_excel_direct())
+        def _bind_root_only(seq: str, handler):
+            def _guarded(event):
+                try:
+                    widget = getattr(event, "widget", None)
+                    if widget is not None and widget.winfo_toplevel() != self.root:
+                        return None
+                except Exception:
+                    return None
+                handler()
+                return "break"
+            self.root.bind_all(seq, _guarded)
+
+        _bind_root_only("<F1>", lambda: self._show_help_guide(tab_index=0))
+        _bind_root_only("<F5>", self.run_analysis)
+        _bind_root_only("<Escape>", self.cancel_active_task)
+        _bind_root_only("<Control-o>", self._select_mgmt_file)
+        _bind_root_only("<Control-d>", self._select_order_dir)
+        _bind_root_only("<Control-s>", self._open_in_excel_direct)
 
     def _build_ui(self):
         """メイン画面レイアウトの構築"""
@@ -651,7 +615,7 @@ class StockMatchApp:
         header_frame = tk.Frame(self.root, bg="#1e293b", height=56, padx=16, pady=10)
         header_frame.pack(fill=tk.X)
 
-        title_lbl = ttk.Label(header_frame, text="StockMatch_Miya-v1.5.0", style="Header.TLabel")
+        title_lbl = ttk.Label(header_frame, text=APP_NAME, style="Header.TLabel")
         title_lbl.pack(side=tk.LEFT)
 
         sub_lbl = ttk.Label(
@@ -1879,27 +1843,15 @@ class StockMatchApp:
     @classmethod
     def _resolve_initial_config_path(cls) -> str:
         """起動時に config.json の保存先をポインタファイル等から決定して返す"""
-        ptr_file = cls.CONFIG_POINTER_FILE_PATH
-        if os.path.isfile(ptr_file):
-            try:
-                with open(ptr_file, "r", encoding="utf-8") as f:
-                    custom_target = f.read().strip()
-                if custom_target:
-                    if os.path.isdir(custom_target):
-                        cand = os.path.join(custom_target, "config.json")
-                    elif custom_target.lower().endswith(".json"):
-                        cand = custom_target
-                    else:
-                        cand = os.path.join(custom_target, "config.json")
-                    cand_dir = os.path.dirname(cand)
-                    if os.path.isdir(cand_dir) or not os.path.exists(cand_dir):
-                        return os.path.abspath(cand)
-            except Exception:
-                pass
-        return os.path.abspath(cls.DEFAULT_CONFIG_FILE_PATH)
+        return ConfigManager(app_dir=cls.APP_DIR).get_active_config_path()
 
     def get_config_file_path(self) -> str:
         """現在アクティブな config.json の絶対パスを取得"""
+        if hasattr(self, "config_mgr"):
+            active_path = self.config_mgr.get_active_config_path()
+            if hasattr(self, "config_file_path") and self.config_file_path.get() != active_path:
+                self.config_file_path.set(active_path)
+            return active_path
         if hasattr(self, "config_file_path"):
             val = self.config_file_path.get().strip().strip('"')
             if val:
@@ -1932,100 +1884,37 @@ class StockMatchApp:
     # =========================================================================
     # 設定ファイル処理（注文書・管理表・Excelファイルへの書き込み完全禁止ガード）
     # =========================================================================
+    def _get_extra_forbidden_paths(self) -> list[str]:
+        mgmt_p = self.mgmt_file_path.get().strip().strip('"') if hasattr(self, "mgmt_file_path") else ""
+        return [mgmt_p] if mgmt_p else []
+
     def _is_strictly_allowed_path(self, target_filepath: str) -> bool:
         """
-        書き込み可能なパスを設定ファイル (config.json) およびポインタファイルに厳格制限する。
-        Excelファイル（.xlsx/.xlsm/.xls等）や注文書フォルダ配下、注文品管理表への書き込みは絶対拒否する。
+        書き込み可能なパスを設定ファイル (config.json) 等に厳格制限する。
+        Excelファイル（.xlsx/.xlsm/.xls等）や注文品管理表への書き込みは絶対拒否する。
         """
-        try:
-            if not target_filepath:
-                return False
-            norm_target = os.path.normcase(os.path.realpath(os.path.abspath(target_filepath)))
-            # Excel関連拡張子への書き込みはいかなる場合も絶対拒否
-            if norm_target.endswith((".xlsx", ".xlsm", ".xls", ".xlsb", ".xltx", ".xltm", ".csv")):
-                return False
-            # 注文品管理表ファイル自体への書き込みを絶対拒否
-            mgmt_p = self.mgmt_file_path.get().strip().strip('"') if hasattr(self, "mgmt_file_path") else ""
-            if mgmt_p:
-                norm_mgmt = os.path.normcase(os.path.realpath(os.path.abspath(mgmt_p)))
-                if norm_target == norm_mgmt:
-                    return False
-
-            allowed_norms = [
-                os.path.normcase(os.path.realpath(os.path.abspath(self.get_config_file_path()))),
-                os.path.normcase(os.path.realpath(os.path.abspath(self.DEFAULT_CONFIG_FILE_PATH))),
-                os.path.normcase(os.path.realpath(os.path.abspath(self.CONFIG_POINTER_FILE_PATH))),
-            ]
-            if norm_target in allowed_norms:
-                return True
-            # 新規保存先として指定された .json ファイルまたはポインタファイル
-            if norm_target.endswith(".json") or norm_target.endswith(".txt"):
-                return True
-            return False
-        except Exception:
-            return False
+        forbidden, _ = ConfigManager.is_forbidden_config_path(
+            target_filepath,
+            extra_forbidden_paths=self._get_extra_forbidden_paths(),
+        )
+        return not forbidden
 
     def _set_config_file_path(self, new_target: str, copy_existing: bool = True) -> bool:
         """config.json の保存先を指定されたパスに変更し、ポインタファイルに記録する"""
-        if not new_target:
+        ok, msg = self.config_mgr.set_config_file_path(
+            new_target,
+            copy_existing=copy_existing,
+            extra_forbidden_paths=self._get_extra_forbidden_paths(),
+        )
+        if not ok:
+            messagebox.showerror("エラー", msg)
             return False
-        clean = new_target.strip().strip('"')
-        if os.path.isdir(clean):
-            target_path = os.path.join(clean, "config.json")
-        elif clean.lower().endswith(".json"):
-            target_path = clean
-        else:
-            target_path = os.path.join(clean, "config.json")
-
-        target_abs = os.path.abspath(target_path)
-        old_path = self.get_config_file_path()
-
-        if target_abs.lower().endswith((".xlsx", ".xlsm", ".xls", ".csv")):
-            messagebox.showerror("エラー", "Excelファイルを設定ファイルの保存先として指定することはできません。")
-            return False
-
-        target_dir = os.path.dirname(target_abs)
-        try:
-            os.makedirs(target_dir, exist_ok=True)
-        except Exception as e:
-            messagebox.showerror("エラー", f"保存先フォルダを作成・確認できませんでした:\n{target_dir}\n\n({e})")
-            return False
-
-        # 既存設定のコピー
-        if copy_existing and old_path and os.path.isfile(old_path) and os.path.normcase(old_path) != os.path.normcase(target_abs):
-            if not os.path.isfile(target_abs):
-                try:
-                    import shutil
-                    shutil.copy2(old_path, target_abs)
-                except Exception:
-                    pass
-
-        # デフォルト保存先と同じならポインタファイルを削除、異なるなら記録
-        norm_target = os.path.normcase(target_abs)
-        norm_default = os.path.normcase(os.path.abspath(self.DEFAULT_CONFIG_FILE_PATH))
-
-        if norm_target == norm_default:
-            try:
-                if os.path.isfile(self.CONFIG_POINTER_FILE_PATH):
-                    os.remove(self.CONFIG_POINTER_FILE_PATH)
-            except Exception:
-                pass
-        else:
-            try:
-                with open(self.CONFIG_POINTER_FILE_PATH, "w", encoding="utf-8") as f:
-                    f.write(target_abs)
-            except Exception as e:
-                messagebox.showwarning(
-                    "保存先警告",
-                    f"保存先ポインタファイルへの記録に失敗しました:\n{e}\n次回起動時に反映されない可能性があります。"
-                )
-
-        self.config_file_path.set(target_abs)
+        self.config_file_path.set(self.config_mgr.get_active_config_path())
         return True
 
     def _reset_config_path_to_default(self, confirm: bool = True) -> bool:
         """ボタン一つで config.json の保存先をデフォルト（アプリと同じ場所）に戻す"""
-        default_path = os.path.abspath(self.DEFAULT_CONFIG_FILE_PATH)
+        default_path = self.config_mgr.get_default_config_path()
         curr_path = self.get_config_file_path()
         if os.path.normcase(curr_path) == os.path.normcase(default_path):
             if confirm:
@@ -2041,23 +1930,35 @@ class StockMatchApp:
             ):
                 return False
 
-        success = self._set_config_file_path(default_path, copy_existing=True)
-        if success:
-            self._load_config_and_autoload()
-            if confirm:
-                messagebox.showinfo(
-                    "設定完了",
-                    f"設定ファイル(config.json)の保存先をアプリと同じ場所に戻しました:\n{default_path}"
-                )
-        return success
+        ok, msg = self.config_mgr.reset_to_default(
+            copy_existing=True,
+            extra_forbidden_paths=self._get_extra_forbidden_paths(),
+        )
+        if not ok:
+            messagebox.showerror("エラー", msg)
+            return False
+
+        self.config_file_path.set(self.config_mgr.get_active_config_path())
+        self._load_config_and_autoload()
+        if confirm:
+            messagebox.showinfo(
+                "設定完了",
+                f"設定ファイル(config.json)の保存先をアプリと同じ場所に戻しました:\n{default_path}"
+            )
+        return True
 
     def _open_config_location_dialog(self):
         from modules.dialogs import open_config_location_dialog
+
+        def on_success(new_path: str, is_reset: bool = False):
+            self.config_file_path.set(new_path or self.config_mgr.get_active_config_path())
+            self._load_config_and_autoload()
+
         open_config_location_dialog(
             parent=self.root,
-            config_mgr=self,
+            config_mgr=self.config_mgr,
             icon_path=self._resolve_icon_path(),
-            on_success=lambda p: (self.config_file_path.set(p), self._load_config_and_autoload()),
+            on_success=on_success,
         )
     def _save_config(self, show_msg: bool = False):
         mgmt = self.mgmt_file_path.get().strip().strip('"')
@@ -2083,92 +1984,93 @@ class StockMatchApp:
         }
 
         target_file = self.get_config_file_path()
-
-        if not self._is_strictly_allowed_path(target_file):
-            err_msg = f"保存エラー: 許可されていない保存先への書き込み要求です。\n対象: {target_file}"
+        ok, err_msg = self.config_mgr.save_config(
+            data,
+            extra_forbidden_paths=self._get_extra_forbidden_paths(),
+        )
+        if not ok:
             if show_msg:
-                messagebox.showerror("保存エラー", err_msg)
+                messagebox.showerror("保存エラー", err_msg or f"設定ファイルへの保存に失敗しました:\n{target_file}")
             return
 
-        try:
-            target_dir = os.path.dirname(target_file)
-            if target_dir:
-                os.makedirs(target_dir, exist_ok=True)
+        # 設定保存と同時に一覧と件数サマリーの除外状態を同期
+        self._update_excluded_summary_badge()
+        self._update_kpis()
+        self._refresh_main_table()
+        self._refresh_missing_table()
 
-            with open(target_file, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-
-            # 設定保存と同時に一覧と件数サマリーの除外状態を同期
-            self._update_excluded_summary_badge()
-            self._update_kpis()
-            self._refresh_main_table()
-            self._refresh_missing_table()
-
-            if show_msg:
-                ex_info = (
-                    f"\n・除外管理No: {len(excluded_list)}件設定中"
-                    if excluded_list
-                    else "\n・除外管理No: 未設定"
-                )
-                months_info = (
-                    f"\n・経過月数による自動除外: 注文日から {exclude_months} ヶ月経過で除外"
-                    if exclude_months > 0
-                    else "\n・経過月数による自動除外: なし (0ヶ月)"
-                )
-                inst_label = self.INSTRUCTION_CODE_TO_LABEL.get(inst_filter_mode, inst_filter_mode)
-                inst_info = f"\n・管理表 指示書列(J列)フィルタ: {inst_label}"
-                messagebox.showinfo(
-                    "設定保存完了",
-                    f"設定を保存しました:\n{target_file}\n\n"
-                    f"・納期未記載時の超過基準: 注文日から {grace_days} 日経過"
-                    f"{months_info}{inst_info}{ex_info}",
-                )
-        except Exception as e:
-            if show_msg:
-                messagebox.showerror("保存エラー", f"設定ファイルへの保存に失敗しました:\n{e}")
+        if show_msg:
+            ex_info = (
+                f"\n・除外管理No: {len(excluded_list)}件設定中"
+                if excluded_list
+                else "\n・除外管理No: 未設定"
+            )
+            months_info = (
+                f"\n・経過月数による自動除外: 注文日から {exclude_months} ヶ月経過で除外"
+                if exclude_months > 0
+                else "\n・経過月数による自動除外: なし (0ヶ月)"
+            )
+            inst_label = self.INSTRUCTION_CODE_TO_LABEL.get(inst_filter_mode, inst_filter_mode)
+            inst_info = f"\n・管理表 指示書列(J列)フィルタ: {inst_label}"
+            messagebox.showinfo(
+                "設定保存完了",
+                f"設定を保存しました:\n{target_file}\n\n"
+                f"・納期未記載時の超過基準: 注文日から {grace_days} 日経過"
+                f"{months_info}{inst_info}{ex_info}",
+            )
 
     def _save_config_manual(self):
         self._save_config(show_msg=True)
 
     def _load_config_and_autoload(self):
-        cfg_path = self.get_config_file_path()
-        if os.path.exists(cfg_path) and self._is_strictly_allowed_path(cfg_path):
-            try:
-                with open(cfg_path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                mgmt = data.get("mgmt_file_path", "")
-                order = data.get("order_dir_path", "")
-                grace_days = data.get("blank_due_grace_days", 7)
-                exclude_months = data.get("exclude_after_months", 12)
-                inst_filter_mode = data.get("instruction_filter_mode", "HAS_ONLY")
-                excluded_nos = data.get("excluded_order_nos", "")
-                if mgmt and os.path.isfile(mgmt):
-                    self.mgmt_file_path.set(mgmt)
-                if order and os.path.isdir(order):
-                    self.order_dir_path.set(order)
-                if grace_days is not None:
-                    self.blank_due_grace_days.set(str(grace_days))
-                if exclude_months is not None:
-                    self.exclude_after_months.set(str(exclude_months))
-                if inst_filter_mode:
-                    self._set_instruction_filter_mode(str(inst_filter_mode))
-                if isinstance(excluded_nos, list):
-                    self.excluded_order_nos_str.set("\n".join(str(x) for x in excluded_nos))
-                elif excluded_nos:
-                    parsed = self._parse_lines_to_order_nos(str(excluded_nos))
-                    self.excluded_order_nos_str.set("\n".join(parsed))
+        data, cfg_path, load_err = self.config_mgr.load_config()
+        self.config_file_path.set(cfg_path)
 
-                visible_cols = data.get("visible_columns_main")
-                if isinstance(visible_cols, list) and visible_cols:
-                    all_cids = [cfg[0] for cfg in self.col_configs_main]
-                    valid_cols = [c for c in visible_cols if c in all_cids]
-                    if valid_cols and "project_name" in valid_cols:
-                        self.visible_columns_main = valid_cols
-                    else:
-                        self.visible_columns_main = list(self.DEFAULT_VISIBLE_COLUMNS_MAIN)
-                    self._apply_column_visibility_main()
-            except Exception:
-                pass
+        if data:
+            mgmt = str(data.get("mgmt_file_path", "") or "").strip()
+            order = str(data.get("order_dir_path", "") or "").strip()
+            grace_days = data.get("blank_due_grace_days", 7)
+            exclude_months = data.get("exclude_after_months", 12)
+            inst_filter_mode = data.get("instruction_filter_mode", "HAS_ONLY")
+            excluded_nos = data.get("excluded_order_nos", "")
+
+            if mgmt and os.path.isfile(mgmt):
+                self.mgmt_file_path.set(mgmt)
+            elif "mgmt_file_path" in data and not mgmt:
+                self.mgmt_file_path.set("")
+
+            if order and os.path.isdir(order):
+                self.order_dir_path.set(order)
+            elif "order_dir_path" in data and not order:
+                self.order_dir_path.set("")
+
+            if grace_days is not None:
+                self.blank_due_grace_days.set(str(grace_days))
+            if exclude_months is not None:
+                self.exclude_after_months.set(str(exclude_months))
+            if inst_filter_mode:
+                self._set_instruction_filter_mode(str(inst_filter_mode))
+
+            if isinstance(excluded_nos, list):
+                parsed = parse_lines_to_order_nos("\n".join(str(x) for x in excluded_nos))
+                self.excluded_order_nos_str.set("\n".join(parsed))
+            elif excluded_nos:
+                parsed = parse_lines_to_order_nos(str(excluded_nos))
+                self.excluded_order_nos_str.set("\n".join(parsed))
+            else:
+                self.excluded_order_nos_str.set("")
+
+            visible_cols = data.get("visible_columns_main")
+            if isinstance(visible_cols, list) and visible_cols:
+                all_cids = [cfg[0] for cfg in self.col_configs_main]
+                valid_cols = [c for c in visible_cols if c in all_cids]
+                if valid_cols:
+                    self.visible_columns_main = valid_cols
+                else:
+                    self.visible_columns_main = list(self.DEFAULT_VISIBLE_COLUMNS_MAIN)
+                self._apply_column_visibility_main()
+        elif load_err and hasattr(self, "status_var"):
+            self.status_var.set(f"設定ファイル読込警告 ({cfg_path}): {load_err}")
 
         self._update_excluded_summary_badge()
 
@@ -2217,21 +2119,63 @@ class StockMatchApp:
             raise AnalysisCancelledException("照合処理がユーザーによって中止されました。")
         self.ui_queue.put(("PROGRESS", (percent, message)))
 
-    def _collect_valid_order_files(self, order_dir: str, mgmt_file_path: str, valid_mgmt_order_nos: set, progress_cb=None):
+    def _collect_valid_order_files(
+        self,
+        order_dir: str,
+        mgmt_file_path: str,
+        valid_mgmt_order_nos: set,
+        progress_cb=None,
+        excluded_order_nos: set | None = None,
+    ):
         from modules.matcher import collect_valid_order_files
-        return collect_valid_order_files(order_dir, mgmt_file_path, valid_mgmt_order_nos, progress_cb=progress_cb, cancel_event=self.cancel_event)
+        return collect_valid_order_files(
+            order_dir,
+            mgmt_file_path,
+            valid_mgmt_order_nos,
+            progress_cb=progress_cb,
+            cancel_event=self.cancel_event,
+            order_cache=self._order_file_cache,
+            cache_lock=self._cache_lock,
+            excluded_order_nos=excluded_order_nos,
+        )
+
     @staticmethod
-    def _parse_flexible_date(date_val) -> datetime.date | None:
-        from modules.date_utils import parse_flexible_date
-        return parse_flexible_date(date_val)
+    def _parse_flexible_date(date_val, default_year=None, ref_month=None, allow_period=True) -> datetime.date | None:
+        return parse_flexible_date(
+            date_val,
+            default_year=default_year,
+            ref_month=ref_month,
+            allow_period=allow_period,
+        )
+
     def _parse_management_book(self, filepath: str, progress_cb=None):
         from modules.matcher import parse_management_book
-        return parse_management_book(filepath, progress_cb=progress_cb, cancel_event=self.cancel_event)
-    def _parse_order_book(self, filepath: str, filename: str, file_order_no_8: str = ""):
+        return parse_management_book(
+            filepath,
+            progress_cb=progress_cb,
+            cancel_event=self.cancel_event,
+            mgmt_cache_holder=self._mgmt_cache_holder,
+        )
+
+    def _parse_order_book(self, filepath: str, filename: str, file_order_no_8: str = "", valid_mgmt_order_nos=None):
         from modules.matcher import parse_order_book
-        return parse_order_book(filepath, filename, file_order_no_8, cancel_event=self.cancel_event)
+        return parse_order_book(
+            filepath,
+            filename,
+            file_order_no_8,
+            cancel_event=self.cancel_event,
+            valid_mgmt_order_nos=valid_mgmt_order_nos,
+        )
+
+    def _drain_ui_queue(self):
+        while not self.ui_queue.empty():
+            try:
+                self.ui_queue.get_nowait()
+            except queue.Empty:
+                break
+
     def run_analysis(self):
-        if self.is_running:
+        if self.is_running or self.is_excel_running:
             return
 
         mgmt_path = self.mgmt_file_path.get().strip().strip('"')
@@ -2244,11 +2188,12 @@ class StockMatchApp:
             messagebox.showerror("フォルダエラー", "有効な『注文書フォルダ』のパスを指定してください。")
             return
 
-        base_date = self._parse_flexible_date(self.base_date_str.get())
+        base_date = self._parse_flexible_date(self.base_date_str.get(), allow_period=False)
         if not base_date:
             messagebox.showerror("日付エラー", "判定基準日は YYYY-MM-DD 形式で入力してください。")
             return
 
+        self._drain_ui_queue()
         self.is_running = True
         self.cancel_event.clear()
         self.run_btn.configure(state=tk.DISABLED, text="照合処理中...")
@@ -2260,11 +2205,13 @@ class StockMatchApp:
         self.status_var.set("実行中: 注文品管理表と注文書フォルダを照合しています...")
 
         grace_days = self._get_grace_days()
+        excluded_nos = self._get_excluded_order_nos()
         worker = threading.Thread(
             target=self._analysis_worker,
-            args=(mgmt_path, order_dir, base_date, grace_days),
+            args=(mgmt_path, order_dir, base_date, grace_days, excluded_nos),
             daemon=True,
         )
+        self._analysis_thread = worker
         worker.start()
         self.root.after(40, self._poll_ui_queue)
 
@@ -2309,45 +2256,56 @@ class StockMatchApp:
         self.status_var.set("Excel展開処理の中止を要求しました。安全に中断しています...")
         self.progress_text_var.set("Excel処理を中止しています...")
 
-    def _analysis_worker(self, mgmt_path: str, order_dir: str, base_date: datetime.date, grace_days: int = 7):
+    def _analysis_worker(
+        self,
+        mgmt_path: str,
+        order_dir: str,
+        base_date: datetime.date,
+        grace_days: int = 7,
+        excluded_nos: set[str] | None = None,
+    ):
         try:
             self._report_progress(5.0, "[1/3] 注文品管理表を開いています...")
             mgmt_rows = self._parse_management_book(mgmt_path, progress_cb=self._report_progress)
             if self.cancel_event.is_set():
                 raise AnalysisCancelledException("照合処理がユーザーによって中止されました。")
 
-            excluded_nos = self._get_excluded_order_nos()
-            if excluded_nos:
+            excluded_set = excluded_nos if excluded_nos is not None else set()
+            if excluded_set:
                 # 除外指定された管理Noの行を管理表データから除外（タブ2の注文書未検出一覧からも除外される）
                 mgmt_rows = [
                     m
                     for m in mgmt_rows
-                    if not self._is_order_no_excluded(m.get("order_no_8") or m.get("order_no", ""), excluded_nos)
+                    if not self._is_order_no_excluded(m.get("order_no_8") or m.get("order_no", ""), excluded_set)
                 ]
 
             valid_mgmt_order_nos = set()
             for m in mgmt_rows:
                 no8 = m.get("order_no_8") or m.get("norm_order_no")
-                if no8 and not self._is_order_no_excluded(no8, excluded_nos):
+                if no8 and not self._is_order_no_excluded(no8, excluded_set):
                     valid_mgmt_order_nos.add(no8)
 
-            ex_msg = f" (除外指定: {len(excluded_nos)}件)" if excluded_nos else ""
+            ex_msg = f" (除外指定: {len(excluded_set)}件)" if excluded_set else ""
             self._report_progress(
                 35.0,
                 f"[2/3] 管理表にある管理No ({len(valid_mgmt_order_nos)}種類{ex_msg}) の注文書を探索中...",
             )
             order_items, valid_order_files, ignored_files = self._collect_valid_order_files(
-                order_dir, mgmt_path, valid_mgmt_order_nos, progress_cb=self._report_progress
+                order_dir,
+                mgmt_path,
+                valid_mgmt_order_nos,
+                progress_cb=self._report_progress,
+                excluded_order_nos=excluded_set,
             )
             if self.cancel_event.is_set():
                 raise AnalysisCancelledException("照合処理がユーザーによって中止されました。")
 
-            if excluded_nos:
+            if excluded_set:
                 # 抽出された注文書明細からも除外管理Noをフィルタリング（タブ1の照合一覧からも除外される）
                 order_items = [
                     o
                     for o in order_items
-                    if not self._is_order_no_excluded(o.get("order_no_8") or o.get("order_no", ""), excluded_nos)
+                    if not self._is_order_no_excluded(o.get("order_no_8") or o.get("order_no", ""), excluded_set)
                 ]
 
             self._report_progress(75.0, f"[3/3] 明細の双方向照合を実行中 ({len(order_items)} 件)...")
@@ -2378,6 +2336,73 @@ class StockMatchApp:
         except Exception as e:
             self.ui_queue.put(("ERROR", str(e)))
 
+    def _reset_analysis_ui_state(self):
+        """照合処理完了時・中止時・エラー時のUIコントロール状態を正常に復帰する"""
+        self.is_running = False
+        self.run_btn.configure(state=tk.NORMAL, text="▶ 照合・遅延チェック実行 (F5)")
+        self.cancel_btn.configure(state=tk.DISABLED, text="⏹ 中止 (Esc)")
+        self.excel_cancel_btn.configure(state=tk.DISABLED, text="⏹ 中止")
+        if self.analyzed_records or self.missing_order_records:
+            self.excel_open_btn.configure(state=tk.NORMAL)
+        else:
+            self.excel_open_btn.configure(state=tk.DISABLED)
+
+    def _finalize_analysis_message(self, msg_type: str, payload) -> bool:
+        """照合処理の終了系メッセージを処理する"""
+        if msg_type == "DONE":
+            self.analyzed_records = payload["main_records"]
+            self.missing_order_records = payload["missing_records"]
+            self.cached_mgmt_rows = payload.get("mgmt_rows", [])
+            base_date = payload["base_date"]
+            valid_order_files = payload["valid_order_files"]
+            mgmt_rows_count = payload["mgmt_rows_count"]
+            mgmt_no_count = payload.get("mgmt_no_count", 0)
+
+            self._reset_analysis_ui_state()
+
+            self.column_filters_main.clear()
+            self.column_filters_missing.clear()
+            self._update_all_headings_main()
+            self._update_all_headings_missing()
+
+            self._update_kpis()
+            self._refresh_main_table()
+            self._refresh_missing_table()
+
+            vis_main = self._get_visible_main_records()
+            vis_missing = self._get_visible_missing_records()
+            delay_cnt = sum(1 for r in vis_main if r["is_any_delay"])
+            unmatched_cnt = sum(1 for r in vis_main if r.get("is_unmatched"))
+            missing_cnt = len(vis_missing)
+            excluded_main_cnt = len(self.analyzed_records) - len(vis_main)
+            ex_note = f" (フィルタ除外:{excluded_main_cnt}件)" if excluded_main_cnt > 0 else ""
+
+            self.progress_var.set(100.0)
+            self.progress_text_var.set(
+                f"完了！ (注文書 {valid_order_files}ファイル / 管理表 {mgmt_rows_count}行・管理No {mgmt_no_count}種)"
+            )
+            self.status_var.set(
+                f"照合完了 (基準日: {base_date.strftime('%Y-%m-%d')}) — "
+                f"注文書明細: {len(vis_main)}件{ex_note} (超過:{delay_cnt}件 / 管理表未記載:{unmatched_cnt}件) ｜ "
+                f"【別タブ】注文書未検出(管理表のみ): {missing_cnt}件"
+            )
+            return True
+        if msg_type == "CANCELLED":
+            self._reset_analysis_ui_state()
+            self.progress_var.set(0.0)
+            self.progress_text_var.set("照合が中止されました")
+            self.status_var.set("ユーザーによって照合・遅延チェック処理が中止されました。")
+            messagebox.showinfo("処理中止", "照合・遅延チェック処理を中止しました。")
+            return True
+        if msg_type == "ERROR":
+            self._reset_analysis_ui_state()
+            self.progress_var.set(0.0)
+            self.progress_text_var.set("エラーが発生しました")
+            self.status_var.set(f"エラー: {payload}")
+            messagebox.showerror("解析エラー", f"処理中にエラーが発生しました:\n{payload}")
+            return True
+        return False
+
     def _poll_ui_queue(self):
         try:
             while True:
@@ -2387,80 +2412,34 @@ class StockMatchApp:
                     self.progress_var.set(pct)
                     self.progress_text_var.set(text)
                     self.status_var.set(f"実行中: {text}")
-                elif msg_type == "DONE":
-                    self.is_running = False
-                    self.run_btn.configure(state=tk.NORMAL, text="▶ 照合・遅延チェック実行 (F5)")
-                    self.cancel_btn.configure(state=tk.DISABLED, text="⏹ 中止 (Esc)")
-                    self.excel_cancel_btn.configure(state=tk.DISABLED, text="⏹ 中止")
-                    self.excel_open_btn.configure(state=tk.NORMAL)
-
-                    self.analyzed_records = payload["main_records"]
-                    self.missing_order_records = payload["missing_records"]
-                    self.cached_mgmt_rows = payload.get("mgmt_rows", [])
-                    base_date = payload["base_date"]
-                    valid_order_files = payload["valid_order_files"]
-                    mgmt_rows_count = payload["mgmt_rows_count"]
-                    mgmt_no_count = payload.get("mgmt_no_count", 0)
-
-                    self.column_filters_main.clear()
-                    self.column_filters_missing.clear()
-                    self._update_all_headings_main()
-                    self._update_all_headings_missing()
-
-                    self._update_kpis()
-                    self._refresh_main_table()
-                    self._refresh_missing_table()
-
-                    vis_main = self._get_visible_main_records()
-                    vis_missing = self._get_visible_missing_records()
-                    delay_cnt = sum(1 for r in vis_main if r["is_any_delay"])
-                    unmatched_cnt = sum(1 for r in vis_main if r.get("is_unmatched"))
-                    missing_cnt = len(vis_missing)
-                    excluded_main_cnt = len(self.analyzed_records) - len(vis_main)
-                    ex_note = f" (フィルタ除外:{excluded_main_cnt}件)" if excluded_main_cnt > 0 else ""
-
-                    self.progress_var.set(100.0)
-                    self.progress_text_var.set(
-                        f"完了！ (注文書 {valid_order_files}ファイル / 管理表 {mgmt_rows_count}行・管理No {mgmt_no_count}種)"
-                    )
-                    self.status_var.set(
-                        f"照合完了 (基準日: {base_date.strftime('%Y-%m-%d')}) — "
-                        f"注文書明細: {len(vis_main)}件{ex_note} (超過:{delay_cnt}件 / 管理表未記載:{unmatched_cnt}件) ｜ "
-                        f"【別タブ】注文書未検出(管理表のみ): {missing_cnt}件"
-                    )
+                elif self._finalize_analysis_message(msg_type, payload):
                     return
-                elif msg_type == "CANCELLED":
-                    self.is_running = False
-                    self.run_btn.configure(state=tk.NORMAL, text="▶ 照合・遅延チェック実行 (F5)")
-                    self.cancel_btn.configure(state=tk.DISABLED, text="⏹ 中止 (Esc)")
-                    self.excel_cancel_btn.configure(state=tk.DISABLED, text="⏹ 中止")
-                    if self.analyzed_records or self.missing_order_records:
-                        self.excel_open_btn.configure(state=tk.NORMAL)
-                    else:
-                        self.excel_open_btn.configure(state=tk.DISABLED)
-                    self.progress_var.set(0.0)
-                    self.progress_text_var.set("照合が中止されました")
-                    self.status_var.set("ユーザーによって照合・遅延チェック処理が中止されました。")
-                    messagebox.showinfo("処理中止", "照合・遅延チェック処理を中止しました。")
-                    return
-                elif msg_type == "ERROR":
-                    self.is_running = False
-                    self.run_btn.configure(state=tk.NORMAL, text="▶ 照合・遅延チェック実行 (F5)")
-                    self.cancel_btn.configure(state=tk.DISABLED, text="⏹ 中止 (Esc)")
-                    self.excel_cancel_btn.configure(state=tk.DISABLED, text="⏹ 中止")
-                    if self.analyzed_records or self.missing_order_records:
-                        self.excel_open_btn.configure(state=tk.NORMAL)
-                    else:
-                        self.excel_open_btn.configure(state=tk.DISABLED)
-                    self.progress_var.set(0.0)
-                    self.progress_text_var.set("エラーが発生しました")
-                    self.status_var.set(f"エラー: {payload}")
-                    messagebox.showerror("解析エラー", f"処理中にエラーが発生しました:\n{payload}")
-                    return
+                else:
+                    self.ui_queue.put((msg_type, payload))
+                    break
         except queue.Empty:
             pass
 
         if self.is_running:
+            th = getattr(self, "_analysis_thread", None)
+            if th is not None and not th.is_alive():
+                while True:
+                    try:
+                        m_type, p_load = self.ui_queue.get_nowait()
+                    except queue.Empty:
+                        break
+                    if m_type == "PROGRESS":
+                        pct, text = p_load
+                        self.progress_var.set(pct)
+                        self.progress_text_var.set(text)
+                    elif self._finalize_analysis_message(m_type, p_load):
+                        return
+                if self.cancel_event.is_set():
+                    self._finalize_analysis_message("CANCELLED", None)
+                else:
+                    self._finalize_analysis_message("ERROR", "解析スレッドが結果を返さず終了しました。")
+                return
+
             self.root.after(40, self._poll_ui_queue)
 
     def _score_candidate_pair(self, o_item: dict, m_row: dict) -> float:
@@ -2528,9 +2507,10 @@ class StockMatchApp:
         mode = self.filter_mode.get()
         kw = self.search_keyword.get().strip().lower()
         excluded_nos = self._get_excluded_order_nos()
-        base_date = self._parse_flexible_date(self.base_date_str.get()) or datetime.date.today()
+        base_date = self._parse_flexible_date(self.base_date_str.get(), allow_period=False) or datetime.date.today()
         exclude_months = self._get_exclude_months()
         inst_mode = self._get_instruction_filter_mode()
+        col_ids = [cfg[0] for cfg in self.col_configs_main]
 
         for idx, rec in enumerate(self.analyzed_records):
             if self._is_record_excluded(rec, excluded_nos, base_date, exclude_months, inst_mode):
@@ -2557,7 +2537,7 @@ class StockMatchApp:
 
             skip_by_col = False
             for col_id, allowed_values in self.column_filters_main.items():
-                val = str(rec.get(col_id, "") or "").strip()
+                val = get_record_display_value(rec, col_id).strip()
                 if not val:
                     val = "(空白)"
                 if val not in allowed_values:
@@ -2566,29 +2546,9 @@ class StockMatchApp:
             if skip_by_col:
                 continue
 
+            row_values = [get_record_display_value(rec, cid) for cid in col_ids]
             if kw:
-                searchable = " ".join(
-                    [
-                        rec["status_badge"],
-                        rec["mismatch_reason"],
-                        rec["due_date_str"],
-                        rec.get("project_name", ""),
-                        rec["order_no"],
-                        rec.get("ship_to", ""),
-                        rec.get("line_name", ""),
-                        rec.get("product_detail", ""),
-                        rec.get("prod_qty", ""),
-                        rec.get("drawing_no", ""),
-                        rec.get("part_no", ""),
-                        rec["item_name"],
-                        rec["maker"],
-                        rec.get("unit_qty", ""),
-                        rec.get("spec", ""),
-                        rec["supplier"],
-                        rec.get("stock_qty", ""),
-                        rec.get("order_date_str", "-"),
-                    ]
-                ).lower()
+                searchable = " ".join(row_values).lower()
                 if kw not in searchable:
                     continue
 
@@ -2596,26 +2556,7 @@ class StockMatchApp:
                 "",
                 tk.END,
                 iid=f"rec_{idx}",
-                values=(
-                    rec["status_badge"],
-                    rec["mismatch_reason"],
-                    rec["due_date_str"],
-                    rec.get("project_name", ""),
-                    rec["order_no"],
-                    rec.get("ship_to", ""),
-                    rec.get("line_name", ""),
-                    rec.get("product_detail", ""),
-                    rec.get("prod_qty", ""),
-                    rec.get("drawing_no", ""),
-                    rec.get("part_no", ""),
-                    rec["item_name"],
-                    rec["maker"],
-                    rec.get("unit_qty", ""),
-                    rec.get("spec", ""),
-                    rec["supplier"],
-                    rec.get("stock_qty", ""),
-                    rec.get("order_date_str", "-"),
-                ),
+                values=tuple(row_values),
                 tags=(rec["row_tag"],),
             )
 
@@ -2787,9 +2728,10 @@ class StockMatchApp:
 
         kw = self.missing_search_keyword.get().strip().lower()
         excluded_nos = self._get_excluded_order_nos()
-        base_date = self._parse_flexible_date(self.base_date_str.get()) or datetime.date.today()
+        base_date = self._parse_flexible_date(self.base_date_str.get(), allow_period=False) or datetime.date.today()
         exclude_months = self._get_exclude_months()
         inst_mode = self._get_instruction_filter_mode()
+        col_ids = [cfg[0] for cfg in self.col_configs_missing]
 
         for idx, rec in enumerate(self.missing_order_records):
             if self._is_record_excluded(rec, excluded_nos, base_date, exclude_months, inst_mode):
@@ -2797,7 +2739,7 @@ class StockMatchApp:
 
             skip_by_col = False
             for col_id, allowed_values in self.column_filters_missing.items():
-                val = str(rec.get(col_id, "") or "").strip()
+                val = get_record_display_value(rec, col_id).strip()
                 if not val:
                     val = "(空白)"
                 if val not in allowed_values:
@@ -2806,29 +2748,9 @@ class StockMatchApp:
             if skip_by_col:
                 continue
 
+            row_values = [get_record_display_value(rec, cid) for cid in col_ids]
             if kw:
-                searchable = " ".join(
-                    [
-                        rec["status_badge"],
-                        rec["mismatch_reason"],
-                        rec.get("due_date_str", rec.get("due_date", "-")),
-                        rec.get("project_name", ""),
-                        rec["order_no"],
-                        rec.get("ship_to", ""),
-                        rec.get("line_name", ""),
-                        rec.get("product_detail", ""),
-                        rec.get("prod_qty", ""),
-                        rec.get("drawing_no", ""),
-                        rec.get("part_no", ""),
-                        rec["item_name"],
-                        rec["maker"],
-                        rec.get("unit_qty", ""),
-                        rec.get("spec", ""),
-                        rec["supplier"],
-                        rec.get("stock_qty", ""),
-                        rec.get("order_date_str", "-"),
-                    ]
-                ).lower()
+                searchable = " ".join(row_values).lower()
                 if kw not in searchable:
                     continue
 
@@ -2836,26 +2758,7 @@ class StockMatchApp:
                 "",
                 tk.END,
                 iid=f"mis_{idx}",
-                values=(
-                    rec["status_badge"],
-                    rec["mismatch_reason"],
-                    rec.get("due_date_str", rec.get("due_date", "-")),
-                    rec.get("project_name", ""),
-                    rec["order_no"],
-                    rec.get("ship_to", ""),
-                    rec.get("line_name", ""),
-                    rec.get("product_detail", ""),
-                    rec.get("prod_qty", ""),
-                    rec.get("drawing_no", ""),
-                    rec.get("part_no", ""),
-                    rec["item_name"],
-                    rec["maker"],
-                    rec.get("unit_qty", ""),
-                    rec.get("spec", ""),
-                    rec["supplier"],
-                    rec.get("stock_qty", ""),
-                    rec.get("order_date_str", "-"),
-                ),
+                values=tuple(row_values),
                 tags=(rec["row_tag"],),
             )
 
@@ -2932,9 +2835,51 @@ class StockMatchApp:
         )
     @staticmethod
     def _sort_tree(tree: ttk.Treeview, col: str, reverse: bool):
-        items = [(tree.set(k, col), k) for k in tree.get_children("")]
-        items.sort(reverse=reverse)
-        for index, (_, k) in enumerate(items):
+        import re as _re
+
+        non_empty = []
+        empty = []
+        for k in tree.get_children(""):
+            raw = str(tree.set(k, col) or "").strip()
+            if not raw or raw in ("-", "(空白)"):
+                empty.append(k)
+            else:
+                non_empty.append((raw, k))
+
+        def _nat_parts(text: str):
+            norm = unicodedata.normalize("NFKC", text).lower()
+            parts = _re.split(r"(\d+(?:\.\d+)?)", norm)
+            out = []
+            for p in parts:
+                if not p:
+                    continue
+                if p[0].isdigit():
+                    try:
+                        out.append((0, float(p), ""))
+                        continue
+                    except ValueError:
+                        pass
+                out.append((1, 0.0, p))
+            return tuple(out)
+
+        def _sort_key(item):
+            val_str, _k = item
+            norm = unicodedata.normalize("NFKC", val_str).strip()
+            if col in ("due_date", "order_date") or _re.search(r"[/\-年月日]", norm):
+                dt = parse_flexible_date(norm, allow_period=False)
+                if dt is not None:
+                    return (0, float(dt.toordinal()), ())
+            num_cand = norm.replace(",", "")
+            if _re.fullmatch(r"[+-]?\d+(?:\.\d+)?", num_cand):
+                try:
+                    return (1, float(num_cand), ())
+                except ValueError:
+                    pass
+            return (2, 0.0, _nat_parts(val_str))
+
+        non_empty.sort(key=_sort_key, reverse=reverse)
+        ordered_keys = [k for _, k in non_empty] + empty
+        for index, k in enumerate(ordered_keys):
             tree.move(k, "", index)
 
     # =========================================================================
@@ -2942,11 +2887,14 @@ class StockMatchApp:
     # =========================================================================
     def _open_in_excel_direct(self):
         """Excelがインストールされている場合、一時ファイルを作成せず未保存の新規ブックに直接結果を展開する"""
-        if not self.analyzed_records and not self.missing_order_records:
-            messagebox.showinfo("データなし", "Excelに展開する照合結果がありません。先に「照合・遅延チェック実行」を実行してください。")
+        if self.is_running:
+            messagebox.showwarning("処理中", "現在照合・遅延チェックを実行中です。完了または中止をお待ちください。")
             return
         if self.is_excel_running:
             messagebox.showwarning("処理中", "現在Excelへの展開処理を実行中です。完了または中止をお待ちください。")
+            return
+        if not self.analyzed_records and not self.missing_order_records:
+            messagebox.showinfo("データなし", "Excelに展開する照合結果がありません。先に「照合・遅延チェック実行」を実行してください。")
             return
 
         from modules.excel_exporter import HAS_WIN32COM, export_to_excel_direct
@@ -2958,6 +2906,7 @@ class StockMatchApp:
             )
             return
 
+        self._drain_ui_queue()
         self.is_excel_running = True
         self.excel_cancel_event.clear()
         self.excel_open_btn.configure(state=tk.DISABLED, text="⏳ Excel展開中...")
@@ -2968,9 +2917,9 @@ class StockMatchApp:
         self.progress_text_var.set("Excelアプリケーションを起動中...")
 
         excluded_nos = self._get_excluded_order_nos()
-        base_date = self._parse_flexible_date(self.base_date_str.get()) or datetime.date.today()
+        base_date = self._parse_flexible_date(self.base_date_str.get(), allow_period=False) or datetime.date.today()
         exclude_months = self._get_exclude_months()
-        inst_mode = self.instruction_filter_mode.get()
+        inst_mode = self._get_instruction_filter_mode()
 
         def _worker():
             try:
@@ -3000,6 +2949,38 @@ class StockMatchApp:
         self._excel_thread.start()
         self.root.after(50, self._poll_excel_queue)
 
+    def _finalize_excel_result(self, msg_type: str, payload) -> bool:
+        """Excel直接展開の終了系メッセージを処理し、UI状態復帰と結果通知を行う"""
+        if msg_type in ("EXCEL_OPENED_SUCCESS", "EXCEL_DONE"):
+            self._reset_excel_ui_state()
+            self.progress_var.set(100.0)
+            self.progress_text_var.set("Excel展開完了！")
+            self.status_var.set("新規Excelブックに照合結果を展開しました（未保存の新規ブックとして開いています）。")
+            messagebox.showinfo(
+                "Excel起動完了",
+                "一時ファイルを作成せず、Excelの新規ブックとして直接展開しました。\n\n"
+                "・シート1: 納期超過・照合結果\n"
+                "・シート2: 注文書未検出(管理表のみ)\n"
+                "※アプリと同じ色分け・書式・オートフィルター・最適列幅が設定されています。\n"
+                "保存が必要な場合は、Excel側で「名前を付けて保存」を行ってください。",
+            )
+            return True
+        if msg_type in ("EXCEL_OPENED_CANCELLED", "CANCELLED"):
+            self._reset_excel_ui_state()
+            self.progress_var.set(0.0)
+            self.progress_text_var.set("Excel展開が中止されました")
+            self.status_var.set("ユーザーによってExcel直接展開処理が中止されました。")
+            messagebox.showinfo("処理中止", "Excel直接展開処理を中止しました。")
+            return True
+        if msg_type in ("EXCEL_OPENED_ERROR", "EXCEL_ERROR", "ERROR"):
+            self._reset_excel_ui_state()
+            self.progress_var.set(0.0)
+            self.progress_text_var.set("Excel展開エラー")
+            self.status_var.set(f"Excel展開エラー: {payload}")
+            messagebox.showerror("Excel展開エラー", f"Excelの起動またはデータ転送中にエラーが発生しました:\n{payload}")
+            return True
+        return False
+
     def _poll_excel_queue(self):
         try:
             while True:
@@ -3009,33 +2990,7 @@ class StockMatchApp:
                     self.progress_var.set(pct)
                     self.progress_text_var.set(text)
                     self.status_var.set(f"実行中: {text}")
-                elif msg_type in ("EXCEL_OPENED_SUCCESS", "EXCEL_DONE"):
-                    self._reset_excel_ui_state()
-                    self.progress_var.set(100.0)
-                    self.progress_text_var.set("Excel展開完了！")
-                    self.status_var.set("新規Excelブックに照合結果を展開しました（未保存の新規ブックとして開いています）。")
-                    messagebox.showinfo(
-                        "Excel起動完了",
-                        "一時ファイルを作成せず、Excelの新規ブックとして直接展開しました。\n\n"
-                        "・シート1: 納期超過・照合結果\n"
-                        "・シート2: 注文書未検出(管理表のみ)\n"
-                        "※アプリと同じ色分け・書式・オートフィルター・最適列幅が設定されています。\n"
-                        "保存が必要な場合は、Excel側で「名前を付けて保存」を行ってください。",
-                    )
-                    return
-                elif msg_type in ("EXCEL_OPENED_CANCELLED", "CANCELLED"):
-                    self._reset_excel_ui_state()
-                    self.progress_var.set(0.0)
-                    self.progress_text_var.set("Excel展開が中止されました")
-                    self.status_var.set("ユーザーによってExcel直接展開処理が中止されました。")
-                    messagebox.showinfo("処理中止", "Excel直接展開処理を中止しました。")
-                    return
-                elif msg_type in ("EXCEL_OPENED_ERROR", "EXCEL_ERROR", "ERROR"):
-                    self._reset_excel_ui_state()
-                    self.progress_var.set(0.0)
-                    self.progress_text_var.set("Excel展開エラー")
-                    self.status_var.set(f"Excel展開エラー: {payload}")
-                    messagebox.showerror("Excel展開エラー", f"Excelの起動またはデータ転送中にエラーが発生しました:\n{payload}")
+                elif self._finalize_excel_result(msg_type, payload):
                     return
                 else:
                     self.ui_queue.put((msg_type, payload))
@@ -3044,33 +2999,23 @@ class StockMatchApp:
             pass
 
         if self.is_excel_running:
-            # スレッド終了後の自己修復ガード
             th = getattr(self, "_excel_thread", None)
             if th is not None and not th.is_alive():
-                while not self.ui_queue.empty():
+                while True:
                     try:
                         m_type, p_load = self.ui_queue.get_nowait()
-                        if m_type in ("EXCEL_OPENED_SUCCESS", "EXCEL_DONE"):
-                            self._reset_excel_ui_state()
-                            self.progress_var.set(100.0)
-                            self.progress_text_var.set("Excel展開完了！")
-                            self.status_var.set("新規Excelブックに照合結果を展開しました。")
-                            return
-                        elif m_type in ("EXCEL_OPENED_CANCELLED", "CANCELLED"):
-                            self._reset_excel_ui_state()
-                            self.progress_var.set(0.0)
-                            self.progress_text_var.set("Excel展開が中止されました")
-                            return
-                        elif m_type in ("EXCEL_OPENED_ERROR", "EXCEL_ERROR"):
-                            self._reset_excel_ui_state()
-                            self.progress_var.set(0.0)
-                            self.progress_text_var.set("Excel展開エラー")
-                            return
                     except queue.Empty:
                         break
-                self._reset_excel_ui_state()
-                self.progress_var.set(100.0)
-                self.progress_text_var.set("Excel展開完了！")
+                    if m_type == "PROGRESS":
+                        pct, text = p_load
+                        self.progress_var.set(pct)
+                        self.progress_text_var.set(text)
+                    elif self._finalize_excel_result(m_type, p_load):
+                        return
+                if self.excel_cancel_event.is_set():
+                    self._finalize_excel_result("EXCEL_OPENED_CANCELLED", "中止されました")
+                else:
+                    self._finalize_excel_result("EXCEL_OPENED_ERROR", "Excel展開スレッドが結果を返さず終了しました。")
                 return
 
             self.root.after(50, self._poll_excel_queue)
@@ -3078,7 +3023,7 @@ class StockMatchApp:
 
 def main():
     try:
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("StockMatch.Miya.v1.5.0")
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_USER_MODEL_ID)
     except Exception:
         pass
 

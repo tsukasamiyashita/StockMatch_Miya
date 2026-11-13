@@ -189,9 +189,17 @@ def open_excel_read_only_at_location(
         except Exception:
             pass
 
+        already_unsaved_open = False
         if target_wb:
-            # すでに開かれていて読み取り専用モードでない場合、安全のため読み取り専用へ切り替え
-            if (not is_mgmt or read_only) and not target_wb.ReadOnly:
+            # すでに開かれている場合:
+            # 管理表でユーザーが未保存の変更を編集中なら上書き・破損を防ぐためモード強制切替を行わない
+            try:
+                is_saved = bool(target_wb.Saved)
+            except Exception:
+                is_saved = True
+            if is_mgmt and not target_wb.ReadOnly and not is_saved:
+                already_unsaved_open = True
+            elif (not is_mgmt or read_only) and not target_wb.ReadOnly:
                 try:
                     target_wb.ChangeFileAccess(Mode=3)  # xlReadOnly
                 except Exception:
@@ -266,24 +274,27 @@ def open_excel_read_only_at_location(
         if row_index and row_index >= 1:
             try:
                 scroll_row = max(1, row_index - 3)
-                excel.ActiveWindow.ScrollRow = scroll_row
+                if excel.ActiveWindow is not None:
+                    excel.ActiveWindow.ScrollRow = scroll_row
                 target_ws.Rows(row_index).Select()
             except Exception:
                 pass
 
-        # 閉じる際の「変更を保存しますか？」確認ポップアップを抑止（読み取り専用保護）
-        if read_only or not is_mgmt:
+        # 閉じる際の「変更を保存しますか？」確認ポップアップを抑止（未保存編集中を除く）
+        if not already_unsaved_open and (read_only or not is_mgmt):
             try:
                 target_wb.Saved = True
             except Exception:
                 pass
 
+        if already_unsaved_open:
+            return True, "すでに編集中の管理表ウィンドウへ移動しました（未保存の変更を保護しました）。"
         return True, "正常にExcel（読み取り専用保護）で開きました。"
     except Exception as e:
-        # COMオートメーションでエラーが発生した場合のフォールバック起動
+        # COMオートメーションでエラーが発生した場合のフォールバック起動（空タイトル "" 指定でスペース入りパス保護）
         try:
             import subprocess
-            subprocess.Popen(["cmd", "/c", "start", "excel.exe", "/r", abs_path], shell=True)
+            subprocess.Popen(["cmd", "/c", "start", "", "excel.exe", "/r", abs_path], shell=False)
             return True, "通常Excel（読み取り専用起動）で開きました。"
         except Exception:
             pass
@@ -302,8 +313,8 @@ def export_to_excel_direct(
     base_date: datetime.date,
     exclude_months: int,
     inst_mode: str,
-    cancel_event,
-    progress_queue,
+    cancel_event=None,
+    progress_queue=None,
 ) -> tuple[bool, str]:
     """
     一時ファイルを一切作成せず、Excel COMオートメーション経由で
@@ -312,11 +323,24 @@ def export_to_excel_direct(
     if not HAS_WIN32COM:
         return False, "win32com モジュールが未検出です。"
 
+    def _col_idx_to_letter(n: int) -> str:
+        s = ""
+        while n > 0:
+            n, rem = divmod(n - 1, 26)
+            s = chr(65 + rem) + s
+        return s
+
+    def _emit_progress(pct: float, msg: str):
+        if progress_queue is not None:
+            progress_queue.put(("PROGRESS", (pct, msg)))
+
     excel = None
     wb = None
+    excel_shown = False
+    is_dedicated_instance = False
     try:
         def _check_cancelled():
-            if cancel_event.is_set():
+            if cancel_event is not None and cancel_event.is_set():
                 if wb is not None:
                     try:
                         wb.Close(SaveChanges=False)
@@ -325,19 +349,23 @@ def export_to_excel_direct(
                 raise Exception("ユーザーによってExcel直接展開が中止されました。")
 
         pythoncom.CoInitialize()
-        progress_queue.put(("PROGRESS", (15.0, "Excelアプリケーションを起動中...")))
+        _emit_progress(15.0, "Excelアプリケーションを起動中...")
         _check_cancelled()
 
+        # 既存作業中のExcelウィンドウを非表示化・干渉しないよう独立インスタンスを優先起動
         try:
-            excel = win32com.client.GetActiveObject("Excel.Application")
+            excel = win32com.client.DispatchEx("Excel.Application")
+            is_dedicated_instance = True
         except Exception:
             excel = win32com.client.Dispatch("Excel.Application")
+            is_dedicated_instance = False
 
-        excel.Visible = False
+        if is_dedicated_instance:
+            excel.Visible = False
         excel.DisplayAlerts = False
         excel.ScreenUpdating = False
 
-        progress_queue.put(("PROGRESS", (25.0, "新規Excelブックを作成中...")))
+        _emit_progress(25.0, "新規Excelブックを作成中...")
         _check_cancelled()
 
         wb = excel.Workbooks.Add()
@@ -364,10 +392,41 @@ def export_to_excel_direct(
             if isinstance(v, dict)
         }
 
+        text_protected_cids = {
+            "order_no",
+            "drawing_no",
+            "part_no",
+            "spec",
+            "model_spec",
+            "qty",
+            "prod_qty",
+            "unit_qty",
+            "stock_qty",
+            "item_name",
+            "project_name",
+            "line_name",
+            "product_detail",
+            "ship_to",
+            "supplier",
+            "maker",
+        }
+
+        def _apply_text_format_to_cols(ws, col_configs, num_rows: int):
+            if num_rows <= 0:
+                return
+            for col_i, cfg in enumerate(col_configs, start=1):
+                cid = cfg[0]
+                if cid in text_protected_cids:
+                    col_ltr = _col_idx_to_letter(col_i)
+                    try:
+                        ws.Range(f"{col_ltr}2:{col_ltr}{num_rows + 1}").NumberFormat = "@"
+                    except Exception:
+                        pass
+
         # -------------------------------------------------------------
         # 1. シート1: 納期超過・照合結果
         # -------------------------------------------------------------
-        progress_queue.put(("PROGRESS", (45.0, "シート1 (納期超過・照合結果) にデータを転送中...")))
+        _emit_progress(45.0, "シート1 (納期超過・照合結果) にデータを転送中...")
         _check_cancelled()
 
         headers_main = [title for _, title, _, _ in COL_CONFIGS_MAIN]
@@ -382,8 +441,8 @@ def export_to_excel_direct(
             o_dt = r.get("order_date")
             if is_order_date_expired(o_dt, base_date, exclude_months):
                 return True
-            inst_raw = r.get("instruction_raw", "")
-            if not is_instruction_matched(inst_raw, inst_mode):
+            inst_val = r.get("instruction_state") or r.get("instruction_raw", "")
+            if not is_instruction_matched(inst_val, inst_mode):
                 return True
             return False
 
@@ -415,7 +474,7 @@ def export_to_excel_direct(
             tags_main.append(r["row_tag"])
 
         num_main_cols = len(headers_main)
-        last_col_letter_main = chr(64 + num_main_cols)
+        last_col_letter_main = _col_idx_to_letter(num_main_cols)
 
         # ヘッダー書き込み
         header_range_main = ws1.Range(f"A1:{last_col_letter_main}1")
@@ -430,6 +489,7 @@ def export_to_excel_direct(
 
         if rows_main_data:
             num_rows = len(rows_main_data)
+            _apply_text_format_to_cols(ws1, COL_CONFIGS_MAIN, num_rows)
             data_range = ws1.Range(f"A2:{last_col_letter_main}{num_rows + 1}")
             data_range.Value = rows_main_data
             data_range.Font.Name = "Meiryo UI"
@@ -450,15 +510,13 @@ def export_to_excel_direct(
                 total_range.Borders(border_id).Color = border_color
 
         format_excel_sheet_columns(ws1, COL_CONFIGS_MAIN)
-        ws1.Range("A2").Select()
-        excel.ActiveWindow.FreezePanes = True
         header_range_main.AutoFilter()
         configure_excel_page_setup(ws1, "納期超過・照合結果 一覧")
 
         # -------------------------------------------------------------
         # 2. シート2: 注文書未検出(管理表のみ)
         # -------------------------------------------------------------
-        progress_queue.put(("PROGRESS", (75.0, "シート2 (注文書未検出) にデータを転送中...")))
+        _emit_progress(75.0, "シート2 (注文書未検出) にデータを転送中...")
         _check_cancelled()
 
         headers_missing = [title for _, title, _, _ in COL_CONFIGS_MISSING]
@@ -491,7 +549,7 @@ def export_to_excel_direct(
             )
 
         num_missing_cols = len(headers_missing)
-        last_col_missing = chr(64 + num_missing_cols)
+        last_col_missing = _col_idx_to_letter(num_missing_cols)
 
         ws2.Activate()
         header_range_missing = ws2.Range(f"A1:{last_col_missing}1")
@@ -506,6 +564,7 @@ def export_to_excel_direct(
 
         if rows_missing_data:
             num_rows2 = len(rows_missing_data)
+            _apply_text_format_to_cols(ws2, COL_CONFIGS_MISSING, num_rows2)
             data_range2 = ws2.Range(f"A2:{last_col_missing}{num_rows2 + 1}")
             data_range2.Value = rows_missing_data
             data_range2.Font.Name = "Meiryo UI"
@@ -523,16 +582,27 @@ def export_to_excel_direct(
                 total_range2.Borders(border_id).Color = border_color
 
         format_excel_sheet_columns(ws2, COL_CONFIGS_MISSING)
-        ws2.Range("A2").Select()
-        excel.ActiveWindow.FreezePanes = True
         header_range_missing.AutoFilter()
         configure_excel_page_setup(ws2, "注文書未検出(管理表のみ) 一覧")
 
-        # シート1を選択状態にして表示
-        ws1.Activate()
+        # ウィンドウ枠の固定 (ActiveWindow が確実に存在するよう Visible 化してから適用)
+        excel.Visible = True
+        excel_shown = True
+        try:
+            wb.Activate()
+            ws2.Activate()
+            ws2.Range("A2").Select()
+            if excel.ActiveWindow is not None:
+                excel.ActiveWindow.FreezePanes = True
+            ws1.Activate()
+            ws1.Range("A2").Select()
+            if excel.ActiveWindow is not None:
+                excel.ActiveWindow.FreezePanes = True
+        except Exception:
+            pass
+
         excel.ScreenUpdating = True
         excel.DisplayAlerts = True
-        excel.Visible = True
 
         try:
             excel.WindowState = -4137  # xlMaximized
@@ -541,7 +611,7 @@ def export_to_excel_direct(
 
         return True, "正常にExcelへ直接展開しました。"
     except Exception as e:
-        if cancel_event.is_set():
+        if cancel_event is not None and cancel_event.is_set():
             return False, "処理が中止されました。"
         return False, str(e)
     finally:
@@ -549,6 +619,8 @@ def export_to_excel_direct(
             try:
                 excel.ScreenUpdating = True
                 excel.DisplayAlerts = True
+                if not excel_shown and is_dedicated_instance:
+                    excel.Quit()
             except Exception:
                 pass
         try:
